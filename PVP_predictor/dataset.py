@@ -1,8 +1,51 @@
 """
-Portal Vein Pressure Dataset
-=============================
-Loads geometric profile features, statistical features, and PVP labels.
-Handles missing branches and normalizes features.
+Portal Vein Pressure Dataset — v3 (selective, principled)
+==========================================================
+
+设计原则 (Design Principles)
+─────────────────────────────────────────────────────────────────
+1. **只输入"基本量",不输入"派生量"** —— Only feed the model fundamental
+   geometric quantities. Ratios, asymmetries, deviations, pre-computed
+   resistance integrals are all DROPPED from inputs (the model derives
+   them via the physics layer). They are kept in `extras_for_eval` for
+   sanity comparison after training.
+
+2. **逐点几何 + 必要的拓扑标量** —— The model receives:
+   • 4 per-point geometry channels: area, eq_diameter, curvature, inscribed_radius
+     (perimeter and circularity dropped: derivable from area+diameter under
+      circular assumption)
+   • 11 truly non-derivable patient-level scalars:
+       4 angles  + 1 planarity + 2 topology counts + 4 flags
+
+3. **NaN-aware resampling** —— Per-point validity mask preserves the
+   endpoint protection band from the JSON.
+
+4. **3D 拓扑保留** —— endpoints_3d and sv_smv_confluence_3d are kept
+   for STL/CFD overlay at inference time, NOT as model inputs.
+
+输入到模型的特征清单 (Inputs to Model)
+─────────────────────────────────────────────────────────────────
+Per patient:
+    profiles      (S=6, N=100, 4)   [area, eq_diameter, curvature, inscribed_radius]
+    profiles_norm (S, N, 4)         globally z-scored across the dataset
+    arc_lengths   (S, N)            in mm
+    point_valid   (S, N)            ∈ {0, 1}
+    segment_mask  (S,)              ∈ {0, 1} — which branches exist
+    aux_scalars   (11,)             see AUX_KEYS below
+    aux_mask      (11,)             missingness mask (1=present, 0=null)
+    endpoints_3d  (S, 2, 3)         mm — for visualization / junction physics
+    confluence_3d (3,)              SV-SMV physical confluence point
+    label         scalar (PVP)
+    label_norm    z-scored
+    is_post_tips  bool
+    extras_for_eval                 dict — JSON-precomputed quantities NOT used as
+                                    input, but available for post-training comparison
+
+Folder conventions
+─────────────────────────────────────────────────────────────────
+    20210909WuJinHeng    → pre-TIPS
+    20210921WuJinHeng#   → post-TIPS  (contains '#')
+    *@*  or  *!*         → invalid, skipped
 """
 
 import os
@@ -12,257 +55,503 @@ import torch
 from torch.utils.data import Dataset
 
 
-# ── Profile feature keys (per centerline point) ──────────────────────
-PROFILE_KEYS = ['area', 'perimeter', 'eq_diameter', 'circularity', 'curvature', 'inscribed_radius']
+# ── Branch order (model indexes branches by this order) ────────────────
+SEGMENTS = ['mpv', 'sv', 'smv', 'lpv', 'rpv', 'tips']
+N_SEGMENTS = len(SEGMENTS)
+SEG_INDEX = {n: i for i, n in enumerate(SEGMENTS)}
+
+# ── Topology of junctions (used by physics losses) ─────────────────────
+# Flow direction: children → parent
+#   SV + SMV     →  MPV       (confluence — 汇合)
+#   MPV          →  LPV + RPV (bifurcation — 分叉)
+#   MPV          →  TIPS      (shunt — 旁路, post-TIPS only)
+JUNCTIONS = {
+    'confluence':  {'parent': 'mpv', 'children': ['sv', 'smv']},
+    'bifurcation': {'parent': 'mpv', 'children': ['lpv', 'rpv', 'tips']},  # tips optional
+}
+
+# Flow-direction convention along the per-point arrays (proximal → distal):
+#   MPV : index 0 = sv/smv confluence end (proximal)
+#         index N-1 = lpv/rpv/tips bifurcation end (distal)
+#   SV  : index 0 = confluence end with MPV (distal w.r.t. flow)
+#   SMV : index 0 = confluence end with MPV (distal w.r.t. flow)
+#   LPV : index 0 = bifurcation end (proximal)
+#   RPV : index 0 = bifurcation end (proximal)
+#   TIPS: index 0 = MPV-side end (proximal)
+#
+# So for ALL branches, "endpoint index 0" = junction-side. This convention
+# makes junction physics simple: just sample idx=0.
+JUNCTION_END_IDX = 0  # all branches: idx 0 is the junction-attached endpoint
+
+
+# ── Per-point geometry channels (model input) ──────────────────────────
+PROFILE_KEYS = ['area', 'eq_diameter', 'curvature', 'inscribed_radius']
 N_PROFILE_FEAT = len(PROFILE_KEYS)
+# Index helpers (used by the model's PoiseuilleHydrodynamics layer)
+P_AREA = 0
+P_DIAM = 1
+P_CURV = 2
+P_INSC = 3
 
-# ── Branch names ─────────────────────────────────────────────────────
-BRANCHES = ['mpv', 'sv', 'smv']
-N_BRANCHES = len(BRANCHES)
 
-# ── 28 statistical feature keys (order matters for consistency) ──────
-STAT_KEYS = [
-    # Length (6)
-    'mpv_length', 'sv_length', 'smv_length', 'lpv_length', 'rpv_length',
-    'total_centerline_length',
-    # Tortuosity (5)
-    'mpv_tortuosity', 'sv_tortuosity', 'smv_tortuosity', 'lpv_tortuosity', 'rpv_tortuosity',
-    # Curvature (4)
-    'mpv_mean_curvature', 'sv_mean_curvature', 'smv_mean_curvature', 'mpv_max_curvature',
-    # Diameter (5)
-    'mpv_mean_diameter', 'mpv_max_diameter', 'sv_mean_diameter', 'smv_mean_diameter',
-    'sv_smv_diameter_ratio',
-    # Area (4)
-    'mpv_cross_section_area', 'sv_cross_section_area', 'smv_cross_section_area', 'mpv_area_cv',
-    # Circularity (3)
-    'mpv_mean_circularity', 'sv_mean_circularity', 'smv_mean_circularity',
-    # Angle (1)
-    'sv_smv_angle',
+# ── Auxiliary scalar features (model input) ────────────────────────────
+# Selection criteria:
+#   • Cannot be derived from per-point 1D profiles
+#   • Not a ratio, asymmetry, or deviation (model computes those)
+#   • Not a pre-computed resistance integral (physics layer computes that)
+#
+# 4 angles:        oriented branching geometry — pure 3D info, lost in 1D profiles
+# 1 planarity:     describes whether MPV bifurcation is planar (3D info)
+# 2 topo counts:   descriptive system-level statistics
+# 4 flags:         binary anatomy presence indicators
+AUX_KEYS = [
+    # angles (degrees)
+    'angle_sv_smv', 'angle_mpv_lpv', 'angle_mpv_rpv', 'angle_mpv_tips',
+    # planarity
+    'mpv_bifurc_planarity_deg',
+    # topology counts
+    'branchpoint_density_per_cm', 'n_collaterals_detected',
+    # flags (binary)
+    'has_lgv', 'has_pgv', 'has_compensation_vessel', 'has_tips',
 ]
-N_STAT_FEAT = len(STAT_KEYS)
+N_AUX = len(AUX_KEYS)  # 11
+AUX_FLAG_INDICES = [7, 8, 9, 10]  # indices of binary flags (don't normalize)
 
-# Default resample length for profiles
+# Helper: where to look up each AUX key in the JSON
+AUX_LOOKUP = {
+    'angle_sv_smv':                ('system', 'angle_sv_smv'),
+    'angle_mpv_lpv':               ('system', 'angle_mpv_lpv'),
+    'angle_mpv_rpv':               ('system', 'angle_mpv_rpv'),
+    'angle_mpv_tips':              ('system', 'angle_mpv_tips'),
+    'mpv_bifurc_planarity_deg':    ('system', 'mpv_bifurc_planarity_deg'),
+    'branchpoint_density_per_cm':  ('system', 'branchpoint_density_per_cm'),
+    'n_collaterals_detected':      ('system', 'n_collaterals_detected'),
+    'has_lgv':                     ('global', 'has_lgv'),
+    'has_pgv':                     ('global', 'has_pgv'),
+    'has_compensation_vessel':     ('global', 'has_compensation_vessel'),
+    'has_tips':                    ('global', 'has_tips'),
+}
+
+
+# ── Sentinel JSON keys kept for evaluation (NOT used as input) ─────────
+# After training, the model's derived resistances/Murray ratios can be
+# compared against these for sanity / interpretability checks.
+EVAL_SYSTEM_KEYS = [
+    'confluence_murray3_ratio', 'confluence_murray3_deviation',
+    'mpv_bifurc_murray3_ratio', 'mpv_bifurc_murray3_deviation',
+    'mpv_resistance_integral', 'sv_resistance_integral',
+    'smv_resistance_integral', 'lpv_resistance_integral',
+    'rpv_resistance_integral', 'tips_resistance_integral',
+    'inflow_parallel_resistance', 'inflow_resistance_asymmetry',
+    'tips_inflow_resistance_ratio',
+    'splenic_dominance_index', 'splenoportal_path_chord_ratio',
+    'collateral_burden_score', 'tree_area_conservation_mean_dev',
+]
+
+
 DEFAULT_N_POINTS = 100
 
 
+# =====================================================================
+# Helpers
+# =====================================================================
+def _safe_float(v, default=np.nan):
+    """Return float(v) if finite, else `default`. Distinguishes missing (nan) from zero."""
+    if v is None:
+        return default
+    try:
+        f = float(v)
+        return f if np.isfinite(f) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _resample_with_mask(arr_with_nan, n_target):
+    """
+    Resample 1D array preserving NaN-mask. Returns (values, valid_mask).
+
+    A resampled point is "valid" iff it lies within [first_valid, last_valid]
+    of the source array (i.e. inside the NaN-protection envelope).
+    """
+    arr = np.asarray(arr_with_nan, dtype=np.float64)
+    n_raw = len(arr)
+    if n_raw < 2:
+        return np.zeros(n_target, np.float32), np.zeros(n_target, np.float32)
+
+    valid_raw = np.isfinite(arr)
+    if valid_raw.sum() < 2:
+        return np.zeros(n_target, np.float32), np.zeros(n_target, np.float32)
+
+    xp_full = np.linspace(0.0, 1.0, n_raw)
+    x_new = np.linspace(0.0, 1.0, n_target)
+    xp_v = xp_full[valid_raw]
+
+    vals = np.interp(x_new, xp_v, arr[valid_raw]).astype(np.float32)
+    first_v, last_v = xp_v[0], xp_v[-1]
+    mask = ((x_new >= first_v) & (x_new <= last_v)).astype(np.float32)
+
+    return vals, mask
+
+
+def _resample(arr, n_target):
+    """Plain linear resample (no NaN-handling) — for arc_length only."""
+    arr = np.asarray(arr, dtype=np.float32)
+    if len(arr) == n_target:
+        return arr.copy()
+    if len(arr) < 2:
+        return np.zeros(n_target, np.float32)
+    xp = np.linspace(0, 1, len(arr))
+    x_new = np.linspace(0, 1, n_target)
+    return np.interp(x_new, xp, arr).astype(np.float32)
+
+
+# =====================================================================
+# Dataset
+# =====================================================================
 class PortalVeinDataset(Dataset):
-    """
-    Loads geometric profile features, statistical features, and PVP labels.
-    Handles missing branches and normalizes features.
-    
-    Parameters
-    ----------
-    root_dir : str
-        Root folder containing patient_xxx/ subfolders.
-    n_points : int
-        Resample profile length (default 100, matching extraction pipeline).
-    label_key : str
-        'PVP' or 'PCG'.
-    """
+    """Portal vein geometry + PVP labels, with selective inputs."""
 
     def __init__(self, root_dir: str, n_points: int = DEFAULT_N_POINTS,
-                 label_key: str = 'PVP'):
+                 label_key: str = 'PVP', verbose: bool = True):
         super().__init__()
         self.root_dir = root_dir
         self.n_points = n_points
         self.label_key = label_key
+        self.verbose = verbose
 
-        # ── Discover patients ────────────────────────────────────────
+        # ── Discover patients ───────────────────────────────────────
         self.patients = []
         for name in sorted(os.listdir(root_dir)):
             pdir = os.path.join(root_dir, name)
+            if '@' in name or '!' in name:
+                continue
+            if not os.path.isdir(pdir):
+                continue
             label_file = os.path.join(pdir, 'label', f'{label_key}.txt')
-            profile_file = os.path.join(pdir, 'centerline_profiles.json')
-            stat_file = os.path.join(pdir, 'portal_vein_features.json')
-            if os.path.isdir(pdir) and os.path.exists(label_file):
-                self.patients.append({
-                    'name': name,
-                    'dir': pdir,
-                    'label_file': label_file,
-                    'profile_file': profile_file,
-                    'stat_file': stat_file,
-                })
+            if not os.path.exists(label_file):
+                continue
+            self.patients.append({
+                'name': name,
+                'dir': pdir,
+                'label_file': label_file,
+                'unified_file': os.path.join(pdir, 'unified_features.json'),
+                'profile_file': os.path.join(pdir, 'centerline_profiles.json'),
+                'is_post_tips': '#' in name,
+            })
 
-        print(f"[Dataset] Found {len(self.patients)} patients with {label_key} labels.")
+        if verbose:
+            n_post = sum(p['is_post_tips'] for p in self.patients)
+            print(f"[Dataset] Discovered {len(self.patients)} patients "
+                  f"(post-TIPS: {n_post}, pre-TIPS: {len(self.patients) - n_post}).")
 
-        # ── Pre-load all data for normalization ──────────────────────
+        # ── Pre-load everything ─────────────────────────────────────
         self.data = []
         for p in self.patients:
             item = self._load_one(p)
-            if item is not None:
-                self.data.append(item)
+            if item is None:
+                continue
+            self.data.append(item)
 
-        print(f"[Dataset] Successfully loaded {len(self.data)} patients.")
+        if verbose:
+            n_with_tips = sum(d['segment_mask'][SEG_INDEX['tips']] for d in self.data)
+            n_with_lpvrpv = sum((d['segment_mask'][SEG_INDEX['lpv']] *
+                                 d['segment_mask'][SEG_INDEX['rpv']])
+                                for d in self.data)
+            print(f"[Dataset] Loaded {len(self.data)} valid patients "
+                  f"(tips_segment: {int(n_with_tips)}, "
+                  f"both lpv+rpv: {int(n_with_lpvrpv)}).")
 
-        # ── Compute normalization stats ──────────────────────────────
+        # ── Compute global normalization (over valid points only) ───
         self._compute_normalization()
 
-    def _load_one(self, p: dict) -> dict:
-        """Load and validate a single patient."""
+    # -----------------------------------------------------------------
+    # Loading
+    # -----------------------------------------------------------------
+    def _load_one(self, p):
         try:
-            # Label
             with open(p['label_file'], 'r') as f:
                 label = float(f.read().strip())
             if not np.isfinite(label):
-                print(f"[Dataset] Warning: {p['name']} has non-finite label, skipping.")
                 return None
 
-            # Statistical features
-            stat_vec = np.zeros(N_STAT_FEAT, dtype=np.float32)
-            if os.path.exists(p['stat_file']):
-                with open(p['stat_file'], 'r') as f:
-                    stat_json = json.load(f)
-                for i, key in enumerate(STAT_KEYS):
-                    val = stat_json.get(key, None)
-                    if val is not None:
-                        v = float(val)
-                        stat_vec[i] = v if np.isfinite(v) else 0.0
-                    else:
-                        stat_vec[i] = 0.0
+            unified = {}
+            if os.path.exists(p['unified_file']):
+                with open(p['unified_file'], 'r') as f:
+                    unified = json.load(f)
 
-            # Profile features: (n_branches, n_points, n_profile_feat)
-            profiles = np.zeros((N_BRANCHES, self.n_points, N_PROFILE_FEAT), dtype=np.float32)
-            branch_mask = np.zeros(N_BRANCHES, dtype=np.float32)  # 1 if branch exists
+            # Per-patient is_post_tips: trust both folder convention and JSON meta
+            meta = unified.get('_meta', {}) or {}
+            is_post_tips = bool(meta.get('is_post_tips', p['is_post_tips']))
 
-            # Arc lengths for physics computation: (n_branches, n_points)
-            arc_lengths = np.zeros((N_BRANCHES, self.n_points), dtype=np.float32)
+            # ── 11-dim aux vector with mask ────────────────────────
+            aux, aux_mask = self._load_aux(unified)
 
-            if os.path.exists(p['profile_file']):
+            # ── 3D topology (for viz, not input) ───────────────────
+            endpoints_3d = self._load_endpoints_3d(unified)
+            confluence_3d = self._load_confluence_3d(unified)
+
+            # ── Per-point profiles (with NaN-mask) ─────────────────
+            pw_src = unified.get('pointwise', {}) or {}
+            if not pw_src and os.path.exists(p['profile_file']):
                 with open(p['profile_file'], 'r') as f:
-                    prof_json = json.load(f)
+                    pw_src = json.load(f)
 
-                for bi, bname in enumerate(BRANCHES):
-                    branch_data = prof_json.get(bname, None)
-                    if branch_data is None:
-                        continue
+            profiles, point_valid, arc_lengths, segment_mask = \
+                self._load_pointwise(pw_src)
 
-                    # Check we have actual data
-                    area = branch_data.get('area', None)
-                    if area is None or len(area) < 5:
-                        continue
-
-                    branch_mask[bi] = 1.0
-                    n_raw = len(area)
-
-                    for fi, fkey in enumerate(PROFILE_KEYS):
-                        raw = np.array(branch_data.get(fkey, [0.0] * n_raw), dtype=np.float32)
-                        # NaN / Inf → 0
-                        raw = np.where(np.isfinite(raw), raw, 0.0)
-                        # Resample to n_points if needed
-                        if len(raw) != self.n_points:
-                            xp = np.linspace(0, 1, len(raw))
-                            x_new = np.linspace(0, 1, self.n_points)
-                            raw = np.interp(x_new, xp, raw)
-                        # Final NaN guard after interp
-                        raw = np.where(np.isfinite(raw), raw, 0.0)
-                        profiles[bi, :, fi] = raw
-
-                    # Arc length
-                    arc_raw = np.array(
-                        branch_data.get('arc_length_mm', np.linspace(0, 1, n_raw)),
-                        dtype=np.float32
-                    )
-                    arc_raw = np.where(np.isfinite(arc_raw), arc_raw, 0.0)
-                    if len(arc_raw) != self.n_points:
-                        xp = np.linspace(0, 1, len(arc_raw))
-                        x_new = np.linspace(0, 1, self.n_points)
-                        arc_raw = np.interp(x_new, xp, arc_raw)
-                    arc_raw = np.where(np.isfinite(arc_raw), arc_raw, 0.0)
-                    arc_lengths[bi] = arc_raw
-
-            # ── Final NaN/Inf guard on all arrays ────────────────────
-            stat_vec = np.where(np.isfinite(stat_vec), stat_vec, 0.0).astype(np.float32)
-            profiles = np.where(np.isfinite(profiles), profiles, 0.0).astype(np.float32)
-            arc_lengths = np.where(np.isfinite(arc_lengths), arc_lengths, 0.0).astype(np.float32)
+            # ── Optional: JSON-precomputed quantities for evaluation ──
+            extras_for_eval = self._load_extras(unified)
 
             return {
                 'name': p['name'],
-                'profiles': profiles,           # (3, N, 6)
-                'arc_lengths': arc_lengths,      # (3, N)
-                'branch_mask': branch_mask,      # (3,)
-                'stat_features': stat_vec,       # (28,)
-                'label': np.float32(label),
+                'profiles':     profiles,        # (S, N, 4)
+                'point_valid':  point_valid,     # (S, N)
+                'arc_lengths':  arc_lengths,     # (S, N) mm
+                'segment_mask': segment_mask,    # (S,)
+                'aux_scalars':  aux,             # (11,)
+                'aux_mask':     aux_mask,        # (11,)
+                'endpoints_3d':  endpoints_3d,   # (S, 2, 3) mm
+                'confluence_3d': confluence_3d,  # (3,) mm
+                'label':         np.float32(label),
+                'is_post_tips':  is_post_tips,
+                'extras_for_eval': extras_for_eval,
             }
-
         except Exception as e:
-            print(f"[Dataset] Warning: failed to load {p['name']}: {e}")
+            if self.verbose:
+                print(f"[Dataset] failed to load {p['name']}: {e}")
             return None
 
+    def _load_aux(self, unified):
+        out = np.zeros(N_AUX, dtype=np.float32)
+        mask = np.zeros(N_AUX, dtype=np.float32)
+        for i, key in enumerate(AUX_KEYS):
+            section, jkey = AUX_LOOKUP[key]
+            sec = unified.get(section, {}) or {}
+            v = _safe_float(sec.get(jkey, None), np.nan)
+            if np.isfinite(v):
+                # For flags, force to 0/1
+                if i in AUX_FLAG_INDICES:
+                    out[i] = 1.0 if v > 0.5 else 0.0
+                else:
+                    out[i] = float(v)
+                mask[i] = 1.0
+            else:
+                out[i] = 0.0
+                mask[i] = 0.0
+        return out, mask
+
+    def _load_endpoints_3d(self, unified):
+        out = np.zeros((N_SEGMENTS, 2, 3), dtype=np.float32)
+        seg_meta = unified.get('segments_meta', {}) or {}
+        for si, sname in enumerate(SEGMENTS):
+            sm = seg_meta.get(sname, None) or {}
+            ep = sm.get('endpoints_coord', None)
+            if ep is not None and len(ep) == 2:
+                out[si] = np.asarray(ep, dtype=np.float32)
+        return out
+
+    def _load_confluence_3d(self, unified):
+        sva = unified.get('sv_smv_angle', {}) or {}
+        cp = sva.get('confluence_point_physical', None) if sva else None
+        if cp is not None:
+            return np.asarray(cp, dtype=np.float32)
+        return np.zeros(3, dtype=np.float32)
+
+    def _load_pointwise(self, pw_json):
+        """
+        Returns:
+            profiles     (S, N, 4)
+            point_valid  (S, N)
+            arc_lengths  (S, N) — in mm
+            segment_mask (S,)
+        """
+        S, N = N_SEGMENTS, self.n_points
+        profiles    = np.zeros((S, N, N_PROFILE_FEAT), dtype=np.float32)
+        point_valid = np.zeros((S, N), dtype=np.float32)
+        arc_lengths = np.zeros((S, N), dtype=np.float32)
+        seg_mask    = np.zeros(S, dtype=np.float32)
+
+        for si, sname in enumerate(SEGMENTS):
+            seg_data = pw_json.get(sname, None)
+            if not seg_data:
+                continue
+            area_arr = seg_data.get('area', None)
+            if area_arr is None or len(area_arr) < 5:
+                continue
+
+            seg_mask[si] = 1.0
+
+            # Resample arc_length, use as ground truth s(p)
+            arc_raw = seg_data.get('arc_length_mm', None)
+            if arc_raw is None or len(arc_raw) < 2:
+                # synthesize uniform arc
+                arc_lengths[si] = np.linspace(0, 1, N).astype(np.float32)
+            else:
+                arc_lengths[si] = _resample(arc_raw, N)
+
+            # Resample each profile feature with NaN mask
+            per_pt_valid = np.ones(N, dtype=np.float32)
+            for fi, fkey in enumerate(PROFILE_KEYS):
+                raw = seg_data.get(fkey, None)
+                if raw is None:
+                    profiles[si, :, fi] = 0.0
+                    continue
+                vals, mask = _resample_with_mask(raw, N)
+                profiles[si, :, fi] = vals
+                per_pt_valid = per_pt_valid * mask
+
+            point_valid[si] = per_pt_valid
+
+        return profiles, point_valid, arc_lengths, seg_mask
+
+    def _load_extras(self, unified):
+        """JSON-precomputed quantities for post-training evaluation only."""
+        out = {}
+        sysd = unified.get('system', {}) or {}
+        for k in EVAL_SYSTEM_KEYS:
+            out[k] = _safe_float(sysd.get(k, None), np.nan)
+        return out
+
+    # -----------------------------------------------------------------
+    # Normalization (mask-aware)
+    # -----------------------------------------------------------------
     def _compute_normalization(self):
-        """Compute per-feature mean/std for profiles and statistics."""
-        if len(self.data) == 0:
-            return
+        # Per-channel statistics over valid points across the entire dataset
+        per_channel_vals = [[] for _ in range(N_PROFILE_FEAT)]
+        for d in self.data:
+            valid_mask = d['point_valid'] * d['segment_mask'][:, None]  # (S,N)
+            for fi in range(N_PROFILE_FEAT):
+                v = d['profiles'][:, :, fi][valid_mask > 0]
+                if len(v):
+                    per_channel_vals[fi].append(v)
 
-        # ── Profile normalization (per branch, per feature) ──────────
-        # Shape: (n_samples, 3, N, 6)
-        all_profiles = np.stack([d['profiles'] for d in self.data])
-        all_masks = np.stack([d['branch_mask'] for d in self.data])  # (n_samples, 3)
+        means = np.zeros(N_PROFILE_FEAT, dtype=np.float32)
+        stds  = np.ones(N_PROFILE_FEAT,  dtype=np.float32)
+        for fi in range(N_PROFILE_FEAT):
+            if per_channel_vals[fi]:
+                arr = np.concatenate(per_channel_vals[fi])
+                means[fi] = arr.mean()
+                s = arr.std()
+                stds[fi] = max(s, 1e-6)
+        self.profile_mean = means
+        self.profile_std  = stds
 
-        self.profile_mean = np.zeros((N_BRANCHES, 1, N_PROFILE_FEAT), dtype=np.float32)
-        self.profile_std = np.ones((N_BRANCHES, 1, N_PROFILE_FEAT), dtype=np.float32)
+        # Aux scalar normalization (only over present samples; flags untouched)
+        aux_vals = []
+        aux_pres = []
+        for d in self.data:
+            aux_vals.append(d['aux_scalars'])
+            aux_pres.append(d['aux_mask'])
+        aux_vals = np.stack(aux_vals)  # (P, 11)
+        aux_pres = np.stack(aux_pres)
+        aux_mean = np.zeros(N_AUX, dtype=np.float32)
+        aux_std  = np.ones(N_AUX,  dtype=np.float32)
+        for i in range(N_AUX):
+            if i in AUX_FLAG_INDICES:
+                aux_mean[i] = 0.0
+                aux_std[i]  = 1.0
+            else:
+                vals = aux_vals[:, i][aux_pres[:, i] > 0]
+                if len(vals) >= 2:
+                    aux_mean[i] = vals.mean()
+                    aux_std[i]  = max(vals.std(), 1e-6)
+        self.aux_mean = aux_mean
+        self.aux_std  = aux_std
 
-        for bi in range(N_BRANCHES):
-            valid_idx = all_masks[:, bi] > 0
-            if valid_idx.sum() > 1:
-                branch_data = all_profiles[valid_idx, bi]  # (n_valid, N, 6)
-                self.profile_mean[bi, 0] = branch_data.mean(axis=(0, 1))
-                self.profile_std[bi, 0] = branch_data.std(axis=(0, 1)) + 1e-8
+        # Label statistics
+        labels = np.array([d['label'] for d in self.data], dtype=np.float32)
+        self.label_mean = float(labels.mean())
+        self.label_std  = float(max(labels.std(), 1e-6))
 
-        # ── Arc length normalization ─────────────────────────────────
-        all_arcs = np.stack([d['arc_lengths'] for d in self.data])
-        self.arc_mean = np.zeros((N_BRANCHES, 1), dtype=np.float32)
-        self.arc_std = np.ones((N_BRANCHES, 1), dtype=np.float32)
+        if self.verbose:
+            print(f"[Dataset] Profile means: {self.profile_mean}")
+            print(f"[Dataset] Profile stds : {self.profile_std}")
+            print(f"[Dataset] Label mean/std: {self.label_mean:.3f} / {self.label_std:.3f}")
 
-        for bi in range(N_BRANCHES):
-            valid_idx = all_masks[:, bi] > 0
-            if valid_idx.sum() > 1:
-                arc_data = all_arcs[valid_idx, bi]
-                self.arc_mean[bi, 0] = arc_data.mean()
-                self.arc_std[bi, 0] = arc_data.std() + 1e-8
-
-        # ── Stat feature normalization ───────────────────────────────
-        all_stats = np.stack([d['stat_features'] for d in self.data])
-        self.stat_mean = all_stats.mean(axis=0)
-        self.stat_std = all_stats.std(axis=0) + 1e-8
-
-        # ── Label normalization (for regression) ─────────────────────
-        all_labels = np.array([d['label'] for d in self.data])
-        self.label_mean = float(all_labels.mean())
-        self.label_std = float(all_labels.std()) + 1e-8
-
+    # -----------------------------------------------------------------
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         d = self.data[idx]
+        profiles = d['profiles']                   # (S, N, 4)
+        point_valid = d['point_valid'][..., None]  # (S, N, 1)
+        # Normalize, mask-aware (set invalid points to 0 after norm)
+        profiles_norm = (profiles - self.profile_mean) / self.profile_std
+        profiles_norm = profiles_norm * point_valid
 
-        # Normalize profiles (keep raw for physics layer, normalize for learning)
-        profiles_raw = torch.from_numpy(d['profiles'].copy())          # (3, N, 6)
-        profiles_norm = (profiles_raw - torch.from_numpy(self.profile_mean)) / \
-                        torch.from_numpy(self.profile_std)
-        profiles_norm = torch.nan_to_num(profiles_norm, nan=0.0, posinf=0.0, neginf=0.0)
+        # Normalize aux (skip flags)
+        aux = d['aux_scalars'].copy()
+        aux_norm = (aux - self.aux_mean) / self.aux_std
 
-        arc_lengths = torch.from_numpy(d['arc_lengths'].copy())         # (3, N)
-        branch_mask = torch.from_numpy(d['branch_mask'].copy())         # (3,)
-
-        # Normalize stat features
-        stat_raw = torch.from_numpy(d['stat_features'].copy())
-        stat_norm = (stat_raw - torch.from_numpy(self.stat_mean)) / \
-                    torch.from_numpy(self.stat_std)
-        stat_norm = torch.nan_to_num(stat_norm, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Normalize label (for regression loss)
-        label_raw = torch.tensor(d['label'], dtype=torch.float32)
-        label_norm = (label_raw - torch.tensor(self.label_mean, dtype=torch.float32)) / \
-                     torch.tensor(self.label_std, dtype=torch.float32)
+        label_norm = (float(d['label']) - self.label_mean) / self.label_std
 
         return {
-            'profiles_raw': profiles_raw,      # (3, N, 6)
-            'profiles_norm': profiles_norm,    # (3, N, 6)
-            'arc_lengths': arc_lengths,         # (3, N)
-            'branch_mask': branch_mask,         # (3,)
-            'stat_features': stat_norm,         # (28,)
-            'label': label_norm,                # scalar
-            'label_raw': label_raw,             # scalar (unnormalized, for analysis)
-            'patient_name': d['name'],
+            'name':            d['name'],
+            'profiles':        torch.from_numpy(profiles).float(),
+            'profiles_norm':   torch.from_numpy(profiles_norm).float(),
+            'arc_lengths':     torch.from_numpy(d['arc_lengths']).float(),
+            'point_valid':     torch.from_numpy(d['point_valid']).float(),
+            'segment_mask':    torch.from_numpy(d['segment_mask']).float(),
+            'aux_scalars':     torch.from_numpy(aux).float(),
+            'aux_norm':        torch.from_numpy(aux_norm).float(),
+            'aux_mask':        torch.from_numpy(d['aux_mask']).float(),
+            'endpoints_3d':    torch.from_numpy(d['endpoints_3d']).float(),
+            'confluence_3d':   torch.from_numpy(d['confluence_3d']).float(),
+            'is_post_tips':    torch.tensor(float(d['is_post_tips'])),
+            'label':           torch.tensor(float(d['label'])).float(),
+            'label_norm':      torch.tensor(float(label_norm)).float(),
+            # Returned untouched for post-training evaluation
+            'extras_for_eval': d['extras_for_eval'],
         }
+
+
+# =====================================================================
+# Collate (handles per-sample dict batches; numpy "extras_for_eval"
+# stays as a list, not stacked)
+# =====================================================================
+def collate_fn(items):
+    """Batch a list of dicts from PortalVeinDataset.__getitem__."""
+    # Tensor keys to stack
+    tensor_keys = ['profiles', 'profiles_norm', 'arc_lengths', 'point_valid',
+                   'segment_mask', 'aux_scalars', 'aux_norm', 'aux_mask',
+                   'endpoints_3d', 'confluence_3d', 'is_post_tips',
+                   'label', 'label_norm']
+    out = {}
+    for k in tensor_keys:
+        out[k] = torch.stack([it[k] for it in items], dim=0)
+    out['name'] = [it['name'] for it in items]
+    out['extras_for_eval'] = [it['extras_for_eval'] for it in items]
+    return out
+
+
+# =====================================================================
+# Quick sanity test
+# =====================================================================
+if __name__ == '__main__':
+    import sys
+    root = sys.argv[1] if len(sys.argv) > 1 else '/tmp/pvp_test'
+    ds = PortalVeinDataset(root, n_points=100, verbose=True)
+    print(f"\nDataset size: {len(ds)}")
+    if len(ds) == 0:
+        print("Empty dataset — nothing to inspect.")
+        sys.exit(0)
+    s = ds[0]
+    for k, v in s.items():
+        if isinstance(v, torch.Tensor):
+            print(f"  {k:>16s}: shape={tuple(v.shape)}, dtype={v.dtype}")
+        elif isinstance(v, dict):
+            present = sum(1 for vv in v.values() if np.isfinite(vv))
+            print(f"  {k:>16s}: dict, {present}/{len(v)} present")
+        else:
+            print(f"  {k:>16s}: {v}")
+
+    from torch.utils.data import DataLoader
+    loader = DataLoader(ds, batch_size=2, shuffle=False, collate_fn=collate_fn)
+    batch = next(iter(loader))
+    print("\nBatch shapes:")
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            print(f"  {k:>16s}: {tuple(v.shape)}")
+        else:
+            print(f"  {k:>16s}: {type(v).__name__} (len {len(v)})")
