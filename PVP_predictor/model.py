@@ -359,12 +359,29 @@ class FlowRateEstimator(nn.Module):
         """target_logit_i = 3 · log(d_i),  so softmax → d_i³ / Σ d_j³"""
         return 3.0 * torch.log(diameters_mm.clamp(min=eps))
 
-    def forward(self, branch_embeds, aux_norm, segment_mask, junction_diameters):
+    @staticmethod
+    def _masked_center(logits, mask):
+        present = (mask > 0.5).float()
+        denom = present.sum(dim=-1, keepdim=True).clamp(min=1.0)
+        mean = (logits * present).sum(dim=-1, keepdim=True) / denom
+        return (logits - mean).clamp(min=-6.0, max=6.0)
+
+    @classmethod
+    def _conductance_logits(cls, branch_resistance, branch_indices, mask):
+        if branch_resistance is None:
+            return torch.zeros_like(mask)
+        r = branch_resistance[:, branch_indices].clamp(min=1e-6)
+        logits = -torch.log(r)
+        return cls._masked_center(logits, mask)
+
+    def forward(self, branch_embeds, aux_norm, segment_mask, junction_diameters,
+                branch_resistance=None):
         """
         branch_embeds       : (B, S, H)  per-segment embedding (zero where missing)
         aux_norm            : (B, A)
         segment_mask        : (B, S)
         junction_diameters  : (B, S)  diameter at each segment's junction-facing endpoint, mm
+        branch_resistance   : optional (B, S) geometry-only resistance proxy
 
         Returns Q_per_branch: (B, S) and per-junction split logits/deltas.
         """
@@ -421,7 +438,11 @@ class FlowRateEstimator(nn.Module):
             segment_mask[:, i_lgv],
             segment_mask[:, i_pgv],
         ], dim=-1)
-        logits_co = prior_co + conf_outflow_delta
+        conduct_co = self._conductance_logits(
+            branch_resistance, [i_mpv, i_lgv, i_pgv], mask_co
+        )
+        conduct_w_co = torch.tensor([0.5, 1.5, 1.5], device=device).view(1, 3)
+        logits_co = prior_co + conduct_w_co * conduct_co + conf_outflow_delta
         logits_co = logits_co.masked_fill(mask_co < 0.5, float('-1e9'))
         conf_outflow_frac = F.softmax(logits_co, dim=-1)     # (B, 3)
         # If MPV is absent (impossible normally) fall back to all-mpv = 1
@@ -451,7 +472,11 @@ class FlowRateEstimator(nn.Module):
         mask_bo = torch.stack([
             segment_mask[:, i_lpv], segment_mask[:, i_rpv], segment_mask[:, i_tips]
         ], dim=-1)
-        logits_bo = prior_bo + bif_outflow_delta
+        conduct_bo = self._conductance_logits(
+            branch_resistance, [i_lpv, i_rpv, i_tips], mask_bo
+        )
+        conduct_w_bo = torch.tensor([0.5, 0.5, 2.0], device=device).view(1, 3)
+        logits_bo = prior_bo + conduct_w_bo * conduct_bo + bif_outflow_delta
         logits_bo = logits_bo.masked_fill(mask_bo < 0.5, float('-1e9'))
         bif_outflow_frac = F.softmax(logits_bo, dim=-1)      # (B, 3)
         no_bo = (mask_bo.sum(dim=-1) < 0.5).unsqueeze(-1)
@@ -487,6 +512,8 @@ class FlowRateEstimator(nn.Module):
         # LGV/PGV at the confluence. ∈ [0, 1]. Important clinical biomarker.
         collateral_fraction = (Q_lgv * segment_mask[:, i_lgv]
                                + Q_pgv * segment_mask[:, i_pgv])  # (B,)
+        tips_fraction = Q_tips * segment_mask[:, i_tips]
+        liver_fraction = Q_lpv + Q_rpv
 
         return {
             'Q':                    Q,                       # (B, S)
@@ -500,6 +527,9 @@ class FlowRateEstimator(nn.Module):
             'conf_outflow_mask':    mask_co,                 # (B, 3)
             'bif_outflow_mask':     mask_bo,                 # (B, 3)
             'collateral_fraction':  collateral_fraction,     # (B,)
+            'tips_fraction':        tips_fraction,           # (B,)
+            'liver_fraction':       liver_fraction,          # (B,)
+            'branch_resistance':    branch_resistance,       # optional (B, S)
         }
 
 
@@ -591,14 +621,18 @@ class JunctionPhysics(nn.Module):
         press_resid_bifurc = (((dP_lpv - dP_rpv) / self.P_SCALE_PA).pow(2)) * m_bif_lpvrpv
 
         # ── Interpretable feature vector for the predictor ─────
-        # 12 dims: 3 Murray devs + 1 bifurcation residual + 1 collateral
+        # 15 dims: 3 Murray devs + 1 bifurcation residual + 3 flow-state
         # fraction + 7 log1p(ΔP) per non-confluence-degenerate branch.
         # log1p(ΔP) is bounded for any finite non-negative input → numerically safe.
         collat_frac = flow_out['collateral_fraction']  # (B,)
+        tips_frac = flow_out['tips_fraction']
+        liver_frac = flow_out['liver_fraction']
         features = torch.stack([
             murr_in, murr_co, murr_bo,
             press_resid_bifurc,
-            collat_frac,                                                       # NEW
+            collat_frac,
+            tips_frac,
+            liver_frac,
             torch.log1p(dP_mpv.clamp(min=0))  * segment_mask[:, i_mpv],
             torch.log1p(dP_sv.clamp(min=0))   * segment_mask[:, i_sv],
             torch.log1p(dP_smv.clamp(min=0))  * segment_mask[:, i_smv],
@@ -607,7 +641,7 @@ class JunctionPhysics(nn.Module):
             torch.log1p(dP_tips.clamp(min=0)) * segment_mask[:, i_tips],
             torch.log1p(dP_lgv.clamp(min=0))  * segment_mask[:, i_lgv],         # NEW
             torch.log1p(dP_pgv.clamp(min=0))  * segment_mask[:, i_pgv],         # NEW
-        ], dim=-1)                                                             # (B, 13)
+        ], dim=-1)                                                             # (B, 15)
         features = torch.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
         return {
@@ -621,7 +655,7 @@ class JunctionPhysics(nn.Module):
             'bifurcation_active': m_bif,
             'dP_per_branch':      torch.stack([dP_mpv, dP_sv, dP_smv, dP_lpv,
                                                dP_rpv, dP_tips, dP_lgv, dP_pgv], dim=-1),
-            'features':           features,                                    # (B, 13)
+            'features':           features,                                    # (B, 15)
         }
 
 
@@ -661,7 +695,7 @@ class PortalPressureNet(nn.Module):
         # log1p(ΔP), Murray/pressure residuals, collateral fraction) + aux scalars
         d_branches  = N_SEGMENTS * d_hidden            # 8 * 32 = 256
         d_q         = N_SEGMENTS                       # 8
-        d_junction  = 13                               # from JunctionPhysics.features
+        d_junction  = 15                               # from JunctionPhysics.features
         d_in = d_branches + d_q + d_junction + N_AUX
 
         self.predictor = nn.Sequential(
@@ -686,6 +720,24 @@ class PortalPressureNet(nn.Module):
                 nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+
+    @staticmethod
+    def _branch_resistance_prior(profiles, arc_lengths, point_valid, segment_mask):
+        """Geometry-only Poiseuille resistance proxy, independent of predicted Q."""
+        eps = 1e-6
+        diam_mm = profiles[..., P_DIAM].clamp(min=eps)
+        radius_mm = (0.5 * diam_mm).clamp(min=eps)
+
+        ds = torch.zeros_like(arc_lengths)
+        ds[..., 1:] = arc_lengths[..., 1:] - arc_lengths[..., :-1]
+        ds[..., 0] = ds[..., 1]
+        ds = ds.clamp(min=eps) * (point_valid > 0.5).float()
+
+        resistance = (ds / radius_mm.pow(4)).sum(dim=-1)
+        valid = ((point_valid > 0.5).float().sum(dim=-1) > 1).float() * segment_mask
+        high = torch.full_like(resistance, 1e6)
+        resistance = torch.where(valid > 0.5, resistance.clamp(min=eps), high)
+        return torch.nan_to_num(resistance, nan=1e6, posinf=1e6, neginf=1e6)
 
     def forward(self, batch):
         """
@@ -728,7 +780,12 @@ class PortalPressureNet(nn.Module):
         junction_diam = profiles[:, :, 0, P_DIAM]              # (B, S) — idx 0 of every branch
 
         # ── Flow rate estimation (mass-conservation by construction) ──
-        flow_out = self.flow_est(branch_embed, aux_norm, segment_mask, junction_diam)
+        branch_resistance = self._branch_resistance_prior(
+            profiles, arc_lengths, point_valid, segment_mask
+        )
+        flow_out = self.flow_est(
+            branch_embed, aux_norm, segment_mask, junction_diam, branch_resistance
+        )
         Q = flow_out['Q']                                       # (B, S)
 
         # ── Per-branch Poiseuille hydrodynamics ─────────────────
@@ -833,7 +890,15 @@ class PhysicsInformedLoss(nn.Module):
 
         L_murr_in = (d_in.pow(2).sum(dim=-1) * m_in).sum() / m_in.sum().clamp(min=1.0)
         L_murr_co = (d_co.pow(2).sum(dim=-1) * m_co).sum() / m_co.sum().clamp(min=1.0)
-        L_murr_bo = (d_bo.pow(2).sum(dim=-1) * m_bo).sum() / m_bo.sum().clamp(min=1.0)
+        has_tips = batch.get('is_post_tips', batch['segment_mask'][:, SEG_INDEX['tips']])
+        tips_relax = torch.where(
+            has_tips > 0.5,
+            torch.full_like(m_bo, 0.35),
+            torch.ones_like(m_bo),
+        )
+        m_bo_weight = m_bo * tips_relax
+        L_murr_bo = ((d_bo.pow(2).sum(dim=-1) * m_bo_weight).sum()
+                     / m_bo_weight.sum().clamp(min=1.0))
         L_murray = L_murr_in + L_murr_co + L_murr_bo
 
         # ── L_pressure: bifurcation pressure-continuity residual ────
@@ -1019,7 +1084,7 @@ if __name__ == '__main__':
           f"{out['hemo_per_seg'][0]['wss_pa'].max():.4f}] Pa")
     print(f"  Re range:       [{out['hemo_per_seg'][0]['reynolds'].min():.1f}, "
           f"{out['hemo_per_seg'][0]['reynolds'].max():.1f}]")
-    print(f"  ΔP@far end:     {out['endpoint_dP'][0].tolist()} Pa")
+    print(f"  dP@far end:     {out['endpoint_dP'][0].tolist()} Pa")
     print(f"  junction features: {out['junction']['features'][0].tolist()}")
 
     crit = PhysicsInformedLoss()

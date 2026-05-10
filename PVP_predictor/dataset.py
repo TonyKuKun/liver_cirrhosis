@@ -343,11 +343,11 @@ class PortalVeinDataset(Dataset):
                     pw_source_str = 'centerline_pointwise_profiles.json'
                 except UnicodeDecodeError as e:
                     if self.verbose:
-                        print(f"[Dataset] ❌ Unicode error reading fallback for "
+                        print(f"[Dataset] Unicode error reading fallback for "
                               f"{p['name']}: {e}")
                 except Exception as e:
                     if self.verbose:
-                        print(f"[Dataset] ⚠️  Could not load pointwise fallback for "
+                        print(f"[Dataset] WARNING: Could not load pointwise fallback for "
                               f"{p['name']}: {type(e).__name__}: {e}")
 
             # Track empty-pointwise patients separately for diagnostics
@@ -378,9 +378,9 @@ class PortalVeinDataset(Dataset):
             }
         except UnicodeDecodeError as e:
             if self.verbose:
-                print(f"[Dataset] ❌ Unicode error on {p['name']}: {e}")
+                print(f"[Dataset] Unicode error on {p['name']}: {e}")
                 print(f"           File: {p['unified_file']}")
-                print(f"           Hint: forcing utf-8 didn't work — "
+                print(f"           Hint: forcing utf-8 did not work - "
                       f"file may actually be GBK-encoded or corrupted.")
             return None
         except Exception as e:
@@ -570,13 +570,13 @@ class PortalVeinDataset(Dataset):
 
         if scale_A != 1.0 or scale_D != 1.0 or scale_R != 1.0:
             print("=" * 64)
-            print("[Dataset] ⚠️  UNIT INCONSISTENCY DETECTED IN POINTWISE DATA")
-            print(f"  median ratio  π·(D/2)² / area = {ratio_AD:.4f}  (expected ≈ 1)")
-            print(f"  median ratio  D / (2·R_insc)   = {ratio_DR:.4f}  (expected ≈ 1)")
-            print(f"  → Auto-correcting:  area  × {scale_A}")
-            print(f"                      diam  × {scale_D}")
-            print(f"                      R_insc× {scale_R}")
-            print(f"  These are critical for Hagen-Poiseuille (WSS, Re, ΔP).")
+            print("[Dataset] WARNING: UNIT INCONSISTENCY DETECTED IN POINTWISE DATA")
+            print(f"  median ratio  pi*(D/2)^2 / area = {ratio_AD:.4f}  (expected ~ 1)")
+            print(f"  median ratio  D / (2*R_insc)    = {ratio_DR:.4f}  (expected ~ 1)")
+            print(f"  Auto-correcting: area   x {scale_A}")
+            print(f"                   diam   x {scale_D}")
+            print(f"                   R_insc x {scale_R}")
+            print("  These are critical for Hagen-Poiseuille (WSS, Re, dP).")
             print(f"  Check your CT preprocessing pipeline for unit consistency.")
             print("=" * 64)
 
@@ -586,8 +586,8 @@ class PortalVeinDataset(Dataset):
                 d['profiles'][..., P_INSC] *= scale_R
         else:
             if self.verbose:
-                print(f"[Dataset] Unit check OK: A/πr² ratio={ratio_AD:.3f}, "
-                      f"D/2R ratio={ratio_DR:.3f} (both should be ≈ 1)")
+                print(f"[Dataset] Unit check OK: A/pi*r^2 ratio={ratio_AD:.3f}, "
+                      f"D/2R ratio={ratio_DR:.3f} (both should be ~ 1)")
 
     # -----------------------------------------------------------------
     # Per-branch loading diagnostics
@@ -603,13 +603,13 @@ class PortalVeinDataset(Dataset):
         print("[Dataset] Pointwise data availability per branch:")
         for sn in SEGMENTS:
             n = n_per_branch[sn]
-            mark = "✓" if n > 0 else "❌  ZERO patients have this branch!"
+            mark = "OK" if n > 0 else "ZERO patients have this branch!"
             print(f"   {sn:>5s} : {n:3d} / {len(self.data)}  {mark}")
         # Anatomical sanity warnings
         if n_per_branch['lpv'] == 0 or n_per_branch['rpv'] == 0:
-            print("[Dataset] ⚠️  WARNING: LPV or RPV missing from ALL patients.")
+            print("[Dataset] WARNING: LPV or RPV missing from ALL patients.")
             print("           Anatomically, every patient should have both.")
-            print("           Check your JSON's `pointwise` keys — possibly using")
+            print("           Check your JSON's `pointwise` keys - possibly using")
             print("           different names (e.g. 'LPV', 'left_portal_vein').")
         n_post_tips_with_tips = sum(
             d['segment_mask'][SEG_INDEX['tips']] for d in self.data
@@ -617,7 +617,7 @@ class PortalVeinDataset(Dataset):
         )
         n_post_tips_total = sum(d['is_post_tips'] for d in self.data)
         if n_post_tips_total > 0 and n_post_tips_with_tips == 0:
-            print(f"[Dataset] ⚠️  WARNING: {n_post_tips_total} post-TIPS patients but"
+            print(f"[Dataset] WARNING: {n_post_tips_total} post-TIPS patients but"
                   f" 0 have a tips pointwise segment.")
             print(f"           Check `pointwise.tips` key in JSON.")
     def _compute_normalization(self):
@@ -735,11 +735,11 @@ def collate_fn(items):
 # =====================================================================
 if __name__ == '__main__':
     import sys
-    root = sys.argv[1] if len(sys.argv) > 1 else '/tmp/pvp_test'
+    root = sys.argv[1] if len(sys.argv) > 1 else r'F:\PCG data\dataset\test4all_sample'
     ds = PortalVeinDataset(root, n_points=100, verbose=True)
     print(f"\nDataset size: {len(ds)}")
     if len(ds) == 0:
-        print("Empty dataset — nothing to inspect.")
+        print("Empty dataset - nothing to inspect.")
         sys.exit(0)
     s = ds[0]
     for k, v in s.items():

@@ -13,10 +13,10 @@ def run(cmd: list[str]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="End-to-end DICOM to portal vein STL workflow.")
-    parser.add_argument("--data_root", required=True)
-    parser.add_argument("--out_dir", default="VKAN_segementation/runs/vkan")
-    parser.add_argument("--api_key", default=None)
-    parser.add_argument("--api_base_url", default=None)
+    parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
+    parser.add_argument("--out_dir", default=r"VKAN_segementation/runs/vkan")
+    parser.add_argument("--api_key", default='AIzaSyCUnLZXaUWemZe6aXEIpc_6KjZRB9PR288')
+    parser.add_argument("--api_base_url", default='https://generativelanguage.googleapis.com/v1beta/openai')
     parser.add_argument("--model", default="gemma-4-31b-it")
     parser.add_argument("--grid_size", type=int, default=96)
     parser.add_argument("--epochs", type=int, default=120)

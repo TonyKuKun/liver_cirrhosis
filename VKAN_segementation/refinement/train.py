@@ -10,11 +10,15 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 try:
-    from .dataset import VesselSTLDataset, collate_fn
+    from .dataset import VesselNiftiDataset, collate_fn
     from .model import DiceBCELoss, VesselVKAN, dice_score
 except ImportError:
-    from VKAN_segementation.refinement.dataset import VesselSTLDataset, collate_fn
-    from VKAN_segementation.refinement.model import DiceBCELoss, VesselVKAN, dice_score
+    try:
+        from VKAN_segementation.refinement.dataset import VesselNiftiDataset, collate_fn
+        from VKAN_segementation.refinement.model import DiceBCELoss, VesselVKAN, dice_score
+    except ImportError:
+        from refinement.dataset import VesselNiftiDataset, collate_fn
+        from refinement.model import DiceBCELoss, VesselVKAN, dice_score
 
 
 def set_seed(seed: int) -> None:
@@ -60,6 +64,7 @@ def main() -> None:
     parser.add_argument("--base_channels", type=int, default=16)
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--include_review", action="store_true", help="Include cases marked pretrain_quality=review.")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -67,7 +72,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ds = VesselSTLDataset(args.data_root, grid_size=args.grid_size, require_pretrain=True)
+    ds = VesselNiftiDataset(args.data_root, grid_size=args.grid_size, require_pretrain=True, include_review=args.include_review)
     val_len = max(1, int(round(len(ds) * args.val_ratio))) if len(ds) > 1 else 0
     train_len = len(ds) - val_len
     if val_len > 0:

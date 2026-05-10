@@ -26,16 +26,61 @@ Outputs
 import os
 import json
 import argparse
+import time
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import GroupKFold, StratifiedGroupKFold, StratifiedKFold
 
 from dataset import PortalVeinDataset, collate_fn
+from diagnostics import (
+    collect_prediction_rows,
+    subject_id_from_name,
+    summarize_prediction_rows,
+    write_group_summary,
+    write_prediction_csv,
+)
 from model import PortalPressureNet, PhysicsInformedLoss, count_params
+
+
+# =====================================================================
+# Checkpoint I/O
+# =====================================================================
+def safe_torch_save(obj, path):
+    """Write checkpoints via a temporary file, then atomically replace target."""
+    path = os.fspath(path)
+    out_dir = os.path.dirname(path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    tmp_path = f"{path}.tmp-{os.getpid()}"
+    try:
+        torch.save(obj, tmp_path)
+        last_error = None
+        for _ in range(20):
+            try:
+                os.replace(tmp_path, path)
+                last_error = None
+                break
+            except PermissionError as e:
+                last_error = e
+                try:
+                    if os.path.exists(path):
+                        os.chmod(path, 0o666)
+                        os.remove(path)
+                    os.replace(tmp_path, path)
+                    last_error = None
+                    break
+                except PermissionError as inner:
+                    last_error = inner
+                    time.sleep(0.1)
+        if last_error is not None:
+            raise last_error
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 # =====================================================================
@@ -50,6 +95,56 @@ def compute_metrics(preds, labels):
     ss_tot = np.sum((labels - labels.mean()) ** 2) + 1e-9
     r2 = 1.0 - ss_res / ss_tot
     return float(mae), float(rmse), float(r2)
+
+
+def make_cv_splits(data, n_folds, seed, split_mode="subject"):
+    indices = np.arange(len(data))
+    strat_y = np.array([int(d["is_post_tips"]) for d in data])
+    min_class = min((strat_y == 0).sum(), (strat_y == 1).sum())
+
+    if split_mode == "subject":
+        groups = np.array([subject_id_from_name(d["name"]) for d in data])
+        n_groups = len(set(groups))
+        if n_groups < n_folds:
+            raise RuntimeError(f"Need at least {n_folds} subject groups, have {n_groups}")
+        if min_class >= n_folds:
+            splitter = StratifiedGroupKFold(
+                n_splits=n_folds, shuffle=True, random_state=seed
+            )
+            split_iter = splitter.split(indices, strat_y, groups)
+            method = "StratifiedGroupKFold"
+        else:
+            splitter = GroupKFold(n_splits=n_folds)
+            split_iter = splitter.split(indices, strat_y, groups)
+            method = "GroupKFold"
+        splits = [(train_idx, val_idx) for train_idx, val_idx in split_iter]
+        return splits, {
+            "split_mode": split_mode,
+            "method": method,
+            "n_subjects": int(n_groups),
+            "post_tips": int((strat_y == 1).sum()),
+            "pre_tips": int((strat_y == 0).sum()),
+        }
+
+    if split_mode == "sample":
+        if min_class >= n_folds:
+            splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+            split_iter = splitter.split(indices, strat_y)
+            method = "StratifiedKFold"
+        else:
+            from sklearn.model_selection import KFold
+            splitter = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
+            split_iter = splitter.split(indices)
+            method = "KFold"
+        splits = [(train_idx, val_idx) for train_idx, val_idx in split_iter]
+        return splits, {
+            "split_mode": split_mode,
+            "method": method,
+            "post_tips": int((strat_y == 1).sum()),
+            "pre_tips": int((strat_y == 0).sum()),
+        }
+
+    raise ValueError("--split_mode must be either 'subject' or 'sample'")
 
 
 # =====================================================================
@@ -168,7 +263,7 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
             best_val_mae = val_log['mae']
             best_epoch = epoch
             epochs_no_improve = 0
-            torch.save({
+            safe_torch_save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
                 'val_mae': best_val_mae,
@@ -199,8 +294,14 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
     with open(os.path.join(out_fold, 'history.csv'), 'w') as f:
         f.writelines(history_lines)
 
-    # Reload best for final report
+    # Reload best for final report and OOF diagnostics
     ckpt = torch.load(os.path.join(out_fold, 'best.pt'), map_location=device, weights_only=False)
+    model.load_state_dict(ckpt['model_state_dict'])
+    val_rows = collect_prediction_rows(
+        model, val_ld, device, fold_idx, full_ds.label_mean, full_ds.label_std
+    )
+    write_prediction_csv(val_rows, os.path.join(out_fold, 'val_predictions.csv'))
+
     return {
         'fold':     fold_idx,
         'best_epoch': ckpt['epoch'],
@@ -209,7 +310,7 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
         'val_r2':   ckpt['val_r2'],
         'n_train':  len(train_idx),
         'n_val':    len(val_idx),
-    }
+    }, val_rows
 
 
 # =====================================================================
@@ -217,11 +318,12 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
 # =====================================================================
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--data_root', type=str, required=True)
+    ap.add_argument('--data_root', type=str, default=r"F:\PCG data\dataset\test4all_sample")
     ap.add_argument('--out_dir',   type=str, default='./runs/v3')
     ap.add_argument('--n_points',  type=int, default=100)
     ap.add_argument('--n_folds',   type=int, default=5)
     ap.add_argument('--seed',      type=int, default=42)
+    ap.add_argument('--split_mode', choices=['subject', 'sample'], default='subject')
     # Optimization
     ap.add_argument('--epochs',       type=int,   default=300)
     ap.add_argument('--batch_size',   type=int,   default=8)
@@ -262,38 +364,38 @@ def main():
         'label_std':    full_ds.label_std,
     }, os.path.join(args.out_dir, 'normalization.pt'))
 
-    # Stratify by post-TIPS (binary) when feasible; fall back to plain KFold
-    from sklearn.model_selection import KFold
+    splits, split_info = make_cv_splits(
+        full_ds.data, args.n_folds, args.seed, split_mode=args.split_mode
+    )
     strat_y = np.array([int(d['is_post_tips']) for d in full_ds.data])
-    min_class = min((strat_y == 0).sum(), (strat_y == 1).sum())
-    if min_class >= args.n_folds:
-        skf = StratifiedKFold(n_splits=args.n_folds, shuffle=True, random_state=args.seed)
-        split_iter = skf.split(np.arange(len(full_ds)), strat_y)
-        print(f"[Train] Using StratifiedKFold (post-TIPS counts: "
-              f"{int((strat_y==1).sum())}, pre-TIPS: {int((strat_y==0).sum())})")
-    else:
-        kf = KFold(n_splits=args.n_folds, shuffle=True, random_state=args.seed)
-        split_iter = kf.split(np.arange(len(full_ds)))
-        print(f"[Train] Class imbalance too small to stratify "
-              f"(min class={min_class} < {args.n_folds}); using plain KFold")
-    indices = np.arange(len(full_ds))
+    print(f"[Train] Using {split_info['method']} "
+          f"(mode={split_info['split_mode']}, post-TIPS={split_info['post_tips']}, "
+          f"pre-TIPS={split_info['pre_tips']})")
 
-    splits_dict = {'folds': []}
+    splits_dict = {'split_info': split_info, 'folds': []}
     fold_results = []
-    for fi, (train_idx, val_idx) in enumerate(split_iter):
+    all_oof_rows = []
+    for fi, (train_idx, val_idx) in enumerate(splits):
         train_names = [full_ds.data[i]['name'] for i in train_idx]
         val_names   = [full_ds.data[i]['name'] for i in val_idx]
         splits_dict['folds'].append({
-            'fold': fi, 'train_names': train_names, 'val_names': val_names,
+            'fold': fi,
+            'train_names': train_names,
+            'val_names': val_names,
+            'train_subject_ids': sorted({subject_id_from_name(n) for n in train_names}),
+            'val_subject_ids': sorted({subject_id_from_name(n) for n in val_names}),
         })
         print(f"\n========== Fold {fi}/{args.n_folds-1} "
               f"(n_train={len(train_idx)}, n_val={len(val_idx)}, "
               f"val_post_tips={int(strat_y[val_idx].sum())}) ==========")
-        res = train_fold(fi, train_idx, val_idx, full_ds, args, device)
+        res, val_rows = train_fold(fi, train_idx, val_idx, full_ds, args, device)
         fold_results.append(res)
+        all_oof_rows.extend(val_rows)
 
     with open(os.path.join(args.out_dir, 'splits.json'), 'w') as f:
         json.dump(splits_dict, f, indent=2)
+    write_prediction_csv(all_oof_rows, os.path.join(args.out_dir, 'oof_predictions.csv'))
+    write_group_summary(all_oof_rows, os.path.join(args.out_dir, 'oof_group_summary.json'))
 
     # Aggregate metrics
     maes  = np.array([r['val_mae']  for r in fold_results])
@@ -308,13 +410,15 @@ def main():
         'val_rmse_std':  float(rmses.std()),
         'val_r2_mean':   float(r2s.mean()),
         'val_r2_std':    float(r2s.std()),
+        'split_info': split_info,
+        'oof_group_summary': summarize_prediction_rows(all_oof_rows),
     }
     with open(os.path.join(args.out_dir, 'summary.json'), 'w') as f:
         json.dump(summary, f, indent=2)
     print("\n========== Summary ==========")
     print(f"  MAE  : {summary['val_mae_mean']:.3f} ± {summary['val_mae_std']:.3f}")
     print(f"  RMSE : {summary['val_rmse_mean']:.3f} ± {summary['val_rmse_std']:.3f}")
-    print(f"  R²   : {summary['val_r2_mean']:.3f} ± {summary['val_r2_std']:.3f}")
+    print(f"  R2   : {summary['val_r2_mean']:.3f} +/- {summary['val_r2_std']:.3f}")
 
 
 if __name__ == '__main__':

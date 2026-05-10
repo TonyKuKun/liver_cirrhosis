@@ -5,9 +5,9 @@ This folder implements the workflow:
 1. Read `patient/dcm` DICOM CT slices.
 2. Use Gemma/OpenAI-compatible API when configured to choose a high-recall HU window and crop box.
 3. Fall back to portal-venous heuristics when the API is unavailable.
-4. Save coarse `patient/pretrain.stl`.
-5. Train a VKAN-style 3D refinement network with `pretrain.stl` as input and `vessel.stl` as label.
-6. Save `patient/predict.stl`, then `patient/predict_smooth.stl`.
+4. Save coarse `patient/pretrain.nii.gz` for training and `patient/pretrain.stl` for visual review.
+5. Convert `patient/mask` DICOM differences to `patient/mask.nii.gz` labels.
+6. Train a VKAN-style 3D refinement network from NIfTI masks, then save `patient/predict_mask.nii.gz`, `patient/predict.stl`, and `patient/predict_smooth.stl`.
 
 Patient naming:
 
@@ -72,9 +72,13 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 
 ## Outputs per patient
 
-- `pretrain.stl`: coarse, high-recall vessel candidate.
+- `pretrain.nii.gz`: coarse binary vessel candidate used by VKAN training.
+- `mask.nii.gz`: binary training label derived from `mask` vs `dcm` raw pixel differences.
+- `pretrain.stl`: coarse vessel candidate for visual inspection; cases over 20,000KB are flagged for review.
 - `vkan_work/coarse_plan.json`: HU range and crop box used.
+- `vkan_work/pretrain_meta.json`: preprocessing version, QA status, NIfTI paths, and output statistics.
 - `vkan_work/pretrain_mask.npy`: coarse mask for debugging.
+- `predict_mask.nii.gz`: VKAN refined binary prediction.
 - `predict.stl`: VKAN refined vessel.
 - `predict_smooth.stl`: smoothed final mesh.
 - `vkan_work/predict_check.json`: mesh summary and optional LLM check.
@@ -88,6 +92,6 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 ## Code layout
 
 - `pretrain/`: DICOM loading, LLM/heuristic coarse planning, threshold/crop segmentation, and `pretrain.stl` export.
-- `refinement/`: STL dataset, VKAN-style model, training, prediction, and the original `vkan.py` model kept for reuse.
+- `refinement/`: NIfTI mask dataset, VKAN-style model, training, prediction, and the original `vkan.py` model kept for reuse.
 - `postprocess/`: final mesh check and smoothing.
 - `utils/`: shared patient discovery, Gemma client, STL conversion, voxelization, and smoothing helpers.

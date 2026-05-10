@@ -1,36 +1,50 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 try:
-    from ..utils.common import discover_patients, require_existing_labels, stl_to_voxels
+    from ..pretrain.preprocess import mask_label_nifti_path, pretrain_nifti_path
+    from ..utils.common import discover_patients, load_nifti_volume, resize_mask_to_grid, volume_bounds_xyz
 except ImportError:
-    from VKAN_segementation.utils.common import discover_patients, require_existing_labels, stl_to_voxels
+    try:
+        from VKAN_segementation.pretrain.preprocess import mask_label_nifti_path, pretrain_nifti_path
+        from VKAN_segementation.utils.common import discover_patients, load_nifti_volume, resize_mask_to_grid, volume_bounds_xyz
+    except ImportError:
+        from pretrain.preprocess import mask_label_nifti_path, pretrain_nifti_path
+        from utils.common import discover_patients, load_nifti_volume, resize_mask_to_grid, volume_bounds_xyz
 
 
-class VesselSTLDataset(Dataset):
-    """Pairs coarse pretrain STL with manually extracted vessel STL labels."""
+class VesselNiftiDataset(Dataset):
+    """Pairs coarse pretrain NIfTI masks with manual mask NIfTI labels."""
 
-    def __init__(self, data_root: str | Path, grid_size: int = 96, require_pretrain: bool = True) -> None:
+    def __init__(self, data_root: str | Path, grid_size: int = 96, require_pretrain: bool = True, include_review: bool = False) -> None:
         self.data_root = Path(data_root)
         self.grid_size = int(grid_size)
-        cases = require_existing_labels(discover_patients(self.data_root))
+        cases = discover_patients(self.data_root)
         if require_pretrain:
-            cases = [case for case in cases if case.pretrain_stl.exists()]
+            cases = [case for case in cases if pretrain_nifti_path(case).exists()]
+        cases = [case for case in cases if mask_label_nifti_path(case).exists()]
+        if not include_review:
+            cases = [case for case in cases if _pretrain_quality(case) != "review"]
         self.cases = cases
         if not self.cases:
-            raise RuntimeError("No usable patient cases found. Need pretrain.stl and vessel.stl.")
+            raise RuntimeError("No usable patient cases found. Need pretrain.nii.gz and mask.nii.gz.")
 
     def __len__(self) -> int:
         return len(self.cases)
 
     def __getitem__(self, idx: int) -> dict:
         case = self.cases[idx]
-        pre, bounds = stl_to_voxels(case.pretrain_stl, grid_size=self.grid_size)
-        label, _ = stl_to_voxels(case.label_stl, grid_size=self.grid_size, bounds=bounds)
+        pre_vol = load_nifti_volume(pretrain_nifti_path(case))
+        label_vol = load_nifti_volume(mask_label_nifti_path(case))
+        pre = resize_mask_to_grid(pre_vol.volume_hu, self.grid_size)
+        label = resize_mask_to_grid(label_vol.volume_hu, self.grid_size)
+        bounds = volume_bounds_xyz(pre_vol.volume_hu.shape, pre_vol.spacing_zyx, pre_vol.origin_xyz)
         return {
             "name": case.name,
             "input": torch.from_numpy(pre[None]).float(),
@@ -38,6 +52,19 @@ class VesselSTLDataset(Dataset):
             "bounds": torch.from_numpy(bounds).float(),
             "is_post_tips": torch.tensor(float(case.is_post_tips), dtype=torch.float32),
         }
+
+
+VesselSTLDataset = VesselNiftiDataset
+
+
+def _pretrain_quality(case) -> str:
+    meta_path = case.path / "vkan_work" / "pretrain_meta.json"
+    if not meta_path.exists():
+        return "ok"
+    try:
+        return str(json.loads(meta_path.read_text(encoding="utf-8")).get("pretrain_quality", "ok"))
+    except Exception:
+        return "ok"
 
 
 def collate_fn(items: list[dict]) -> dict:
