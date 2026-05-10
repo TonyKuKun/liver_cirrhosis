@@ -308,20 +308,22 @@ class AttentionPool(nn.Module):
 class FlowRateEstimator(nn.Module):
     """
     Predicts per-segment relative flow rates Q_i (B, S) such that:
-        Q_mpv = 1
-        Q_sv  + Q_smv  = Q_mpv          (mass conservation at confluence)
-        Q_lpv + Q_rpv + Q_tips = Q_mpv  (mass conservation at bifurcation)
 
-    Implementation:
-        target_logit(branch) = 3 · log(d_junction)          (Murray-3 prior)
-        actual_logit         = target_logit + delta(MLP)    (learned correction)
-        split fractions      = softmax over present branches
-        Q_i = split_i × Q_mpv
+      Inflow            : Q_sv + Q_smv                    = 1                (reference)
+      Confluence outflow: Q_mpv + Q_lgv + Q_pgv           = 1                (mass cons.)
+      Bifurcation       : Q_lpv + Q_rpv + Q_tips          = Q_mpv            (mass cons.)
 
-    Murray-3 says: at a junction, the flow split follows the cube of branch
-    diameters. The model predicts a small correction (`delta`) that captures
-    deviations from the Murray prior — these deviations are biologically
-    meaningful (e.g., elevated splenic flow in cirrhosis).
+    Q_mpv ≤ 1 — strictly less than 1 when collateral vessels (LGV/PGV)
+    siphon flow off the portal system. The "collateral burden"
+    1 − Q_mpv = Q_lgv + Q_pgv is directly meaningful for portal hypertension.
+
+    Implementation per junction:
+        target_logit_i = 3 · log(d_junction_i)        (Murray-3 prior)
+        actual_logit   = target_logit_i + delta(MLP)  (learned correction)
+        split          = softmax over present branches
+    Murray's law is the prior; the model learns deviations (`delta`)
+    that capture biologically meaningful departures from energy-optimal
+    flow distribution (e.g., elevated splenic flow in cirrhosis).
     """
 
     def __init__(self, d_branch: int, d_aux: int = N_AUX, d_hidden: int = 32):
@@ -332,14 +334,23 @@ class FlowRateEstimator(nn.Module):
             nn.GELU(),
             nn.Linear(d_hidden, 2),
         )
-        # Outflow split (lpv, rpv, tips): 3 logits
-        self.outflow_head = nn.Sequential(
+        # NEW: Confluence-outflow split (mpv, lgv, pgv): 3 logits.
+        # This captures the collateral burden — how much flow is being
+        # siphoned off via porto-systemic shunts.
+        self.conf_outflow_head = nn.Sequential(
+            nn.Linear(3 * d_branch + d_aux, d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 3),
+        )
+        # Bifurcation outflow split (lpv, rpv, tips): 3 logits
+        self.bif_outflow_head = nn.Sequential(
             nn.Linear(4 * d_branch + d_aux, d_hidden),
             nn.GELU(),
             nn.Linear(d_hidden, 3),
         )
-        # Init: small learned correction (model starts at Murray prior)
-        for m in [self.inflow_head[-1], self.outflow_head[-1]]:
+        # Init: deltas at zero so model starts at Murray prior at every junction
+        for m in [self.inflow_head[-1], self.conf_outflow_head[-1],
+                  self.bif_outflow_head[-1]]:
             nn.init.zeros_(m.weight)
             nn.init.zeros_(m.bias)
 
@@ -355,91 +366,140 @@ class FlowRateEstimator(nn.Module):
         segment_mask        : (B, S)
         junction_diameters  : (B, S)  diameter at each segment's junction-facing endpoint, mm
 
-        Returns Q_per_branch: (B, S) and per-junction split logits/deltas:
-            inflow_split    (B, 2)   [frac_sv, frac_smv]
-            outflow_split   (B, 3)   [frac_lpv, frac_rpv, frac_tips]
-            inflow_delta    (B, 2)   model's learned correction (for L_murray)
-            outflow_delta   (B, 3)
+        Returns Q_per_branch: (B, S) and per-junction split logits/deltas.
         """
         B = branch_embeds.size(0)
+        device = branch_embeds.device
         i_mpv  = SEG_INDEX['mpv']
         i_sv   = SEG_INDEX['sv']
         i_smv  = SEG_INDEX['smv']
         i_lpv  = SEG_INDEX['lpv']
         i_rpv  = SEG_INDEX['rpv']
         i_tips = SEG_INDEX['tips']
+        i_lgv  = SEG_INDEX['lgv']
+        i_pgv  = SEG_INDEX['pgv']
 
-        # ── Inflow split (sv, smv → mpv) ─────────────────────────
+        # ── Inflow split (sv, smv) ──────────────────────────────
         ctx_in = torch.cat([
             branch_embeds[:, i_sv],
             branch_embeds[:, i_smv],
             aux_norm,
         ], dim=-1)
         inflow_delta = self.inflow_head(ctx_in)             # (B, 2)
-        # Murray prior from diameters at SV[0], SMV[0] (junction-end)
         d_sv  = junction_diameters[:, i_sv]
         d_smv = junction_diameters[:, i_smv]
         prior_in = torch.stack([
             self._murray_logits(d_sv), self._murray_logits(d_smv)
         ], dim=-1)
-        # Mask absent branches with -inf
         mask_in = torch.stack([segment_mask[:, i_sv], segment_mask[:, i_smv]], dim=-1)
         logits_in = prior_in + inflow_delta
         logits_in = logits_in.masked_fill(mask_in < 0.5, float('-1e9'))
         inflow_frac = F.softmax(logits_in, dim=-1)          # (B, 2)
-        # If both absent → set to 0.5/0.5 placeholder (won't be used for anything live)
         no_inflow = (mask_in.sum(dim=-1) < 0.5).unsqueeze(-1)
         inflow_frac = torch.where(
             no_inflow, torch.full_like(inflow_frac, 0.5), inflow_frac
         )
 
-        # ── Outflow split (mpv → lpv + rpv + tips) ─────────────
-        ctx_out = torch.cat([
+        # ── NEW: Confluence-outflow split (mpv, lgv, pgv) ──────
+        ctx_co = torch.cat([
+            branch_embeds[:, i_mpv],
+            branch_embeds[:, i_lgv],
+            branch_embeds[:, i_pgv],
+            aux_norm,
+        ], dim=-1)
+        conf_outflow_delta = self.conf_outflow_head(ctx_co)  # (B, 3)
+        d_mpv  = junction_diameters[:, i_mpv]
+        d_lgv  = junction_diameters[:, i_lgv]
+        d_pgv  = junction_diameters[:, i_pgv]
+        prior_co = torch.stack([
+            self._murray_logits(d_mpv),
+            self._murray_logits(d_lgv),
+            self._murray_logits(d_pgv),
+        ], dim=-1)
+        mask_co = torch.stack([
+            segment_mask[:, i_mpv],
+            segment_mask[:, i_lgv],
+            segment_mask[:, i_pgv],
+        ], dim=-1)
+        logits_co = prior_co + conf_outflow_delta
+        logits_co = logits_co.masked_fill(mask_co < 0.5, float('-1e9'))
+        conf_outflow_frac = F.softmax(logits_co, dim=-1)     # (B, 3)
+        # If MPV is absent (impossible normally) fall back to all-mpv = 1
+        no_co = (mask_co.sum(dim=-1) < 0.5).unsqueeze(-1)
+        conf_outflow_frac = torch.where(
+            no_co, torch.tensor([[1.0, 0.0, 0.0]], device=device).expand_as(conf_outflow_frac),
+            conf_outflow_frac
+        )
+
+        # ── Bifurcation outflow split (lpv, rpv, tips) ─────────
+        ctx_bo = torch.cat([
             branch_embeds[:, i_mpv],
             branch_embeds[:, i_lpv],
             branch_embeds[:, i_rpv],
             branch_embeds[:, i_tips],
             aux_norm,
         ], dim=-1)
-        outflow_delta = self.outflow_head(ctx_out)          # (B, 3)
+        bif_outflow_delta = self.bif_outflow_head(ctx_bo)    # (B, 3)
         d_lpv  = junction_diameters[:, i_lpv]
         d_rpv  = junction_diameters[:, i_rpv]
         d_tips = junction_diameters[:, i_tips]
-        prior_out = torch.stack([
+        prior_bo = torch.stack([
             self._murray_logits(d_lpv),
             self._murray_logits(d_rpv),
             self._murray_logits(d_tips),
         ], dim=-1)
-        mask_out = torch.stack([
+        mask_bo = torch.stack([
             segment_mask[:, i_lpv], segment_mask[:, i_rpv], segment_mask[:, i_tips]
         ], dim=-1)
-        logits_out = prior_out + outflow_delta
-        logits_out = logits_out.masked_fill(mask_out < 0.5, float('-1e9'))
-        outflow_frac = F.softmax(logits_out, dim=-1)        # (B, 3)
-        no_outflow = (mask_out.sum(dim=-1) < 0.5).unsqueeze(-1)
-        outflow_frac = torch.where(
-            no_outflow, torch.full_like(outflow_frac, 1.0/3.0), outflow_frac
+        logits_bo = prior_bo + bif_outflow_delta
+        logits_bo = logits_bo.masked_fill(mask_bo < 0.5, float('-1e9'))
+        bif_outflow_frac = F.softmax(logits_bo, dim=-1)      # (B, 3)
+        no_bo = (mask_bo.sum(dim=-1) < 0.5).unsqueeze(-1)
+        bif_outflow_frac = torch.where(
+            no_bo, torch.full_like(bif_outflow_frac, 1.0/3.0), bif_outflow_frac
         )
 
-        # ── Assemble Q per segment (relative; Q_mpv = 1) ───────
-        Q = torch.zeros(B, N_SEGMENTS, device=branch_embeds.device)
-        Q[:, i_mpv]  = 1.0  # reference
-        Q[:, i_sv]   = inflow_frac[:, 0]
-        Q[:, i_smv]  = inflow_frac[:, 1]
-        Q[:, i_lpv]  = outflow_frac[:, 0]
-        Q[:, i_rpv]  = outflow_frac[:, 1]
-        Q[:, i_tips] = outflow_frac[:, 2]
-        # Zero out missing
+        # ── Assemble Q per segment via torch.stack (no in-place writes
+        #    to a fresh tensor — that breaks autograd version tracking) ──
+        Q_mpv  = conf_outflow_frac[:, 0]
+        Q_lgv  = conf_outflow_frac[:, 1]
+        Q_pgv  = conf_outflow_frac[:, 2]
+        Q_sv   = inflow_frac[:, 0]
+        Q_smv  = inflow_frac[:, 1]
+        Q_lpv  = bif_outflow_frac[:, 0] * Q_mpv
+        Q_rpv  = bif_outflow_frac[:, 1] * Q_mpv
+        Q_tips = bif_outflow_frac[:, 2] * Q_mpv
+
+        Q_list = [None] * N_SEGMENTS
+        Q_list[i_mpv]  = Q_mpv
+        Q_list[i_sv]   = Q_sv
+        Q_list[i_smv]  = Q_smv
+        Q_list[i_lpv]  = Q_lpv
+        Q_list[i_rpv]  = Q_rpv
+        Q_list[i_tips] = Q_tips
+        Q_list[i_lgv]  = Q_lgv
+        Q_list[i_pgv]  = Q_pgv
+        Q = torch.stack(Q_list, dim=-1)            # (B, N_SEGMENTS)
+        # Zero out missing branches
         Q = Q * segment_mask
 
+        # Collateral burden: portal flow fraction that bypasses the liver via
+        # LGV/PGV at the confluence. ∈ [0, 1]. Important clinical biomarker.
+        collateral_fraction = (Q_lgv * segment_mask[:, i_lgv]
+                               + Q_pgv * segment_mask[:, i_pgv])  # (B,)
+
         return {
-            'Q':              Q,                 # (B, S)
-            'inflow_frac':    inflow_frac,       # (B, 2)
-            'outflow_frac':   outflow_frac,      # (B, 3)
-            'inflow_delta':   inflow_delta,      # (B, 2) — Murray deviation logits
-            'outflow_delta':  outflow_delta,     # (B, 3)
-            'inflow_mask':    mask_in,           # (B, 2)
-            'outflow_mask':   mask_out,          # (B, 3)
+            'Q':                    Q,                       # (B, S)
+            'inflow_frac':          inflow_frac,             # (B, 2)
+            'conf_outflow_frac':    conf_outflow_frac,       # (B, 3)
+            'bif_outflow_frac':     bif_outflow_frac,        # (B, 3)
+            'inflow_delta':         inflow_delta,            # (B, 2)
+            'conf_outflow_delta':   conf_outflow_delta,      # (B, 3)
+            'bif_outflow_delta':    bif_outflow_delta,       # (B, 3)
+            'inflow_mask':          mask_in,                 # (B, 2)
+            'conf_outflow_mask':    mask_co,                 # (B, 3)
+            'bif_outflow_mask':     mask_bo,                 # (B, 3)
+            'collateral_fraction':  collateral_fraction,     # (B,)
         }
 
 
@@ -472,160 +532,96 @@ class JunctionPhysics(nn.Module):
     PVPPredictor can use them) AND as loss terms.
     """
 
+    # Characteristic pressure scale (Pa) — used to normalize bifurcation residual.
+    # Portal vein typical Δ P along a segment is O(10–100) Pa. Setting this
+    # makes (ΔP_lpv − ΔP_rpv)² / scale² a dimensionless O(1) residual.
+    P_SCALE_PA = 100.0
+
     def forward(self, hemo_per_seg, flow_out, segment_mask, has_tips):
         """
-        hemo_per_seg : list of len S, each a dict from PoiseuilleHydrodynamics
-        flow_out     : dict from FlowRateEstimator
-        segment_mask : (B, S)
-        has_tips     : (B,)
+        Three Murray-deviation residuals (one per junction) and a bifurcation
+        pressure-continuity residual. Collateral burden (Q_lgv + Q_pgv) is
+        emitted as a feature so the predictor can use it directly.
 
-        Returns dict:
-            murray_dev_inflow   (B,)
-            murray_dev_outflow  (B,)
-            press_resid_conf    (B,)   — std-dev of {P at confluence} across branches
-            press_resid_bifurc  (B,)
-            confluence_active   (B,)   — 1 if all of mpv/sv/smv present
-            bifurcation_active  (B,)
-            features            (B, K) packed feature vector for predictor input
+        Physics philosophy
+        ──────────────────
+        ❌  No divisions by Q anywhere — the divisive R = ΔP/Q caused
+            catastrophic numerics in earlier versions.
+
+        Murray-3 prior at three junctions:
+            inflow:      Q_sv : Q_smv             ∝ d_sv³  : d_smv³
+            conf_out:    Q_mpv : Q_lgv : Q_pgv    ∝ d_mpv³ : d_lgv³ : d_pgv³
+            bif_out:     Q_lpv : Q_rpv : Q_tips   ∝ d_lpv³ : d_rpv³ : d_tips³
+
+        Pressure continuity at bifurcation: LPV and RPV both feed roughly
+        equal hepatic-sinusoidal pressures, so ΔP_lpv ≈ ΔP_rpv. TIPS is
+        excluded (its outlet is systemic vein pressure, structurally lower).
         """
         B = segment_mask.size(0)
         device = segment_mask.device
 
         i_mpv = SEG_INDEX['mpv']; i_sv = SEG_INDEX['sv']; i_smv = SEG_INDEX['smv']
         i_lpv = SEG_INDEX['lpv']; i_rpv = SEG_INDEX['rpv']; i_tips = SEG_INDEX['tips']
+        i_lgv = SEG_INDEX['lgv']; i_pgv = SEG_INDEX['pgv']
 
-        # ── Murray deviations: simple scalar magnitudes ─────────
-        murr_in  = flow_out['inflow_delta'].pow(2).sum(dim=-1)      # (B,)
-        murr_out = flow_out['outflow_delta'].pow(2).sum(dim=-1)     # (B,)
-        # Zero out where junction is inactive
-        m_conf = (segment_mask[:, i_mpv] * segment_mask[:, i_sv] * segment_mask[:, i_smv])
-        m_bif  = (segment_mask[:, i_mpv] * (segment_mask[:, i_lpv] + segment_mask[:, i_rpv] + segment_mask[:, i_tips] > 0).float())
-        murr_in  = murr_in  * m_conf
-        murr_out = murr_out * m_bif
+        # Junction activity masks
+        m_inflow = (segment_mask[:, i_sv] * segment_mask[:, i_smv])
+        m_conf_out = segment_mask[:, i_mpv]   # MPV must exist for conf-outflow node
+        m_bif      = (segment_mask[:, i_mpv] *
+                      (segment_mask[:, i_lpv] + segment_mask[:, i_rpv] + segment_mask[:, i_tips] > 0).float())
+        m_bif_lpvrpv = segment_mask[:, i_lpv] * segment_mask[:, i_rpv]   # both children present
 
-        # ── Pressure continuity at confluence ────────────────────
-        # MPV[0] is the confluence end. SV[0] and SMV[0] are also confluence ends.
-        # The predicted pressure_drop_pa[idx 0] is the pressure DROP from idx 0,
-        # which is 0 by construction. So we use the pressure-drop at the OTHER
-        # endpoint of each non-MPV branch — that's the inlet pressure relative
-        # to the confluence. For the model to be consistent, those branch-inlet-
-        # pressure contributions should align with the MPV's flow.
-        #
-        # More directly: at the confluence, MPV's pressure contribution is
-        # P_confluence (some absolute) = P_mpv_inlet
-        # For SV: P_sv_inlet = P_confluence + ΔP_sv  (since flow is sv → mpv)
-        # So the way to enforce continuity is via pressure_drop equivalence:
-        # ΔP across SV (full integral) and the mass-weighted contribution
-        # should be consistent with MPV's inlet condition.
-        #
-        # Practical proxy: the resistance at junction-end of MPV per unit Q
-        # should match the parallel combination of SV's and SMV's resistances.
-        #
-        # We use a simpler, valid residual:
-        #   At the junction point, the LOCAL pressure should be single-valued.
-        #   MPV inlet pressure (relative)     = 0 (cum_R[0]=0)
-        #   SV inlet pressure relative to MPV = ΔP_sv_total
-        #   These are NOT directly equal — but the Q-weighted ΔP across the
-        #   network should be consistent.
-        #
-        # We compute: residual = std{ ΔP_sv_total / Q_sv,
-        #                            ΔP_smv_total / Q_smv,
-        #                            (none for MPV — it has Q=1 and is the reference) }
-        # i.e., the per-branch "specific resistance" should be consistent.
-        #
-        # In Hagen-Poiseuille terms: R_branch = ΔP / Q (effective resistance)
-        # At a confluence, the parallel combination must hold:
-        #   R_inflow_parallel  = (R_sv⁻¹ + R_smv⁻¹)⁻¹
-        # And this should equal MPV-inlet effective resistance.
-        # We use a relative residual:
+        # ── Murray deviations: ‖delta‖² per junction ───────────
+        murr_in   = flow_out['inflow_delta'].pow(2).sum(dim=-1)        * m_inflow
+        murr_co   = flow_out['conf_outflow_delta'].pow(2).sum(dim=-1)  * m_conf_out
+        murr_bo   = flow_out['bif_outflow_delta'].pow(2).sum(dim=-1)   * m_bif
 
-        eps = 1e-6
-        # Per-branch total ΔP (last valid point), in Pa
-        dP_sv  = hemo_per_seg[i_sv]['pressure_drop_total']        # (B,)
-        dP_smv = hemo_per_seg[i_smv]['pressure_drop_total']
-        Q_sv   = flow_out['Q'][:, i_sv]
-        Q_smv  = flow_out['Q'][:, i_smv]
-        R_sv   = dP_sv  / (Q_sv * Q_REF_M3_PER_S + eps)   # Pa·s/m³
-        R_smv  = dP_smv / (Q_smv * Q_REF_M3_PER_S + eps)
-        # Parallel combination of inflow resistances
-        R_inflow_parallel = 1.0 / (1.0 / (R_sv + eps) + 1.0 / (R_smv + eps) + eps)
-        # MPV total ΔP (confluence → bifurcation)
-        dP_mpv = hemo_per_seg[i_mpv]['pressure_drop_total']
-        Q_mpv = flow_out['Q'][:, i_mpv].clamp(min=eps)
-        R_mpv = dP_mpv / (Q_mpv * Q_REF_M3_PER_S + eps)
-        # Residual: log-ratio (scale-invariant, symmetric)
-        # | log(R_mpv / R_inflow_parallel) |   ideal = 0
-        press_resid_conf = (
-            torch.log(R_mpv + eps) - torch.log(R_inflow_parallel + eps)
-        ).abs() * m_conf
-
-        # ── Pressure continuity at bifurcation ──────────────────
-        # Outflow branches share the same MPV-bifurcation inlet pressure.
-        # Each branch has ΔP from inlet (idx 0, bifurcation end) to outlet (idx -1).
-        # For pressure continuity, the OUTLETS of LPV/RPV are not same — they
-        # go to different liver sinusoids. So the inlet pressure (idx 0) should
-        # be a single value per branch, all equal to MPV[-1] cumulative pressure.
-        # Since pressure_drop_pa[idx 0] = 0 by construction for each branch,
-        # we use Q×R_first_segment as a proxy — the pressure-drop GRADIENT at
-        # idx 0 should be consistent.
-        # Cleaner: we check that Q_branch × R_branch_first_segment is consistent
-        # with the parallel combination at the bifurcation.
-
+        # ── ΔP per branch (Pa, ≥ 0, no division anywhere) ──────
+        dP_mpv  = hemo_per_seg[i_mpv]['pressure_drop_total']
+        dP_sv   = hemo_per_seg[i_sv]['pressure_drop_total']
+        dP_smv  = hemo_per_seg[i_smv]['pressure_drop_total']
         dP_lpv  = hemo_per_seg[i_lpv]['pressure_drop_total']
         dP_rpv  = hemo_per_seg[i_rpv]['pressure_drop_total']
         dP_tips = hemo_per_seg[i_tips]['pressure_drop_total']
-        Q_lpv   = flow_out['Q'][:, i_lpv]
-        Q_rpv   = flow_out['Q'][:, i_rpv]
-        Q_tips  = flow_out['Q'][:, i_tips]
-        R_lpv   = dP_lpv  / (Q_lpv  * Q_REF_M3_PER_S + eps)
-        R_rpv   = dP_rpv  / (Q_rpv  * Q_REF_M3_PER_S + eps)
-        R_tips  = dP_tips / (Q_tips * Q_REF_M3_PER_S + eps)
+        dP_lgv  = hemo_per_seg[i_lgv]['pressure_drop_total']
+        dP_pgv  = hemo_per_seg[i_pgv]['pressure_drop_total']
 
-        # Out branches in parallel (for patients with all of lpv/rpv): each branch
-        # has its own outlet pressure, so this is a different physics — they share
-        # the INLET only. We instead check that MPV's distal effective resistance
-        # connects sensibly to the average outflow resistance.
-        # We use a simpler aggregate: variance of log(R_branch) across active outflow
-        # branches should be bounded (not strictly zero — different outlets).
-        # This serves as a soft prior, not a hard residual.
-        log_R_out_stack = torch.stack([
-            torch.log(R_lpv  + eps),
-            torch.log(R_rpv  + eps),
-            torch.log(R_tips + eps),
-        ], dim=-1)   # (B, 3)
-        out_mask = torch.stack([
-            segment_mask[:, i_lpv],
-            segment_mask[:, i_rpv],
-            segment_mask[:, i_tips],
-        ], dim=-1)   # (B, 3)
-        # Mean of log_R among present branches
-        n_out = out_mask.sum(dim=-1).clamp(min=1.0)
-        log_R_out_mean = (log_R_out_stack * out_mask).sum(dim=-1) / n_out
-        # Variance among present branches
-        diff = (log_R_out_stack - log_R_out_mean.unsqueeze(-1)) * out_mask
-        press_resid_bifurc = (diff.pow(2).sum(dim=-1) / n_out) * m_bif
+        # Bifurcation pressure residual: only when both LPV and RPV are present.
+        # Normalized by P_SCALE_PA² → dimensionless, O(1).
+        press_resid_bifurc = (((dP_lpv - dP_rpv) / self.P_SCALE_PA).pow(2)) * m_bif_lpvrpv
 
-        # ── Pack interpretable feature vector ───────────────────
-        # All shape (B,)
+        # ── Interpretable feature vector for the predictor ─────
+        # 12 dims: 3 Murray devs + 1 bifurcation residual + 1 collateral
+        # fraction + 7 log1p(ΔP) per non-confluence-degenerate branch.
+        # log1p(ΔP) is bounded for any finite non-negative input → numerically safe.
+        collat_frac = flow_out['collateral_fraction']  # (B,)
         features = torch.stack([
-            murr_in, murr_out, press_resid_conf, press_resid_bifurc,
-            torch.log1p(R_mpv) * m_conf,                # log magnitude of MPV resistance
-            torch.log1p(R_inflow_parallel) * m_conf,    # log of inflow parallel R
-            log_R_out_mean * m_bif,                     # mean outflow log-R
-        ], dim=-1)                                      # (B, 7)
+            murr_in, murr_co, murr_bo,
+            press_resid_bifurc,
+            collat_frac,                                                       # NEW
+            torch.log1p(dP_mpv.clamp(min=0))  * segment_mask[:, i_mpv],
+            torch.log1p(dP_sv.clamp(min=0))   * segment_mask[:, i_sv],
+            torch.log1p(dP_smv.clamp(min=0))  * segment_mask[:, i_smv],
+            torch.log1p(dP_lpv.clamp(min=0))  * segment_mask[:, i_lpv],
+            torch.log1p(dP_rpv.clamp(min=0))  * segment_mask[:, i_rpv],
+            torch.log1p(dP_tips.clamp(min=0)) * segment_mask[:, i_tips],
+            torch.log1p(dP_lgv.clamp(min=0))  * segment_mask[:, i_lgv],         # NEW
+            torch.log1p(dP_pgv.clamp(min=0))  * segment_mask[:, i_pgv],         # NEW
+        ], dim=-1)                                                             # (B, 13)
         features = torch.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
         return {
             'murray_dev_inflow':  murr_in,
-            'murray_dev_outflow': murr_out,
-            'press_resid_conf':   press_resid_conf,
+            'murray_dev_conf_out': murr_co,
+            'murray_dev_bif_out': murr_bo,
             'press_resid_bifurc': press_resid_bifurc,
-            'confluence_active':  m_conf,
+            'collateral_fraction': collat_frac,
+            'inflow_active':      m_inflow,
+            'confluence_outflow_active': m_conf_out,
             'bifurcation_active': m_bif,
-            'R_mpv':              R_mpv * m_conf,
-            'R_inflow_parallel':  R_inflow_parallel * m_conf,
-            'log_R_out_mean':     log_R_out_mean * m_bif,
-            'features':           features,
+            'dP_per_branch':      torch.stack([dP_mpv, dP_sv, dP_smv, dP_lpv,
+                                               dP_rpv, dP_tips, dP_lgv, dP_pgv], dim=-1),
+            'features':           features,                                    # (B, 13)
         }
 
 
@@ -661,12 +657,12 @@ class PortalPressureNet(nn.Module):
         self.junction_phys = JunctionPhysics()
 
         # PVP predictor
-        # Inputs: flat branch embeds + Q + dP@junction-far-ends + junction features + aux
-        d_branches  = N_SEGMENTS * d_hidden            # 192
-        d_q         = N_SEGMENTS                       # 6
-        d_endpoint_dP = N_SEGMENTS                     # 1 ΔP per branch (at far-end)
-        d_junction  = 7                                # from JunctionPhysics.features
-        d_in = d_branches + d_q + d_endpoint_dP + d_junction + N_AUX
+        # Inputs: flat branch embeds + Q + junction features (incl. per-branch
+        # log1p(ΔP), Murray/pressure residuals, collateral fraction) + aux scalars
+        d_branches  = N_SEGMENTS * d_hidden            # 8 * 32 = 256
+        d_q         = N_SEGMENTS                       # 8
+        d_junction  = 13                               # from JunctionPhysics.features
+        d_in = d_branches + d_q + d_junction + N_AUX
 
         self.predictor = nn.Sequential(
             nn.Linear(d_in, d_hidden * 2),
@@ -737,27 +733,24 @@ class PortalPressureNet(nn.Module):
 
         # ── Per-branch Poiseuille hydrodynamics ─────────────────
         hemo_per_seg = []
-        endpoint_dP = torch.zeros(B, S, device=profiles.device)
+        endpoint_dP = torch.zeros(B, S, device=profiles.device)  # kept for inspection only
         for si in range(S):
             h = self.hydro(profiles[:, si], arc_lengths[:, si],
                            point_valid[:, si], Q[:, si])
             hemo_per_seg.append(h)
-            # Pressure drop at far-from-idx-0 endpoint (used as feature)
             endpoint_dP[:, si] = h['pressure_drop_total'] * segment_mask[:, si]
 
         # ── Junction physics residuals ──────────────────────────
         jp = self.junction_phys(hemo_per_seg, flow_out, segment_mask, has_tips)
 
         # ── Fuse and predict ────────────────────────────────────
+        # NOTE: per-branch log1p(ΔP) values are already inside jp['features']
+        # so we don't add a separate endpoint_dP feature (would be redundant).
         branch_flat = branch_embed.reshape(B, -1)                # (B, S*H)
-        # Scale endpoint_dP into a manageable range (Pa values can be large)
-        endpoint_dP_scaled = torch.log1p(endpoint_dP.abs()) * torch.sign(endpoint_dP)
-
         fused = torch.cat([
             branch_flat,                  # (B, S*H)
             Q,                            # (B, S)
-            endpoint_dP_scaled,           # (B, S)
-            jp['features'],               # (B, 7)
+            jp['features'],               # (B, 9)
             aux_norm,                     # (B, A)
         ], dim=-1)
         fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
@@ -826,21 +819,29 @@ class PhysicsInformedLoss(nn.Module):
         L_main = self.main(pvp_pred, label_norm)
 
         # ── L_murray: ‖logit deviations from Murray prior‖² ──────
+        # Three junctions now: inflow (sv,smv), confluence-outflow (mpv,lgv,pgv),
+        # bifurcation-outflow (lpv,rpv,tips). Each contributes ‖delta‖² weighted
+        # by junction activity (so absent junctions don't pull the loss).
         flow = model_out['flow_out']
-        # The deltas are (B, K). We weight by junction activity.
-        m_conf = model_out['junction']['confluence_active']
-        m_bif  = model_out['junction']['bifurcation_active']
-        d_in   = flow['inflow_delta']  * flow['inflow_mask']
-        d_out  = flow['outflow_delta'] * flow['outflow_mask']
-        L_murr_in  = (d_in.pow(2).sum(dim=-1) * m_conf).sum() / (m_conf.sum().clamp(min=1.0))
-        L_murr_out = (d_out.pow(2).sum(dim=-1) * m_bif).sum() / (m_bif.sum().clamp(min=1.0))
-        L_murray = L_murr_in + L_murr_out
+        m_in   = model_out['junction']['inflow_active']
+        m_co   = model_out['junction']['confluence_outflow_active']
+        m_bo   = model_out['junction']['bifurcation_active']
 
-        # ── L_pressure: junction continuity residuals ────────────
-        L_press = (
-            model_out['junction']['press_resid_conf'].sum() / (m_conf.sum().clamp(min=1.0))
-            + model_out['junction']['press_resid_bifurc'].sum() / (m_bif.sum().clamp(min=1.0))
-        )
+        d_in = flow['inflow_delta']        * flow['inflow_mask']
+        d_co = flow['conf_outflow_delta']  * flow['conf_outflow_mask']
+        d_bo = flow['bif_outflow_delta']   * flow['bif_outflow_mask']
+
+        L_murr_in = (d_in.pow(2).sum(dim=-1) * m_in).sum() / m_in.sum().clamp(min=1.0)
+        L_murr_co = (d_co.pow(2).sum(dim=-1) * m_co).sum() / m_co.sum().clamp(min=1.0)
+        L_murr_bo = (d_bo.pow(2).sum(dim=-1) * m_bo).sum() / m_bo.sum().clamp(min=1.0)
+        L_murray = L_murr_in + L_murr_co + L_murr_bo
+
+        # ── L_pressure: bifurcation pressure-continuity residual ────
+        # Only the bifurcation has a defendable pressure-equality constraint
+        # (LPV ≈ RPV, both feeding sinusoids). Confluence-outflow residual would
+        # require absolute upstream/downstream pressures we don't have.
+        L_press = (model_out['junction']['press_resid_bifurc'].sum()
+                   / m_bo.sum().clamp(min=1.0))
 
         # ── L_smooth: 2nd-derivative of radius profile (per branch) ──
         # Geometric prior: radius shouldn't oscillate point-to-point.
@@ -908,20 +909,36 @@ class PhysicsInformedLoss(nn.Module):
             L_mono = torch.tensor(0.0, device=pvp_pred.device)
 
         # ── Total ────────────────────────────────────────────────
-        L_total = (L_main
-                   + self.lambda_murray * L_murray
-                   + self.lambda_press  * L_press
-                   + self.lambda_smooth * L_smooth
-                   + self.lambda_physio * L_physio
-                   + self.lambda_mono   * L_mono)
+        # Safety: clamp each component to a sane upper bound so that no
+        # single term can produce NaN/inf or dominate the gradient
+        # catastrophically. Bounds are *very* permissive — they only kick
+        # in for genuinely-broken numerics, never for healthy training.
+        def _safe(x, cap=1e6):
+            if not torch.is_tensor(x):
+                x = torch.tensor(float(x), device=pvp_pred.device)
+            return torch.nan_to_num(x, nan=0.0, posinf=cap, neginf=cap).clamp(max=cap)
+
+        L_main_s    = _safe(L_main,    cap=1e3)
+        L_murray_s  = _safe(L_murray,  cap=1e3)
+        L_press_s   = _safe(L_press,   cap=1e3)
+        L_smooth_s  = _safe(L_smooth,  cap=1e3)
+        L_physio_s  = _safe(L_physio,  cap=1e3)
+        L_mono_s    = _safe(L_mono,    cap=1e3)
+
+        L_total = (L_main_s
+                   + self.lambda_murray * L_murray_s
+                   + self.lambda_press  * L_press_s
+                   + self.lambda_smooth * L_smooth_s
+                   + self.lambda_physio * L_physio_s
+                   + self.lambda_mono   * L_mono_s)
 
         log = {
-            'main':    float(L_main.item()),
-            'murray':  float(L_murray.item()) if torch.is_tensor(L_murray) else float(L_murray),
-            'press':   float(L_press.item())  if torch.is_tensor(L_press)  else float(L_press),
-            'smooth':  float(L_smooth.item()) if torch.is_tensor(L_smooth) else float(L_smooth),
-            'physio':  float(L_physio.item()) if torch.is_tensor(L_physio) else float(L_physio),
-            'mono':    float(L_mono.item())   if torch.is_tensor(L_mono)   else float(L_mono),
+            'main':    float(L_main_s.item()),
+            'murray':  float(L_murray_s.item()),
+            'press':   float(L_press_s.item()),
+            'smooth':  float(L_smooth_s.item()),
+            'physio':  float(L_physio_s.item()),
+            'mono':    float(L_mono_s.item()),
             'total':   float(L_total.item()),
         }
         return L_total, log
@@ -947,8 +964,8 @@ if __name__ == '__main__':
 
     # Mock a batch
     profiles_raw = torch.rand(B, S, N, 4) * 5 + 1  # positive geometry
-    profiles_raw[..., P_DIAM] = profiles_raw[..., P_DIAM].clamp(min=0.5)  # min diameter 0.5 mm
-    profiles_raw[..., P_AREA] = math.pi * (profiles_raw[..., P_DIAM] / 2).pow(2)  # circular consistency
+    profiles_raw[..., P_DIAM] = profiles_raw[..., P_DIAM].clamp(min=0.5)
+    profiles_raw[..., P_AREA] = math.pi * (profiles_raw[..., P_DIAM] / 2).pow(2)
     profiles_raw[..., P_INSC] = profiles_raw[..., P_DIAM] / 2 * 0.95
     profiles_raw[..., P_CURV] = torch.rand(B, S, N) * 0.05  # 1/mm
 
@@ -957,10 +974,12 @@ if __name__ == '__main__':
     point_valid   = torch.ones(B, S, N)
     point_valid[..., :3] = 0; point_valid[..., -3:] = 0  # endpoint protection
     segment_mask  = torch.ones(B, S)
-    # Half the batch has no TIPS
+    # Mix of presence patterns (some have TIPS, some have LGV/PGV)
     segment_mask[:, SEG_INDEX['tips']] = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    segment_mask[:, SEG_INDEX['lgv']]  = torch.tensor([0.0, 1.0, 1.0, 0.0])
+    segment_mask[:, SEG_INDEX['pgv']]  = torch.tensor([0.0, 0.0, 1.0, 1.0])
     aux_scalars   = torch.rand(B, N_AUX)
-    aux_norm      = aux_scalars  # already roughly normalized
+    aux_norm      = aux_scalars
     aux_mask      = torch.ones(B, N_AUX)
     is_post_tips  = segment_mask[:, SEG_INDEX['tips']].clone()
     label_norm    = torch.randn(B)
@@ -983,9 +1002,15 @@ if __name__ == '__main__':
     print("Forward pass OK")
     print(f"  pvp_pred:       {tuple(out['pvp_pred'].shape)}")
     print(f"  Q:              {tuple(out['Q'].shape)}")
-    print(f"  Q[0]:           {out['Q'][0].tolist()}")
-    print(f"  Q sums:         inflow={out['Q'][:, [SEG_INDEX['sv'], SEG_INDEX['smv']]].sum(dim=-1).tolist()}")
-    print(f"  Q sums:         outflow={out['Q'][:, [SEG_INDEX['lpv'], SEG_INDEX['rpv'], SEG_INDEX['tips']]].sum(dim=-1).tolist()}")
+    Q = out['Q']
+    print(f"  Q[0] by branch: {dict(zip(SEGMENTS, [round(v,3) for v in Q[0].tolist()]))}")
+    print(f"  Inflow sum   (sv+smv) = {(Q[:, SEG_INDEX['sv']] + Q[:, SEG_INDEX['smv']]).tolist()}")
+    print(f"  Conf-out sum (mpv+lgv+pgv) = "
+          f"{(Q[:, SEG_INDEX['mpv']] + Q[:, SEG_INDEX['lgv']] + Q[:, SEG_INDEX['pgv']]).tolist()}")
+    print(f"  Bif-out sum  (lpv+rpv+tips) vs Q_mpv = "
+          f"{(Q[:, SEG_INDEX['lpv']] + Q[:, SEG_INDEX['rpv']] + Q[:, SEG_INDEX['tips']]).tolist()} "
+          f"vs {Q[:, SEG_INDEX['mpv']].tolist()}")
+    print(f"  Collateral fraction (Q_lgv + Q_pgv) = {out['flow_out']['collateral_fraction'].tolist()}")
     print(f"  attn_weights:   {tuple(out['attn_weights'].shape)}")
     print(f"  hemo[0] keys:   {list(out['hemo_per_seg'][0].keys())}")
     print(f"  velocity range: [{out['hemo_per_seg'][0]['velocity_m_per_s'].min():.4f}, "

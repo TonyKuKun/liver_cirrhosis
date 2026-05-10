@@ -26,7 +26,7 @@ def main() -> None:
 
     root = Path(__file__).resolve().parent
     py = sys.executable
-    preprocess = [py, str(root / "preprocess.py"), "--data_root", args.data_root, "--model", args.model]
+    preprocess = [py, str(root / "pretrain" / "preprocess.py"), "--data_root", args.data_root, "--model", args.model]
     if args.api_key:
         preprocess += ["--api_key", args.api_key]
     if args.api_base_url:
@@ -38,7 +38,7 @@ def main() -> None:
     run(
         [
             py,
-            str(root / "train.py"),
+            str(root / "refinement" / "train.py"),
             "--data_root",
             args.data_root,
             "--out_dir",
@@ -52,8 +52,8 @@ def main() -> None:
         ]
     )
     ckpt = str(Path(args.out_dir) / "best.pt")
-    run([py, str(root / "predict.py"), "--data_root", args.data_root, "--checkpoint", ckpt])
-    check = [py, str(root / "check_and_smooth.py"), "--data_root", args.data_root, "--model", args.model]
+    run([py, str(root / "refinement" / "predict.py"), "--data_root", args.data_root, "--checkpoint", ckpt])
+    check = [py, str(root / "postprocess" / "check_and_smooth.py"), "--data_root", args.data_root, "--model", args.model]
     if args.api_key:
         check += ["--api_key", args.api_key]
     if args.api_base_url:
@@ -63,4 +63,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

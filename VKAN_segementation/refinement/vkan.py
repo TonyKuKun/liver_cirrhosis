@@ -295,21 +295,22 @@ class VKan(nn.Module):
         out = self.out_tr(out) # (B*D*H*W, 2)
         return out
 
-# Parameter counting
-Total_params = 0
-Trainable_params = 0
-NonTrainable_params = 0
+def count_params(model):
+    total = 0
+    trainable = 0
+    non_trainable = 0
+    for param in model.parameters():
+        n = int(np.prod(param.size()))
+        total += n
+        if param.requires_grad:
+            trainable += n
+        else:
+            non_trainable += n
+    return total, trainable, non_trainable
 
-vkan = VKan()
-for param in vkan.parameters():
-    mulValue = np.prod(param.size())
-    Total_params += mulValue
-    if param.requires_grad:
-        Trainable_params += mulValue
-    else:
-        NonTrainable_params += mulValue
 
-# Uncomment to print parameter counts
-# print(f'Total params: {Total_params}')
-# print(f'Trainable params: {Trainable_params}')
-# print(f'Non-trainable params: {NonTrainable_params}')
+if __name__ == "__main__":
+    total, trainable, non_trainable = count_params(VKan())
+    print(f"Total params: {total}")
+    print(f"Trainable params: {trainable}")
+    print(f"Non-trainable params: {non_trainable}")

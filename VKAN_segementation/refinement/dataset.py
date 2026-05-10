@@ -2,16 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 try:
-    from .config import discover_patients, require_existing_labels
-    from .mesh_ops import stl_to_voxels
+    from ..utils.common import discover_patients, require_existing_labels, stl_to_voxels
 except ImportError:
-    from config import discover_patients, require_existing_labels
-    from mesh_ops import stl_to_voxels
+    from VKAN_segementation.utils.common import discover_patients, require_existing_labels, stl_to_voxels
 
 
 class VesselSTLDataset(Dataset):
@@ -34,12 +31,10 @@ class VesselSTLDataset(Dataset):
         case = self.cases[idx]
         pre, bounds = stl_to_voxels(case.pretrain_stl, grid_size=self.grid_size)
         label, _ = stl_to_voxels(case.label_stl, grid_size=self.grid_size, bounds=bounds)
-        x = torch.from_numpy(pre[None]).float()
-        y = torch.from_numpy(label[None]).float()
         return {
             "name": case.name,
-            "input": x,
-            "label": y,
+            "input": torch.from_numpy(pre[None]).float(),
+            "label": torch.from_numpy(label[None]).float(),
             "bounds": torch.from_numpy(bounds).float(),
             "is_post_tips": torch.tensor(float(case.is_post_tips), dtype=torch.float32),
         }

@@ -43,25 +43,25 @@ The default model name is `gemma-4-31b-it`. If the API is not configured or fail
 Generate coarse `pretrain.stl`:
 
 ```powershell
-py VKAN_segementation\preprocess.py --data_root D:\your_patient_root --model gemma-4-31b-it
+py VKAN_segementation\pretrain\preprocess.py --data_root D:\your_patient_root --model gemma-4-31b-it
 ```
 
 Train:
 
 ```powershell
-py VKAN_segementation\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\vkan --grid_size 96 --epochs 120 --batch_size 1
+py VKAN_segementation\refinement\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\vkan --grid_size 96 --epochs 120 --batch_size 1
 ```
 
 Predict:
 
 ```powershell
-py VKAN_segementation\predict.py --data_root D:\your_patient_root --checkpoint VKAN_segementation\runs\vkan\best.pt
+py VKAN_segementation\refinement\predict.py --data_root D:\your_patient_root --checkpoint VKAN_segementation\runs\vkan\best.pt
 ```
 
 Smooth and quality-check:
 
 ```powershell
-py VKAN_segementation\check_and_smooth.py --data_root D:\your_patient_root --iterations 8
+py VKAN_segementation\postprocess\check_and_smooth.py --data_root D:\your_patient_root --iterations 8
 ```
 
 One command:
@@ -84,3 +84,10 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 - Coarse preprocessing intentionally prioritizes recall. It keeps portal vein, splenic vein, short SMV, LPV/RPV, compensation veins when visible, and TIPS for post-TIPS folders.
 - The refinement model learns a full target occupancy, not a subtraction mask, so it can both delete false positives and fill small false negatives.
 - `grid_size=96` is a practical default. Increase to `128` if GPU memory allows.
+
+## Code layout
+
+- `pretrain/`: DICOM loading, LLM/heuristic coarse planning, threshold/crop segmentation, and `pretrain.stl` export.
+- `refinement/`: STL dataset, VKAN-style model, training, prediction, and the original `vkan.py` model kept for reuse.
+- `postprocess/`: final mesh check and smoothing.
+- `utils/`: shared patient discovery, Gemma client, STL conversion, voxelization, and smoothing helpers.
