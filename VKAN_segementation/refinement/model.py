@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 
 class KANGate3D(nn.Module):
-    """Lightweight spline-like channel gate used in the VKAN refinement blocks."""
+    """Lightweight spline-like channel gate used in refinement blocks."""
 
     def __init__(self, channels: int, knots: int = 8) -> None:
         super().__init__()
@@ -69,12 +69,9 @@ class VesselVKAN(nn.Module):
         e2 = self.enc2(self.pool(e1))
         e3 = self.enc3(self.pool(e2))
         m = self.mid(self.pool(e3))
-        d3 = self._match(self.up3(m), e3)
-        d3 = self.dec3(torch.cat([d3, e3], dim=1))
-        d2 = self._match(self.up2(d3), e2)
-        d2 = self.dec2(torch.cat([d2, e2], dim=1))
-        d1 = self._match(self.up1(d2), e1)
-        d1 = self.dec1(torch.cat([d1, e1], dim=1))
+        d3 = self.dec3(torch.cat([self._match(self.up3(m), e3), e3], dim=1))
+        d2 = self.dec2(torch.cat([self._match(self.up2(d3), e2), e2], dim=1))
+        d1 = self.dec1(torch.cat([self._match(self.up1(d2), e1), e1], dim=1))
         return self.out(d1)
 
 

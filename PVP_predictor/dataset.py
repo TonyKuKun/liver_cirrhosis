@@ -56,18 +56,26 @@ from torch.utils.data import Dataset
 
 
 # ── Branch order (model indexes branches by this order) ────────────────
-SEGMENTS = ['mpv', 'sv', 'smv', 'lpv', 'rpv', 'tips']
+# Six "core" portal branches + two collateral (compensation) vessels.
+# Collaterals form in portal hypertension and decompress the system —
+# their presence/size correlates strongly with PVP severity.
+SEGMENTS = ['mpv', 'sv', 'smv', 'lpv', 'rpv', 'tips', 'lgv', 'pgv']
 N_SEGMENTS = len(SEGMENTS)
 SEG_INDEX = {n: i for i, n in enumerate(SEGMENTS)}
 
 # ── Topology of junctions (used by physics losses) ─────────────────────
-# Flow direction: children → parent
-#   SV + SMV     →  MPV       (confluence — 汇合)
-#   MPV          →  LPV + RPV (bifurcation — 分叉)
-#   MPV          →  TIPS      (shunt — 旁路, post-TIPS only)
+# Two-tier hierarchy:
+#   1) Confluence node (where SV+SMV meet, possibly tapping LGV/PGV off):
+#        Q_sv + Q_smv = Q_mpv + Q_lgv + Q_pgv      (mass conservation)
+#   2) Bifurcation node (MPV splits into liver branches + optional TIPS):
+#        Q_mpv = Q_lpv + Q_rpv + Q_tips            (mass conservation)
+#
+# Pre-TIPS patients MUST have MPV, SV, SMV, LPV, RPV; MAY have LGV/PGV.
+# Post-TIPS patients MUST have MPV, SV, SMV, TIPS; MAY have LPV/RPV/LGV/PGV.
 JUNCTIONS = {
-    'confluence':  {'parent': 'mpv', 'children': ['sv', 'smv']},
-    'bifurcation': {'parent': 'mpv', 'children': ['lpv', 'rpv', 'tips']},  # tips optional
+    'inflow':            {'children': ['sv', 'smv']},                # → confluence
+    'confluence_outflow': {'children': ['mpv', 'lgv', 'pgv']},        # confluence → ...
+    'bifurcation':       {'parent': 'mpv', 'children': ['lpv', 'rpv', 'tips']},
 }
 
 # Flow-direction convention along the per-point arrays (proximal → distal):
@@ -235,7 +243,11 @@ class PortalVeinDataset(Dataset):
                 'dir': pdir,
                 'label_file': label_file,
                 'unified_file': os.path.join(pdir, 'unified_features.json'),
-                'profile_file': os.path.join(pdir, 'centerline_profiles.json'),
+                # Fallback for when unified_features.json has empty `pointwise: {}`
+                # (the user's preprocessing pipeline writes per-point profiles
+                # to a separate file in some cases).
+                'pointwise_fallback_file': os.path.join(
+                    pdir, 'centerline_pointwise_profiles.json'),
                 'is_post_tips': '#' in name,
             })
 
@@ -253,13 +265,28 @@ class PortalVeinDataset(Dataset):
             self.data.append(item)
 
         if verbose:
+            n_empty_pw = sum(d.get('_pw_is_empty', False) for d in self.data)
+            n_with_any_pw = len(self.data) - n_empty_pw
+            n_from_unified = sum(d.get('_pw_source') == 'unified.pointwise'
+                                 for d in self.data)
+            n_from_fallback = sum(d.get('_pw_source') == 'centerline_pointwise_profiles.json'
+                                  for d in self.data)
             n_with_tips = sum(d['segment_mask'][SEG_INDEX['tips']] for d in self.data)
             n_with_lpvrpv = sum((d['segment_mask'][SEG_INDEX['lpv']] *
                                  d['segment_mask'][SEG_INDEX['rpv']])
                                 for d in self.data)
-            print(f"[Dataset] Loaded {len(self.data)} valid patients "
-                  f"(tips_segment: {int(n_with_tips)}, "
-                  f"both lpv+rpv: {int(n_with_lpvrpv)}).")
+            print(f"[Dataset] Loaded {len(self.data)} valid patients.")
+            print(f"          - with non-empty pointwise:     {n_with_any_pw}")
+            print(f"          - with empty pointwise {{}}:     {n_empty_pw}  "
+                  f"(these contribute 0 to all losses!)")
+            print(f"          - source = unified.pointwise:   {n_from_unified}")
+            print(f"          - source = fallback file:       {n_from_fallback}")
+            print(f"          - with tips_segment:            {int(n_with_tips)}")
+            print(f"          - with both lpv+rpv:            {int(n_with_lpvrpv)}")
+
+        # ── Per-branch availability diagnostics + unit auto-fix ─────
+        self._print_branch_diagnostics()
+        self._detect_and_fix_units()
 
         # ── Compute global normalization (over valid points only) ───
         self._compute_normalization()
@@ -269,15 +296,23 @@ class PortalVeinDataset(Dataset):
     # -----------------------------------------------------------------
     def _load_one(self, p):
         try:
-            with open(p['label_file'], 'r') as f:
+            with open(p['label_file'], 'r', encoding='utf-8') as f:
                 label = float(f.read().strip())
             if not np.isfinite(label):
                 return None
 
             unified = {}
             if os.path.exists(p['unified_file']):
-                with open(p['unified_file'], 'r') as f:
+                # CRITICAL: explicit utf-8 encoding (Chinese Windows defaults to GBK,
+                # which crashes on degree symbols, μ, π, or non-ASCII characters
+                # in the JSON output of the preprocessing pipeline).
+                with open(p['unified_file'], 'r', encoding='utf-8') as f:
                     unified = json.load(f)
+            else:
+                # No unified_features.json → skip this patient entirely.
+                # We do NOT fall back to centerline_profiles.json — the unified
+                # file is the single source of truth.
+                return None
 
             # Per-patient is_post_tips: trust both folder convention and JSON meta
             meta = unified.get('_meta', {}) or {}
@@ -291,13 +326,36 @@ class PortalVeinDataset(Dataset):
             confluence_3d = self._load_confluence_3d(unified)
 
             # ── Per-point profiles (with NaN-mask) ─────────────────
+            # PRIMARY: unified_features.json's `pointwise` field
+            # FALLBACK: centerline_pointwise_profiles.json (same folder)
+            #          — used when `pointwise` in unified is empty.
             pw_src = unified.get('pointwise', {}) or {}
-            if not pw_src and os.path.exists(p['profile_file']):
-                with open(p['profile_file'], 'r') as f:
-                    pw_src = json.load(f)
+            pw_source_str = 'unified.pointwise'
+
+            if (not pw_src or len(pw_src) == 0) and os.path.exists(p['pointwise_fallback_file']):
+                try:
+                    with open(p['pointwise_fallback_file'], 'r', encoding='utf-8') as f:
+                        fb = json.load(f)
+                    # The fallback file has segments at top level (mpv, sv, …, _meta)
+                    # — drop _meta and any non-dict entries.
+                    pw_src = {k: v for k, v in fb.items()
+                              if isinstance(v, dict) and not k.startswith('_')}
+                    pw_source_str = 'centerline_pointwise_profiles.json'
+                except UnicodeDecodeError as e:
+                    if self.verbose:
+                        print(f"[Dataset] ❌ Unicode error reading fallback for "
+                              f"{p['name']}: {e}")
+                except Exception as e:
+                    if self.verbose:
+                        print(f"[Dataset] ⚠️  Could not load pointwise fallback for "
+                              f"{p['name']}: {type(e).__name__}: {e}")
+
+            # Track empty-pointwise patients separately for diagnostics
+            pw_is_empty = (not pw_src) or (len(pw_src) == 0)
 
             profiles, point_valid, arc_lengths, segment_mask = \
-                self._load_pointwise(pw_src)
+                self._load_pointwise(pw_src, patient_name=p['name'],
+                                     source_label=pw_source_str)
 
             # ── Optional: JSON-precomputed quantities for evaluation ──
             extras_for_eval = self._load_extras(unified)
@@ -315,10 +373,20 @@ class PortalVeinDataset(Dataset):
                 'label':         np.float32(label),
                 'is_post_tips':  is_post_tips,
                 'extras_for_eval': extras_for_eval,
+                '_pw_is_empty':  pw_is_empty,        # diagnostic flag
+                '_pw_source':    pw_source_str,      # 'unified.pointwise' or 'centerline_…'
             }
+        except UnicodeDecodeError as e:
+            if self.verbose:
+                print(f"[Dataset] ❌ Unicode error on {p['name']}: {e}")
+                print(f"           File: {p['unified_file']}")
+                print(f"           Hint: forcing utf-8 didn't work — "
+                      f"file may actually be GBK-encoded or corrupted.")
+            return None
         except Exception as e:
             if self.verbose:
-                print(f"[Dataset] failed to load {p['name']}: {e}")
+                print(f"[Dataset] failed to load {p['name']}: "
+                      f"{type(e).__name__}: {e}")
             return None
 
     def _load_aux(self, unified):
@@ -357,7 +425,7 @@ class PortalVeinDataset(Dataset):
             return np.asarray(cp, dtype=np.float32)
         return np.zeros(3, dtype=np.float32)
 
-    def _load_pointwise(self, pw_json):
+    def _load_pointwise(self, pw_json, patient_name=None, source_label='?'):
         """
         Returns:
             profiles     (S, N, 4)
@@ -371,12 +439,41 @@ class PortalVeinDataset(Dataset):
         arc_lengths = np.zeros((S, N), dtype=np.float32)
         seg_mask    = np.zeros(S, dtype=np.float32)
 
+        if not pw_json:
+            return profiles, point_valid, arc_lengths, seg_mask
+
+        # Build case-insensitive key map (handles 'MPV' vs 'mpv' vs 'Mpv')
+        key_map = {k.lower(): k for k in pw_json.keys() if isinstance(k, str)}
+
+        # First-time inspection: log full structure of the FIRST populated patient
+        # so we can verify the JSON schema matches our assumptions.
+        if not hasattr(self, '_inspected_pointwise'):
+            print(f"\n[Dataset] === Inspecting first populated pointwise "
+                  f"(patient: {patient_name}, source: {source_label}) ===")
+            print(f"  Top-level pointwise keys: {sorted(pw_json.keys())}")
+            for k, v in pw_json.items():
+                if isinstance(v, dict):
+                    sub = sorted(v.keys())
+                    print(f"  pointwise['{k}']: subkeys = {sub}")
+                    for fkey in PROFILE_KEYS + ['arc_length_mm']:
+                        if fkey in v:
+                            arr = v[fkey]
+                            n = len(arr) if hasattr(arr, '__len__') else 'scalar'
+                            sample = list(arr[:3]) if hasattr(arr, '__len__') and len(arr) > 0 else 'empty'
+                            print(f"      '{fkey}': len={n}, first3={sample}")
+                else:
+                    print(f"  pointwise['{k}']: type={type(v).__name__} (not a dict)")
+            print()
+            self._inspected_pointwise = True
+
         for si, sname in enumerate(SEGMENTS):
             seg_data = pw_json.get(sname, None)
-            if not seg_data:
+            if seg_data is None and sname.lower() in key_map:
+                seg_data = pw_json[key_map[sname.lower()]]
+            if not seg_data or not isinstance(seg_data, dict):
                 continue
             area_arr = seg_data.get('area', None)
-            if area_arr is None or len(area_arr) < 5:
+            if area_arr is None or not hasattr(area_arr, '__len__') or len(area_arr) < 5:
                 continue
 
             seg_mask[si] = 1.0
@@ -384,7 +481,6 @@ class PortalVeinDataset(Dataset):
             # Resample arc_length, use as ground truth s(p)
             arc_raw = seg_data.get('arc_length_mm', None)
             if arc_raw is None or len(arc_raw) < 2:
-                # synthesize uniform arc
                 arc_lengths[si] = np.linspace(0, 1, N).astype(np.float32)
             else:
                 arc_lengths[si] = _resample(arc_raw, N)
@@ -413,8 +509,117 @@ class PortalVeinDataset(Dataset):
         return out
 
     # -----------------------------------------------------------------
-    # Normalization (mask-aware)
+    # Unit auto-detection (CRITICAL: catches data preprocessing bugs)
     # -----------------------------------------------------------------
+    def _detect_and_fix_units(self):
+        """
+        Compare area, eq_diameter, inscribed_radius across all loaded patients.
+        Internal consistency for circular cross-sections demands:
+            area_mm² ≈ π · (eq_diameter_mm / 2)²
+            eq_diameter_mm ≈ 2 · inscribed_radius_mm
+
+        If a ratio is far from 1, a unit mismatch is likely. We auto-detect
+        common conversion factors (cm vs mm) and apply them uniformly.
+
+        This catches the (very common) preprocessing mistake where vtkXMLPolyData
+        scalar arrays are stored in cm while metadata is in mm.
+        """
+        if not self.data:
+            return
+        A_all, D_all, R_all = [], [], []
+        for d in self.data:
+            v = (d['point_valid'] * d['segment_mask'][:, None]) > 0
+            prof = d['profiles']
+            A_all.append(prof[..., P_AREA][v])
+            D_all.append(prof[..., P_DIAM][v])
+            R_all.append(prof[..., P_INSC][v])
+        A = np.concatenate(A_all); D = np.concatenate(D_all); R = np.concatenate(R_all)
+        ok = (A > 1e-9) & (D > 1e-9) & (R > 1e-9)
+        if ok.sum() < 50:
+            return  # not enough valid points
+        A, D, R = A[ok], D[ok], R[ok]
+
+        # Ratio 1: ratio of (π·(D/2)²) / area  -- should be ≈ 1
+        # If ≈ 100 → area is in cm², D is in mm
+        # If ≈ 0.01 → area is in mm², D is in cm (scaled differently)
+        # If ≈ 1 → both in same units (good)
+        ratio_AD = float(np.median(np.pi * (D / 2.0) ** 2 / A))
+
+        # Ratio 2: D / (2·R_insc)  -- should be ≈ 1
+        # If ≈ 0.1 → D is in cm, R_insc is in mm
+        # If ≈ 10  → D is in mm, R_insc is in cm
+        ratio_DR = float(np.median(D / (2.0 * R)))
+
+        scale_A, scale_D, scale_R = 1.0, 1.0, 1.0  # multiplicative fixes
+
+        # Detect: D is in cm (×10), R is in mm
+        if 0.05 < ratio_DR < 0.2:
+            scale_D = 10.0   # cm → mm
+        elif 5.0 < ratio_DR < 20.0:
+            scale_R = 10.0   # cm → mm
+
+        # Detect: A is in cm² (×100), D is in mm  (after D fix)
+        # After scaling D, recompute the area-vs-diameter consistency
+        # Expected: π·(D_fixed/2)² / A  ≈ 1 if A is correct
+        # If ≈ 100 → A in cm² → multiply A by 100
+        eff_ratio_AD = ratio_AD * (scale_D ** 2)
+        if 50.0 < eff_ratio_AD < 200.0:
+            scale_A = 100.0  # cm² → mm²
+        elif 0.005 < eff_ratio_AD < 0.02:
+            scale_A = 0.01   # m² → mm² (very unlikely, but possible)
+
+        if scale_A != 1.0 or scale_D != 1.0 or scale_R != 1.0:
+            print("=" * 64)
+            print("[Dataset] ⚠️  UNIT INCONSISTENCY DETECTED IN POINTWISE DATA")
+            print(f"  median ratio  π·(D/2)² / area = {ratio_AD:.4f}  (expected ≈ 1)")
+            print(f"  median ratio  D / (2·R_insc)   = {ratio_DR:.4f}  (expected ≈ 1)")
+            print(f"  → Auto-correcting:  area  × {scale_A}")
+            print(f"                      diam  × {scale_D}")
+            print(f"                      R_insc× {scale_R}")
+            print(f"  These are critical for Hagen-Poiseuille (WSS, Re, ΔP).")
+            print(f"  Check your CT preprocessing pipeline for unit consistency.")
+            print("=" * 64)
+
+            for d in self.data:
+                d['profiles'][..., P_AREA] *= scale_A
+                d['profiles'][..., P_DIAM] *= scale_D
+                d['profiles'][..., P_INSC] *= scale_R
+        else:
+            if self.verbose:
+                print(f"[Dataset] Unit check OK: A/πr² ratio={ratio_AD:.3f}, "
+                      f"D/2R ratio={ratio_DR:.3f} (both should be ≈ 1)")
+
+    # -----------------------------------------------------------------
+    # Per-branch loading diagnostics
+    # -----------------------------------------------------------------
+    def _print_branch_diagnostics(self):
+        if not self.verbose or not self.data:
+            return
+        n_per_branch = {sn: 0 for sn in SEGMENTS}
+        for d in self.data:
+            for si, sn in enumerate(SEGMENTS):
+                if d['segment_mask'][si] > 0:
+                    n_per_branch[sn] += 1
+        print("[Dataset] Pointwise data availability per branch:")
+        for sn in SEGMENTS:
+            n = n_per_branch[sn]
+            mark = "✓" if n > 0 else "❌  ZERO patients have this branch!"
+            print(f"   {sn:>5s} : {n:3d} / {len(self.data)}  {mark}")
+        # Anatomical sanity warnings
+        if n_per_branch['lpv'] == 0 or n_per_branch['rpv'] == 0:
+            print("[Dataset] ⚠️  WARNING: LPV or RPV missing from ALL patients.")
+            print("           Anatomically, every patient should have both.")
+            print("           Check your JSON's `pointwise` keys — possibly using")
+            print("           different names (e.g. 'LPV', 'left_portal_vein').")
+        n_post_tips_with_tips = sum(
+            d['segment_mask'][SEG_INDEX['tips']] for d in self.data
+            if d['is_post_tips']
+        )
+        n_post_tips_total = sum(d['is_post_tips'] for d in self.data)
+        if n_post_tips_total > 0 and n_post_tips_with_tips == 0:
+            print(f"[Dataset] ⚠️  WARNING: {n_post_tips_total} post-TIPS patients but"
+                  f" 0 have a tips pointwise segment.")
+            print(f"           Check `pointwise.tips` key in JSON.")
     def _compute_normalization(self):
         # Per-channel statistics over valid points across the entire dataset
         per_channel_vals = [[] for _ in range(N_PROFILE_FEAT)]

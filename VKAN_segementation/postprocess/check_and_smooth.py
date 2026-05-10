@@ -5,13 +5,9 @@ import json
 from pathlib import Path
 
 try:
-    from .config import discover_patients
-    from .llm_client import GemmaClient
-    from .mesh_ops import smooth_stl
+    from ..utils.common import GemmaClient, discover_patients, smooth_stl
 except ImportError:
-    from config import discover_patients
-    from llm_client import GemmaClient
-    from mesh_ops import smooth_stl
+    from VKAN_segementation.utils.common import GemmaClient, discover_patients, smooth_stl
 
 
 def _mesh_summary(path: Path) -> dict:
@@ -41,7 +37,7 @@ def llm_mesh_check(client: GemmaClient, case_name: str, summary: dict, is_post_t
         "is_post_tips": is_post_tips,
         "mesh_summary": summary,
         "checklist": [
-            "portal vein tree should include SV, short SMV, LPV, RPV",
+            "include SV, short SMV, LPV, RPV",
             "keep LGV/PGV if compensation exists",
             "keep TIPS stent/tube for post-TIPS cases",
             "flag severe fragmentation, missing branch, or obvious non-vessel shell",
@@ -60,8 +56,7 @@ def check_and_smooth_case(case, client: GemmaClient | None = None, iterations: i
     summary = _mesh_summary(case.predict_stl)
     llm = llm_mesh_check(client, case.name, summary, case.is_post_tips) if client else {}
     try:
-        llm_iter = int(llm.get("smooth_iterations", iterations))
-        iterations = max(0, min(llm_iter, 20))
+        iterations = max(0, min(int(llm.get("smooth_iterations", iterations)), 20))
     except Exception:
         pass
     report = {"mesh": summary, "llm_check": llm, "smooth_iterations": iterations}

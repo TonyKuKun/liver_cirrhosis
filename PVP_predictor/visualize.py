@@ -128,10 +128,13 @@ def _format_inference(out, batch, ds, i):
         'pvp_true_mmHg': pvp_true,
         'is_post_tips':  bool(batch['is_post_tips'][0].item() > 0.5),
         'Q_per_segment': out['Q'][0].cpu().numpy(),
-        'inflow_split':  out['flow_out']['inflow_frac'][0].cpu().numpy(),
-        'outflow_split': out['flow_out']['outflow_frac'][0].cpu().numpy(),
-        'inflow_delta':  out['flow_out']['inflow_delta'][0].cpu().numpy(),
-        'outflow_delta': out['flow_out']['outflow_delta'][0].cpu().numpy(),
+        'inflow_split':       out['flow_out']['inflow_frac'][0].cpu().numpy(),
+        'conf_outflow_split': out['flow_out']['conf_outflow_frac'][0].cpu().numpy(),
+        'bif_outflow_split':  out['flow_out']['bif_outflow_frac'][0].cpu().numpy(),
+        'inflow_delta':       out['flow_out']['inflow_delta'][0].cpu().numpy(),
+        'conf_outflow_delta': out['flow_out']['conf_outflow_delta'][0].cpu().numpy(),
+        'bif_outflow_delta':  out['flow_out']['bif_outflow_delta'][0].cpu().numpy(),
+        'collateral_fraction': float(out['flow_out']['collateral_fraction'][0].item()),
         'attn_weights':  out['attn_weights'][0].cpu().numpy(),
         'hemo':          hemo,
         'junction':      {k: (v[0].cpu().numpy() if torch.is_tensor(v) and v.dim() > 0
@@ -238,7 +241,7 @@ def _gather_centerline(patient_result, segments=None):
     Collect (centerline_xyz, scalar_per_point) by interpolating the per-segment
     arc-length-indexed fields back to a 3D position via the segment endpoints.
 
-    Returns: 
+    Returns:
         centerline_pts (M, 3) — physical positions
         seg_id         (M,)   — which segment each point came from
         arc            (M,)   — arc length along its segment
@@ -405,51 +408,70 @@ def plot_attention(patient_result, ax_dict=None, save_path=None):
 
 
 def plot_flow_splits(patient_result, save_path=None):
-    """Bar chart: model's split fractions vs Murray-3 prior from junction diameters."""
+    """3-panel bar chart: model splits vs Murray-3 priors at all 3 junctions."""
     try:
         import matplotlib.pyplot as plt
     except ImportError:
         print("[Plot] matplotlib not installed.")
         return None
 
-    # Compute Murray priors from diameters (idx 0 — junction-end)
+    # Murray prior from junction-end diameters (idx 0)
     d = lambda sn: patient_result['hemo'][SEG_INDEX[sn]]['eq_diameter_mm'][0]
-    murray3 = lambda diams: np.array(diams) ** 3 / (np.sum(np.array(diams) ** 3) + 1e-9)
+    pres = lambda sn: patient_result['hemo'][SEG_INDEX[sn]]['present']
+    def murray3(diams_with_mask):
+        cubes = np.array([di**3 if mi else 0.0 for di, mi in diams_with_mask])
+        s = cubes.sum() + 1e-9
+        return cubes / s
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
-    # Inflow
-    diams_in = [d('sv'), d('smv')]
+    # ── Panel 1: Inflow split (sv, smv) ─────────────────────
+    diams_in = [(d('sv'),  pres('sv')),  (d('smv'), pres('smv'))]
     prior_in = murray3(diams_in)
-    pred_in = patient_result['inflow_split']
+    pred_in  = patient_result['inflow_split']
     x = np.arange(2)
-    axes[0].bar(x - 0.18, prior_in, 0.35, label='Murray prior', color='steelblue', alpha=0.7)
-    axes[0].bar(x + 0.18, pred_in,  0.35, label='Model', color='salmon', alpha=0.9)
+    axes[0].bar(x - 0.18, prior_in, 0.35, label='Murray-3 prior', color='steelblue', alpha=0.7)
+    axes[0].bar(x + 0.18, pred_in,  0.35, label='Model',         color='salmon',    alpha=0.9)
     axes[0].set_xticks(x); axes[0].set_xticklabels(['SV', 'SMV'])
-    axes[0].set_title('Inflow split (sv + smv → mpv)')
+    axes[0].set_title('Inflow split  (Q_sv + Q_smv = 1)')
     axes[0].set_ylabel('flow fraction'); axes[0].set_ylim(0, 1)
-    axes[0].legend()
+    axes[0].legend(loc='upper right', fontsize=8)
 
-    # Outflow
-    has_tips = patient_result['hemo'][SEG_INDEX['tips']]['present']
-    if has_tips:
-        diams_out = [d('lpv'), d('rpv'), d('tips')]
-        names_out = ['LPV', 'RPV', 'TIPS']
-    else:
-        diams_out = [d('lpv'), d('rpv'), 0.0]
-        names_out = ['LPV', 'RPV', 'TIPS\n(absent)']
-    prior_out = murray3([diams_out[0], diams_out[1], diams_out[2] if has_tips else 1e-9])
-    if not has_tips:
-        prior_out[2] = 0.0
-    pred_out = patient_result['outflow_split']
+    # ── Panel 2: Confluence outflow split (mpv, lgv, pgv) — NEW ──
+    diams_co = [(d('mpv'), pres('mpv')),
+                (d('lgv'), pres('lgv')),
+                (d('pgv'), pres('pgv'))]
+    prior_co = murray3(diams_co)
+    pred_co  = patient_result['conf_outflow_split']
+    names_co = ['MPV',
+                'LGV' if pres('lgv') else 'LGV\n(absent)',
+                'PGV' if pres('pgv') else 'PGV\n(absent)']
     x = np.arange(3)
-    axes[1].bar(x - 0.18, prior_out, 0.35, label='Murray prior', color='steelblue', alpha=0.7)
-    axes[1].bar(x + 0.18, pred_out,  0.35, label='Model',        color='salmon',    alpha=0.9)
-    axes[1].set_xticks(x); axes[1].set_xticklabels(names_out)
-    axes[1].set_title('Outflow split (mpv → lpv + rpv [+tips])')
-    axes[1].set_ylim(0, 1); axes[1].legend()
+    axes[1].bar(x - 0.18, prior_co, 0.35, label='Murray-3 prior', color='steelblue', alpha=0.7)
+    axes[1].bar(x + 0.18, pred_co,  0.35, label='Model',         color='salmon',    alpha=0.9)
+    axes[1].set_xticks(x); axes[1].set_xticklabels(names_co)
+    axes[1].set_title(f'Confluence outflow  '
+                      f'(collateral burden = {1-pred_co[0]:.2f})')
+    axes[1].set_ylim(0, 1); axes[1].legend(loc='upper right', fontsize=8)
 
-    fig.suptitle(f"{patient_result['name']}: flow rate parameterization", fontsize=11)
+    # ── Panel 3: Bifurcation split (lpv, rpv, tips) ─────────
+    diams_bo = [(d('lpv'),  pres('lpv')),
+                (d('rpv'),  pres('rpv')),
+                (d('tips'), pres('tips'))]
+    prior_bo = murray3(diams_bo)
+    pred_bo  = patient_result['bif_outflow_split']
+    names_bo = ['LPV', 'RPV',
+                'TIPS' if pres('tips') else 'TIPS\n(absent)']
+    x = np.arange(3)
+    axes[2].bar(x - 0.18, prior_bo, 0.35, label='Murray-3 prior', color='steelblue', alpha=0.7)
+    axes[2].bar(x + 0.18, pred_bo,  0.35, label='Model',         color='salmon',    alpha=0.9)
+    axes[2].set_xticks(x); axes[2].set_xticklabels(names_bo)
+    axes[2].set_title(f'Bifurcation outflow  (Q_mpv = {pred_co[0]:.2f})')
+    axes[2].set_ylim(0, 1); axes[2].legend(loc='upper right', fontsize=8)
+
+    fig.suptitle(f"{patient_result['name']}: flow rate parameterization "
+                 f"(PVP_pred={patient_result['pvp_pred_mmHg']:.1f} vs "
+                 f"true={patient_result['pvp_true_mmHg']:.1f} mmHg)", fontsize=11)
     fig.tight_layout()
     if save_path:
         fig.savefig(save_path, dpi=120, bbox_inches='tight')
@@ -458,7 +480,7 @@ def plot_flow_splits(patient_result, save_path=None):
 
 
 def junction_diagnostic_table(patient_results):
-    """Returns a DataFrame-like list of dicts summarizing junction physics."""
+    """Per-patient junction physics summary."""
     rows = []
     for r in patient_results:
         j = r['junction']
@@ -466,11 +488,12 @@ def junction_diagnostic_table(patient_results):
             'name': r['name'],
             'pvp_pred': r['pvp_pred_mmHg'],
             'pvp_true': r['pvp_true_mmHg'],
-            'is_post_tips': r['is_post_tips'],
-            'murray_dev_inflow':  float(j.get('murray_dev_inflow', 0)),
-            'murray_dev_outflow': float(j.get('murray_dev_outflow', 0)),
-            'press_resid_conf':   float(j.get('press_resid_conf', 0)),
-            'press_resid_bifurc': float(j.get('press_resid_bifurc', 0)),
+            'is_post_tips':           r['is_post_tips'],
+            'collateral_fraction':    r['collateral_fraction'],
+            'murray_dev_inflow':      float(j.get('murray_dev_inflow', 0)),
+            'murray_dev_conf_out':    float(j.get('murray_dev_conf_out', 0)),
+            'murray_dev_bif_out':     float(j.get('murray_dev_bif_out', 0)),
+            'press_resid_bifurc':     float(j.get('press_resid_bifurc', 0)),
         })
     return rows
 

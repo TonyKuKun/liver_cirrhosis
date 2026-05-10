@@ -13,8 +13,8 @@ try:
     from .dataset import VesselSTLDataset, collate_fn
     from .model import DiceBCELoss, VesselVKAN, dice_score
 except ImportError:
-    from dataset import VesselSTLDataset, collate_fn
-    from model import DiceBCELoss, VesselVKAN, dice_score
+    from VKAN_segementation.refinement.dataset import VesselSTLDataset, collate_fn
+    from VKAN_segementation.refinement.model import DiceBCELoss, VesselVKAN, dice_score
 
 
 def set_seed(seed: int) -> None:
@@ -82,17 +82,12 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     best_dice = -1.0
     history = []
-    names = [case.name for case in ds.cases]
-    (out_dir / "cases.json").write_text(json.dumps({"cases": names}, indent=2), encoding="utf-8")
+    (out_dir / "cases.json").write_text(json.dumps({"cases": [case.name for case in ds.cases]}, indent=2), encoding="utf-8")
 
     for epoch in range(1, args.epochs + 1):
         train_log = run_epoch(model, train_loader, criterion, device, optimizer)
-        if val_loader is not None:
-            val_log = run_epoch(model, val_loader, criterion, device)
-        else:
-            val_log = train_log
-        row = {"epoch": epoch, "train": train_log, "val": val_log}
-        history.append(row)
+        val_log = run_epoch(model, val_loader, criterion, device) if val_loader is not None else train_log
+        history.append({"epoch": epoch, "train": train_log, "val": val_log})
         if val_log["dice"] > best_dice:
             best_dice = val_log["dice"]
             torch.save(
@@ -107,8 +102,7 @@ def main() -> None:
             )
         if epoch == 1 or epoch % 5 == 0:
             print(
-                f"[train] epoch={epoch:03d} "
-                f"loss={train_log['loss']:.4f} dice={train_log['dice']:.4f} "
+                f"[train] epoch={epoch:03d} loss={train_log['loss']:.4f} dice={train_log['dice']:.4f} "
                 f"val_loss={val_log['loss']:.4f} val_dice={val_log['dice']:.4f}"
             )
 

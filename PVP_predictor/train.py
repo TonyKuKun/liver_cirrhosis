@@ -181,9 +181,15 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
 
         if epoch % args.print_every == 0 or epoch == 1:
             print(f"[Fold {fold_idx} | Ep {epoch:3d}] "
-                  f"train_loss={train_log['total']:.4f} mae={train_log['mae']:.3f} "
-                  f"| val_loss={val_log['total']:.4f} mae={val_log['mae']:.3f} "
-                  f"r2={val_log['r2']:.3f} | best_mae@{best_epoch}={best_val_mae:.3f}")
+                  f"train={train_log['total']:.4f} "
+                  f"(main={train_log['main']:.3f} murr={train_log['murray']:.3f} "
+                  f"press={train_log['press']:.3f} smth={train_log['smooth']:.3f} "
+                  f"phys={train_log['physio']:.3f}) mae={train_log['mae']:.2f} "
+                  f"| val={val_log['total']:.4f} "
+                  f"(main={val_log['main']:.3f} murr={val_log['murray']:.3f} "
+                  f"press={val_log['press']:.3f} phys={val_log['physio']:.3f}) "
+                  f"mae={val_log['mae']:.2f} r2={val_log['r2']:.2f} "
+                  f"| best={best_val_mae:.2f}@{best_epoch}")
 
         if epochs_no_improve >= args.patience:
             print(f"[Fold {fold_idx}] Early stopping at epoch {epoch} "
