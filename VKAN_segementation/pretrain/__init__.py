@@ -1,2 +1,2 @@
-"""Step 1: DICOM CT to coarse pretrain STL."""
+"""Step 1: patient/dcm CT slices to coarse pretrain STL."""
 

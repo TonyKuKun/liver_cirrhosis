@@ -2,12 +2,11 @@
 
 This folder implements the workflow:
 
-1. Read `patient/dcm` DICOM CT slices.
+1. Read DICOM slices from `patient/dcm/`.
 2. Use Gemma/OpenAI-compatible API when configured to choose a high-recall HU window and crop box.
 3. Fall back to portal-venous heuristics when the API is unavailable.
-4. Save coarse `patient/pretrain.nii.gz` for training and `patient/pretrain.stl` for visual review.
-5. Convert `patient/mask` DICOM differences to `patient/mask.nii.gz` labels.
-6. Train a VKAN-style 3D refinement network from NIfTI masks, then save `patient/predict_mask.nii.gz`, `patient/predict.stl`, and `patient/predict_smooth.stl`.
+4. Save coarse `patient/pretrain.stl` for training and visual review.
+5. Train a VKAN-style 3D refinement network from `pretrain.stl` and `vessel.stl`, then save `patient/predict.stl` and `patient/predict_smooth.stl`.
 
 Patient naming:
 
@@ -40,7 +39,7 @@ The default model name is `gemma-4-31b-it`. If the API is not configured or fail
 
 ## Step-by-step
 
-Generate `pretrain.nii.gz`, `mask.nii.gz`, and inspection `pretrain.stl`:
+Generate inspection/training `pretrain.stl` from `patient/dcm/`:
 
 ```powershell
 py VKAN_segementation\pretrain\preprocess.py --data_root D:\your_patient_root --model gemma-4-31b-it
@@ -72,27 +71,27 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 
 ## Outputs per patient
 
-- `pretrain.nii.gz`: coarse binary vessel candidate used by VKAN training and prediction.
-- `mask.nii.gz`: binary training label derived from `mask` vs `dcm` raw pixel differences.
 - `pretrain.stl`: coarse vessel candidate for visual inspection; empty masks and cases over 20,000KB are flagged for review.
+- `pre.stl`: optional manual coarse reference; when present, preprocessing uses its patient-space bounds to tighten the crop.
+- `vessel.stl`: manual vessel label used by VKAN training and overlap diagnostics.
 - `vkan_work/coarse_plan.json`: HU range and crop box used.
-- `vkan_work/pretrain_meta.json`: preprocessing version, QA status, NIfTI paths, and output statistics.
+- `vkan_work/pretrain_meta.json`: preprocessing version, DICOM input timestamp, QA status, overlap diagnostics, and output statistics.
 - `vkan_work/pretrain_mask.npy`: coarse mask for debugging.
-- `predict_mask.nii.gz`: VKAN refined binary prediction.
 - `predict.stl`: VKAN refined vessel.
 - `predict_smooth.stl`: smoothed final mesh.
 - `vkan_work/predict_check.json`: mesh summary and optional LLM check.
 
 ## Notes
 
-- Coarse preprocessing writes NIfTI masks first, so training no longer voxelizes large STL files. Cases marked `pretrain_quality=review` are skipped by training unless `--include_review` is passed.
+- Coarse preprocessing now uses `patient/dcm/` directly and ignores any existing `.nii.gz` files in the patient folder. Cases marked `pretrain_quality=review` are skipped by training unless `--include_review` is passed.
+- If `pre.stl` is present, it is treated as a spatial hint only. The candidate mask is still extracted from DICOM intensities and written to `pretrain.stl`.
 - Coarse preprocessing intentionally prioritizes recall. It keeps portal vein, splenic vein, short SMV, LPV/RPV, compensation veins when visible, and TIPS for post-TIPS folders.
 - The refinement model learns a full target occupancy, not a subtraction mask, so it can both delete false positives and fill small false negatives.
 - `grid_size=96` is a practical default. Increase to `128` if GPU memory allows.
 
 ## Code layout
 
-- `pretrain/`: DICOM loading, LLM/heuristic coarse planning, threshold/crop segmentation, NIfTI export, mask conversion, and inspection STL export.
-- `refinement/`: NIfTI mask dataset, VKAN-style model, training, prediction, and the original `vkan.py` model kept for reuse.
+- `pretrain/`: DICOM loading, LLM/heuristic coarse planning, threshold/crop segmentation, and `pretrain.stl` export.
+- `refinement/`: STL dataset, VKAN-style model, training, prediction, and the original `vkan.py` model kept for reuse.
 - `postprocess/`: final mesh check and smoothing.
 - `utils/`: shared patient discovery, Gemma client, STL conversion, voxelization, and smoothing helpers.

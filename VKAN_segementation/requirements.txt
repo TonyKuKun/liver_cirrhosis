@@ -1,6 +1,6 @@
 numpy
-torch
 pydicom
+torch
 scipy
 scikit-image
 trimesh

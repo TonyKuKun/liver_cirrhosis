@@ -78,7 +78,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from dataset import (
-    N_PROFILE_FEAT, N_SEGMENTS, SEGMENTS, SEG_INDEX, N_AUX,
+    N_PROFILE_FEAT, N_SEGMENTS, SEGMENTS, SEG_INDEX, N_AUX, AUX_KEYS,
     P_AREA, P_DIAM, P_CURV, P_INSC,
 )
 
@@ -662,6 +662,186 @@ class JunctionPhysics(nn.Module):
 # =====================================================================
 # Module 6 — Full model
 # =====================================================================
+class PortalCircuitLayer(nn.Module):
+    """
+    Pressure-node model for portal pressure.
+
+    The layer predicts normalized target-space pressure components. Diagnostic
+    exporters convert additive pressure terms back to mmHg with label stats.
+    """
+
+    EPS = 1e-4
+
+    def __init__(self, d_branch: int, d_aux: int = N_AUX, d_hidden: int = 32):
+        super().__init__()
+        self.i_mpv = SEG_INDEX['mpv']
+        self.i_lpv = SEG_INDEX['lpv']
+        self.i_rpv = SEG_INDEX['rpv']
+        self.i_tips = SEG_INDEX['tips']
+        self.i_lgv = SEG_INDEX['lgv']
+        self.i_pgv = SEG_INDEX['pgv']
+        self.i_sv = SEG_INDEX['sv']
+        self.i_smv = SEG_INDEX['smv']
+        self.has_collateral_aux = AUX_KEYS.index('has_compensation_vessel')
+
+        geom_dim = 3 * N_SEGMENTS
+        self.q_in_head = nn.Sequential(
+            nn.Linear(3 * d_branch + d_aux + geom_dim, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 1),
+        )
+        self.hepatic_head = nn.Sequential(
+            nn.Linear(3 * d_branch + d_aux + 5, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 1),
+        )
+        self.tips_head = nn.Sequential(
+            nn.Linear(2 * d_branch + d_aux + 5, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 1),
+        )
+        collateral_in = 3 * d_branch + d_aux + 6
+        self.collateral_head = nn.Sequential(
+            nn.Linear(collateral_in, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 1),
+        )
+        self.disease_head = nn.Sequential(
+            nn.Linear(collateral_in, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 1),
+        )
+        self.collateral_severity_head = nn.Sequential(
+            nn.Linear(collateral_in, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 1),
+        )
+        self.downstream_pressure = nn.Parameter(torch.tensor(-1.0))
+
+    @staticmethod
+    def compute_pressure(q_in, g_hepatic, g_tips, g_collateral,
+                         p_downstream, disease_offset,
+                         collateral_severity_offset, eps=1e-4):
+        g_total = (g_hepatic + g_tips + g_collateral).clamp(min=eps)
+        return p_downstream + q_in / g_total + disease_offset + collateral_severity_offset
+
+    @staticmethod
+    def _positive(x):
+        return F.softplus(x).squeeze(-1) + PortalCircuitLayer.EPS
+
+    @staticmethod
+    def _center_log(x):
+        x = torch.log1p(x.clamp(min=0.0, max=1e6))
+        return (x - x.mean(dim=-1, keepdim=True)).clamp(min=-6.0, max=6.0)
+
+    def forward(self, branch_embeds, aux_norm, segment_mask, junction_diameters,
+                branch_resistance, branch_lengths, is_post_tips):
+        B = branch_embeds.size(0)
+        has_tips = segment_mask[:, self.i_tips] * (is_post_tips > 0.5).float()
+        has_collateral_geom = (
+            (segment_mask[:, self.i_lgv] + segment_mask[:, self.i_pgv]) > 0.5
+        ).float()
+        has_collateral_aux = (aux_norm[:, self.has_collateral_aux] > 0.5).float()
+        has_collateral = torch.maximum(has_collateral_geom, has_collateral_aux)
+
+        log_r = self._center_log(branch_resistance)
+        log_len = self._center_log(branch_lengths)
+        log_d = self._center_log(junction_diameters)
+        geom_flat = torch.cat([log_r, log_len, log_d], dim=-1)
+
+        q_ctx = torch.cat([
+            branch_embeds[:, self.i_mpv],
+            branch_embeds[:, self.i_sv],
+            branch_embeds[:, self.i_smv],
+            aux_norm,
+            geom_flat,
+        ], dim=-1)
+        q_in = self._positive(self.q_in_head(q_ctx))
+
+        hepatic_feats = torch.stack([
+            log_r[:, self.i_mpv],
+            log_r[:, self.i_lpv],
+            log_r[:, self.i_rpv],
+            segment_mask[:, self.i_lpv],
+            segment_mask[:, self.i_rpv],
+        ], dim=-1)
+        hepatic_ctx = torch.cat([
+            branch_embeds[:, self.i_mpv],
+            branch_embeds[:, self.i_lpv],
+            branch_embeds[:, self.i_rpv],
+            aux_norm,
+            hepatic_feats,
+        ], dim=-1)
+        g_hepatic = self._positive(self.hepatic_head(hepatic_ctx))
+
+        tips_feats = torch.stack([
+            log_r[:, self.i_tips],
+            log_len[:, self.i_tips],
+            log_d[:, self.i_tips],
+            has_tips,
+            is_post_tips.float(),
+        ], dim=-1)
+        tips_ctx = torch.cat([
+            branch_embeds[:, self.i_mpv],
+            branch_embeds[:, self.i_tips],
+            aux_norm,
+            tips_feats,
+        ], dim=-1)
+        g_tips = self._positive(self.tips_head(tips_ctx)) * has_tips
+
+        collateral_feats = torch.stack([
+            log_r[:, self.i_lgv],
+            log_r[:, self.i_pgv],
+            log_d[:, self.i_lgv],
+            log_d[:, self.i_pgv],
+            has_collateral,
+            aux_norm[:, self.has_collateral_aux],
+        ], dim=-1)
+        collateral_ctx = torch.cat([
+            branch_embeds[:, self.i_mpv],
+            branch_embeds[:, self.i_lgv],
+            branch_embeds[:, self.i_pgv],
+            aux_norm,
+            collateral_feats,
+        ], dim=-1)
+        g_collateral = self._positive(self.collateral_head(collateral_ctx)) * has_collateral
+        disease_offset = self.disease_head(collateral_ctx).squeeze(-1)
+        collateral_severity_offset = (
+            F.softplus(self.collateral_severity_head(collateral_ctx)).squeeze(-1)
+            * has_collateral
+        )
+
+        p_downstream = self.downstream_pressure.expand(B)
+        p_circuit = self.compute_pressure(
+            q_in, g_hepatic, g_tips, g_collateral,
+            p_downstream, disease_offset, collateral_severity_offset,
+            eps=self.EPS,
+        )
+        out = {
+            'q_in': q_in,
+            'g_hepatic': g_hepatic,
+            'g_tips': g_tips,
+            'g_collateral': g_collateral,
+            'g_total': (g_hepatic + g_tips + g_collateral).clamp(min=self.EPS),
+            'p_downstream': p_downstream,
+            'p_circuit': p_circuit,
+            'disease_offset': disease_offset,
+            'collateral_severity_offset': collateral_severity_offset,
+            'has_collateral_circuit': has_collateral,
+            'has_tips_circuit': has_tips,
+        }
+        return {
+            k: torch.nan_to_num(v, nan=0.0, posinf=20.0, neginf=-20.0)
+            for k, v in out.items()
+        }
+
+
 class PortalPressureNet(nn.Module):
     """
     End-to-end:
@@ -694,12 +874,25 @@ class PortalPressureNet(nn.Module):
         # Inputs: flat branch embeds + Q + junction features (incl. per-branch
         # log1p(ΔP), Murray/pressure residuals, collateral fraction) + aux scalars
         d_branches  = N_SEGMENTS * d_hidden            # 8 * 32 = 256
-        d_q         = N_SEGMENTS                       # 8
-        d_junction  = 15                               # from JunctionPhysics.features
-        d_in = d_branches + d_q + d_junction + N_AUX
+        d_circuit   = 7
+        d_resid_in = d_branches + d_circuit + N_AUX
 
+        self.circuit = PortalCircuitLayer(
+            d_branch=d_hidden, d_aux=N_AUX, d_hidden=d_hidden,
+        )
+        self.residual_head = nn.Sequential(
+            nn.Linear(d_resid_in, d_hidden * 2),
+            nn.LayerNorm(d_hidden * 2),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(d_hidden * 2, d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 1),
+        )
+        self.residual_norm_limit = 0.7
+        legacy_in = d_branches + N_SEGMENTS + 15 + N_AUX
         self.predictor = nn.Sequential(
-            nn.Linear(d_in, d_hidden * 2),
+            nn.Linear(legacy_in, d_hidden * 2),
             nn.LayerNorm(d_hidden * 2),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -708,6 +901,7 @@ class PortalPressureNet(nn.Module):
             nn.Dropout(dropout * 0.5),
             nn.Linear(d_hidden, 1),
         )
+        self.use_circuit = True
         self._init_weights()
 
     def _init_weights(self):
@@ -738,6 +932,12 @@ class PortalPressureNet(nn.Module):
         high = torch.full_like(resistance, 1e6)
         resistance = torch.where(valid > 0.5, resistance.clamp(min=eps), high)
         return torch.nan_to_num(resistance, nan=1e6, posinf=1e6, neginf=1e6)
+
+    @staticmethod
+    def _branch_lengths(arc_lengths, point_valid, segment_mask):
+        valid_arc = torch.where(point_valid > 0.5, arc_lengths, torch.zeros_like(arc_lengths))
+        lengths = valid_arc.max(dim=-1).values * segment_mask
+        return torch.nan_to_num(lengths, nan=0.0, posinf=0.0, neginf=0.0)
 
     def forward(self, batch):
         """
@@ -783,6 +983,7 @@ class PortalPressureNet(nn.Module):
         branch_resistance = self._branch_resistance_prior(
             profiles, arc_lengths, point_valid, segment_mask
         )
+        branch_lengths = self._branch_lengths(arc_lengths, point_valid, segment_mask)
         flow_out = self.flow_est(
             branch_embed, aux_norm, segment_mask, junction_diam, branch_resistance
         )
@@ -804,16 +1005,46 @@ class PortalPressureNet(nn.Module):
         # NOTE: per-branch log1p(ΔP) values are already inside jp['features']
         # so we don't add a separate endpoint_dP feature (would be redundant).
         branch_flat = branch_embed.reshape(B, -1)                # (B, S*H)
-        fused = torch.cat([
-            branch_flat,                  # (B, S*H)
-            Q,                            # (B, S)
-            jp['features'],               # (B, 9)
-            aux_norm,                     # (B, A)
-        ], dim=-1)
-        fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
-        pvp_pred = self.predictor(fused)  # (B, 1)
+        circuit_out = {}
+        residual = torch.zeros(B, device=profiles.device)
+        if self.use_circuit:
+            circuit_out = self.circuit(
+                branch_embed,
+                aux_norm,
+                segment_mask,
+                junction_diam,
+                branch_resistance,
+                branch_lengths,
+                has_tips,
+            )
+            circuit_features = torch.stack([
+                circuit_out['q_in'],
+                circuit_out['g_hepatic'],
+                circuit_out['g_tips'],
+                circuit_out['g_collateral'],
+                circuit_out['p_circuit'],
+                circuit_out['disease_offset'],
+                circuit_out['collateral_severity_offset'],
+            ], dim=-1)
+            fused = torch.cat([
+                branch_flat,
+                circuit_features,
+                aux_norm,
+            ], dim=-1)
+            fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
+            residual = torch.tanh(self.residual_head(fused)).squeeze(-1) * self.residual_norm_limit
+            pvp_pred = (circuit_out['p_circuit'] + residual).unsqueeze(-1)
+        else:
+            fused = torch.cat([
+                branch_flat,
+                Q,
+                jp['features'],
+                aux_norm,
+            ], dim=-1)
+            fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
+            pvp_pred = self.predictor(fused)
 
-        return {
+        out = {
             'pvp_pred':     pvp_pred,                         # (B, 1) normalized
             'Q':            Q,                                # (B, S)
             'flow_out':     flow_out,                         # dict of split fractions
@@ -823,7 +1054,10 @@ class PortalPressureNet(nn.Module):
             'branch_embed': branch_embed,                     # (B, S, H)
             'endpoint_dP':  endpoint_dP,                      # (B, S) Pa
             'segment_mask': segment_mask,
+            'circuit_residual': residual,
         }
+        out.update(circuit_out)
+        return out
 
 
 # =====================================================================

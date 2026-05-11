@@ -38,6 +38,7 @@ import numpy as np
 import torch
 
 from dataset import PortalVeinDataset, collate_fn, SEGMENTS, SEG_INDEX, N_SEGMENTS
+from diagnostics import load_model_state_compat
 from model import PortalPressureNet, BLOOD_VISCOSITY_PA_S, Q_REF_M3_PER_S
 
 
@@ -55,7 +56,7 @@ def load_checkpoint(checkpoint_dir, fold=0, device='cpu'):
         d_hidden=args.get('d_hidden', 32),
         dropout=args.get('dropout', 0.3),
     ).to(device)
-    model.load_state_dict(ckpt['model_state_dict'])
+    load_model_state_compat(model, ckpt['model_state_dict'])
     model.eval()
     return model, norm, ckpt
 
@@ -102,6 +103,14 @@ def _format_inference(out, batch, ds, i):
     pvp_norm = out['pvp_pred'].squeeze(-1).cpu().numpy()[0]
     pvp_pred = pvp_norm * ds.label_std + ds.label_mean
     pvp_true = float(batch['label'].cpu().numpy()[0])
+    circuit = {}
+    for key in ['q_in', 'g_hepatic', 'g_tips', 'g_collateral']:
+        if key in out:
+            circuit[key] = float(out[key][0].detach().cpu().item())
+    for key in ['p_circuit', 'disease_offset', 'collateral_severity_offset']:
+        if key in out:
+            raw = float(out[key][0].detach().cpu().item())
+            circuit[key] = raw * ds.label_std + ds.label_mean if key == 'p_circuit' else raw * ds.label_std
 
     # Per-segment hemodynamics → numpy
     hemo = []
@@ -135,6 +144,7 @@ def _format_inference(out, batch, ds, i):
         'conf_outflow_delta': out['flow_out']['conf_outflow_delta'][0].cpu().numpy(),
         'bif_outflow_delta':  out['flow_out']['bif_outflow_delta'][0].cpu().numpy(),
         'collateral_fraction': float(out['flow_out']['collateral_fraction'][0].item()),
+        'circuit':       circuit,
         'attn_weights':  out['attn_weights'][0].cpu().numpy(),
         'hemo':          hemo,
         'junction':      {k: (v[0].cpu().numpy() if torch.is_tensor(v) and v.dim() > 0
@@ -158,6 +168,8 @@ def export_patient_hemodynamics(patient_result, npz_path):
         'segment_names': np.array(SEGMENTS),
         'confluence_3d': patient_result['confluence_3d'],
     }
+    for k, v in patient_result.get('circuit', {}).items():
+        out_dict[f'circuit_{k}'] = np.array([v], dtype=np.float32)
     for seg in patient_result['hemo']:
         prefix = seg['name'] + '_'
         for k, v in seg.items():

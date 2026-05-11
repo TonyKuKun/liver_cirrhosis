@@ -67,6 +67,13 @@ class DiagnosticsTest(unittest.TestCase):
             "tips_fraction": 0.4,
             "collateral_fraction": 0.0,
             "liver_fraction": 0.6,
+            "q_in": 1.2,
+            "g_hepatic": 0.8,
+            "g_tips": 0.4,
+            "g_collateral": 0.1,
+            "p_circuit": 23.0,
+            "disease_offset": 1.5,
+            "collateral_severity_offset": 0.0,
         }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -80,6 +87,10 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(summary["overall"]["n"], 1)
         self.assertAlmostEqual(summary["overall"]["mae"], 4.0)
         self.assertIn("post_tips=1", summary["groups"])
+        self.assertAlmostEqual(
+            summary["groups"]["post_tips=1"]["circuit_means"]["g_tips"],
+            0.4,
+        )
 
 
 if __name__ == "__main__":

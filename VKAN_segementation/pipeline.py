@@ -12,7 +12,7 @@ def run(cmd: list[str]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="End-to-end DICOM to portal vein STL workflow.")
+    parser = argparse.ArgumentParser(description="End-to-end patient/dcm to portal vein STL workflow.")
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
     parser.add_argument("--out_dir", default=r"VKAN_segementation/runs/vkan")
     parser.add_argument("--api_key", default='AIzaSyCUnLZXaUWemZe6aXEIpc_6KjZRB9PR288')

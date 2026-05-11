@@ -32,6 +32,23 @@ PREDICTION_COLUMNS = [
     "tips_fraction",
     "collateral_fraction",
     "liver_fraction",
+    "q_in",
+    "g_hepatic",
+    "g_tips",
+    "g_collateral",
+    "p_circuit",
+    "disease_offset",
+    "collateral_severity_offset",
+]
+
+CIRCUIT_COLUMNS = [
+    "q_in",
+    "g_hepatic",
+    "g_tips",
+    "g_collateral",
+    "p_circuit",
+    "disease_offset",
+    "collateral_severity_offset",
 ]
 
 
@@ -45,6 +62,22 @@ def _as_float(x):
     return float(x.detach().cpu().item() if torch.is_tensor(x) else x)
 
 
+def _model_vector(out, key, batch_size):
+    value = out.get(key)
+    if value is None:
+        return np.full(batch_size, np.nan, dtype=float)
+    return value.detach().squeeze(-1).cpu().numpy()
+
+
+def load_model_state_compat(model, state_dict):
+    """Load both v3 legacy predictor checkpoints and v4 circuit checkpoints."""
+    has_circuit = any(k.startswith("circuit.") for k in state_dict)
+    has_legacy_predictor = any(k.startswith("predictor.") for k in state_dict)
+    model.use_circuit = has_circuit or not has_legacy_predictor
+    model.load_state_dict(state_dict, strict=False)
+    return model.use_circuit
+
+
 def prediction_rows_from_batch(out, batch, fold, label_mean, label_std):
     pvp_norm = out["pvp_pred"].detach().squeeze(-1).cpu().numpy()
     preds = pvp_norm * label_std + label_mean
@@ -55,6 +88,15 @@ def prediction_rows_from_batch(out, batch, fold, label_mean, label_std):
     tips_fraction = out["flow_out"]["tips_fraction"].detach().cpu().numpy()
     collateral_fraction = out["flow_out"]["collateral_fraction"].detach().cpu().numpy()
     liver_fraction = out["flow_out"]["liver_fraction"].detach().cpu().numpy()
+    q_in = _model_vector(out, "q_in", len(pvp_norm))
+    g_hepatic = _model_vector(out, "g_hepatic", len(pvp_norm))
+    g_tips = _model_vector(out, "g_tips", len(pvp_norm))
+    g_collateral = _model_vector(out, "g_collateral", len(pvp_norm))
+    p_circuit = _model_vector(out, "p_circuit", len(pvp_norm)) * label_std + label_mean
+    disease_offset = _model_vector(out, "disease_offset", len(pvp_norm)) * label_std
+    collateral_severity_offset = (
+        _model_vector(out, "collateral_severity_offset", len(pvp_norm)) * label_std
+    )
 
     rows = []
     for i, name in enumerate(batch["name"]):
@@ -79,6 +121,13 @@ def prediction_rows_from_batch(out, batch, fold, label_mean, label_std):
             "tips_fraction": float(tips_fraction[i]),
             "collateral_fraction": float(collateral_fraction[i]),
             "liver_fraction": float(liver_fraction[i]),
+            "q_in": float(q_in[i]),
+            "g_hepatic": float(g_hepatic[i]),
+            "g_tips": float(g_tips[i]),
+            "g_collateral": float(g_collateral[i]),
+            "p_circuit": float(p_circuit[i]),
+            "disease_offset": float(disease_offset[i]),
+            "collateral_severity_offset": float(collateral_severity_offset[i]),
         })
     return rows
 
@@ -110,10 +159,24 @@ def write_prediction_csv(rows, path):
 
 def _metrics(rows):
     if not rows:
-        return {"n": 0, "mae": None, "rmse": None, "bias": None, "label_mean": None, "pred_mean": None}
+        return {
+            "n": 0,
+            "mae": None,
+            "rmse": None,
+            "bias": None,
+            "label_mean": None,
+            "pred_mean": None,
+            "circuit_means": {key: None for key in CIRCUIT_COLUMNS},
+        }
     err = np.array([float(r["err"]) for r in rows], dtype=float)
     labels = np.array([float(r["label"]) for r in rows], dtype=float)
     preds = np.array([float(r["pred"]) for r in rows], dtype=float)
+    circuit_means = {}
+    for key in CIRCUIT_COLUMNS:
+        vals = np.array([float(r[key]) for r in rows
+                         if r.get(key, "") not in ("", None)], dtype=float)
+        vals = vals[np.isfinite(vals)]
+        circuit_means[key] = float(np.mean(vals)) if vals.size else None
     return {
         "n": int(len(rows)),
         "mae": float(np.mean(np.abs(err))),
@@ -121,6 +184,7 @@ def _metrics(rows):
         "bias": float(np.mean(err)),
         "label_mean": float(np.mean(labels)),
         "pred_mean": float(np.mean(preds)),
+        "circuit_means": circuit_means,
     }
 
 
@@ -187,7 +251,7 @@ def collect_oof_predictions(checkpoint_dir, data_root, n_points=100, batch_size=
             d_hidden=args.get("d_hidden", 32),
             dropout=args.get("dropout", 0.3),
         ).to(device)
-        model.load_state_dict(ckpt["model_state_dict"])
+        load_model_state_compat(model, ckpt["model_state_dict"])
         loader = DataLoader(Subset(ds, val_idx), batch_size=batch_size, shuffle=False,
                             collate_fn=collate_fn, num_workers=0, drop_last=False)
         all_rows.extend(collect_prediction_rows(

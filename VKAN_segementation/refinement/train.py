@@ -11,15 +11,15 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 try:
-    from .dataset import VesselNiftiDataset, collate_fn
+    from .dataset import VesselSTLDataset, collate_fn
     from .model import DiceBCELoss, VesselVKAN, dice_score
 except ImportError:
     try:
-        from VKAN_segementation.refinement.dataset import VesselNiftiDataset, collate_fn
+        from VKAN_segementation.refinement.dataset import VesselSTLDataset, collate_fn
         from VKAN_segementation.refinement.model import DiceBCELoss, VesselVKAN, dice_score
     except ImportError:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from refinement.dataset import VesselNiftiDataset, collate_fn
+        from refinement.dataset import VesselSTLDataset, collate_fn
         from refinement.model import DiceBCELoss, VesselVKAN, dice_score
 
 
@@ -56,7 +56,7 @@ def run_epoch(model, loader, criterion, device, optimizer=None) -> dict[str, flo
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train VKAN refinement model from pretrain.nii.gz and mask.nii.gz.")
+    parser = argparse.ArgumentParser(description="Train VKAN refinement model from pretrain.stl and vessel.stl.")
     parser.add_argument("--data_root", required=True)
     parser.add_argument("--out_dir", default="VKAN_segementation/runs/vkan")
     parser.add_argument("--grid_size", type=int, default=96)
@@ -74,7 +74,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ds = VesselNiftiDataset(args.data_root, grid_size=args.grid_size, require_pretrain=True, include_review=args.include_review)
+    ds = VesselSTLDataset(args.data_root, grid_size=args.grid_size, require_pretrain=True, include_review=args.include_review)
     val_len = max(1, int(round(len(ds) * args.val_ratio))) if len(ds) > 1 else 0
     train_len = len(ds) - val_len
     if val_len > 0:
