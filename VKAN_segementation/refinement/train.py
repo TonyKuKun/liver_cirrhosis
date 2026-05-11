@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,7 @@ except ImportError:
         from VKAN_segementation.refinement.dataset import VesselNiftiDataset, collate_fn
         from VKAN_segementation.refinement.model import DiceBCELoss, VesselVKAN, dice_score
     except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from refinement.dataset import VesselNiftiDataset, collate_fn
         from refinement.model import DiceBCELoss, VesselVKAN, dice_score
 
@@ -54,7 +56,7 @@ def run_epoch(model, loader, criterion, device, optimizer=None) -> dict[str, flo
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train VKAN STL refinement model.")
+    parser = argparse.ArgumentParser(description="Train VKAN refinement model from pretrain.nii.gz and mask.nii.gz.")
     parser.add_argument("--data_root", required=True)
     parser.add_argument("--out_dir", default="VKAN_segementation/runs/vkan")
     parser.add_argument("--grid_size", type=int, default=96)

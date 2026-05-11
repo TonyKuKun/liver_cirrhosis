@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import torch
@@ -14,6 +15,7 @@ except ImportError:
         from VKAN_segementation.pretrain.preprocess import mask_label_nifti_path, pretrain_nifti_path
         from VKAN_segementation.utils.common import discover_patients, load_nifti_volume, resize_mask_to_grid, volume_bounds_xyz
     except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from pretrain.preprocess import mask_label_nifti_path, pretrain_nifti_path
         from utils.common import discover_patients, load_nifti_volume, resize_mask_to_grid, volume_bounds_xyz
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import struct
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,7 @@ except ImportError:
     try:
         from VKAN_segementation.utils.common import DicomVolume, GemmaClient, discover_patients, mask_to_stl, save_nifti_volume
     except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from utils.common import DicomVolume, GemmaClient, discover_patients, mask_to_stl, save_nifti_volume
 
 
@@ -40,7 +42,7 @@ def load_dicom_series(dcm_dir: str | Path) -> DicomVolume:
     try:
         import pydicom
     except ImportError as exc:
-        raise ImportError("pydicom is required to read DICOM files.") from exc
+        return _load_dicom_series_minimal(dcm_dir)
 
     files = [p for p in Path(dcm_dir).rglob("*") if p.is_file()]
     slices = []
@@ -69,6 +71,34 @@ def load_dicom_series(dcm_dir: str | Path) -> DicomVolume:
     return DicomVolume(volume_hu=volume, spacing_zyx=(dz, sy, sx), origin_xyz=(float(ipp[0]), float(ipp[1]), float(ipp[2])))
 
 
+def _load_dicom_series_minimal(dcm_dir: str | Path) -> DicomVolume:
+    slices = []
+    for file in Path(dcm_dir).rglob("*"):
+        if not file.is_file():
+            continue
+        try:
+            meta = _read_minimal_dicom(file)
+        except Exception:
+            continue
+        if meta and meta.get("pixel_data") is not None:
+            slices.append(meta)
+    if not slices:
+        raise FileNotFoundError(f"No readable uncompressed DICOM slices found in {dcm_dir}")
+
+    slices.sort(key=_minimal_slice_position)
+    arrays = []
+    for ds in slices:
+        arr = _raw_pixel_array_minimal(ds).astype(np.float32)
+        arrays.append(arr * float(ds.get("rescale_slope", 1.0)) + float(ds.get("rescale_intercept", 0.0)))
+    volume = np.stack(arrays, axis=0)
+    sy, sx = [float(v) for v in slices[0].get("pixel_spacing", [1.0, 1.0])[:2]]
+    dz = abs(_minimal_slice_position(slices[1]) - _minimal_slice_position(slices[0])) if len(slices) > 1 else 0.0
+    if dz <= 0:
+        dz = float(slices[0].get("slice_thickness", 1.0))
+    ipp = [float(v) for v in slices[0].get("image_position_patient", [0.0, 0.0, 0.0])[:3]]
+    return DicomVolume(volume_hu=volume, spacing_zyx=(dz, sy, sx), origin_xyz=(ipp[0], ipp[1], ipp[2]))
+
+
 def _slice_position(ds) -> float:
     ipp = getattr(ds, "ImagePositionPatient", None)
     if ipp is not None and len(ipp) >= 3:
@@ -76,6 +106,93 @@ def _slice_position(ds) -> float:
     if hasattr(ds, "SliceLocation"):
         return float(ds.SliceLocation)
     return float(getattr(ds, "InstanceNumber", 0))
+
+
+def _minimal_slice_position(ds: dict) -> float:
+    ipp = ds.get("image_position_patient")
+    if ipp and len(ipp) >= 3:
+        return float(ipp[2])
+    if ds.get("slice_location") is not None:
+        return float(ds["slice_location"])
+    return float(ds.get("instance_number", 0))
+
+
+def _read_minimal_dicom(path: str | Path) -> dict:
+    data = Path(path).read_bytes()
+    pos = 132 if len(data) > 132 and data[128:132] == b"DICM" else 0
+    out: dict = {}
+    while pos + 8 <= len(data):
+        group, elem = struct.unpack_from("<HH", data, pos)
+        pos += 4
+        vr = data[pos : pos + 2].decode("ascii", errors="ignore")
+        if vr in {"OB", "OD", "OF", "OL", "OV", "OW", "SQ", "UC", "UR", "UT", "UN"}:
+            pos += 4
+            length = struct.unpack_from("<I", data, pos)[0]
+            pos += 4
+        elif vr and vr[0].isalpha() and vr[1].isalpha():
+            pos += 2
+            length = struct.unpack_from("<H", data, pos)[0]
+            pos += 2
+        else:
+            length = struct.unpack_from("<I", data, pos)[0]
+            pos += 4
+            vr = ""
+        if length == 0xFFFFFFFF or pos + length > len(data):
+            break
+        value = data[pos : pos + length]
+        pos += length + (length % 2)
+        tag = (group, elem)
+        if tag == (0x0028, 0x0010):
+            out["rows"] = _decode_int(value)
+        elif tag == (0x0028, 0x0011):
+            out["columns"] = _decode_int(value)
+        elif tag == (0x0028, 0x0103):
+            out["pixel_representation"] = _decode_int(value)
+        elif tag == (0x0028, 0x0030):
+            out["pixel_spacing"] = _decode_numbers(value)
+        elif tag == (0x0028, 0x1052):
+            out["rescale_intercept"] = _decode_float(value, -1024.0)
+        elif tag == (0x0028, 0x1053):
+            out["rescale_slope"] = _decode_float(value, 1.0)
+        elif tag == (0x0018, 0x0050):
+            out["slice_thickness"] = _decode_float(value, 1.0)
+        elif tag == (0x0020, 0x0032):
+            out["image_position_patient"] = _decode_numbers(value)
+        elif tag == (0x0020, 0x1041):
+            out["slice_location"] = _decode_float(value, 0.0)
+        elif tag == (0x0020, 0x0013):
+            out["instance_number"] = _decode_int(value)
+        elif tag == (0x7FE0, 0x0010):
+            out["pixel_data"] = value
+            break
+    if "rows" not in out or "columns" not in out:
+        return {}
+    return out
+
+
+def _decode_text(value: bytes) -> str:
+    return value.rstrip(b"\x00 ").decode("ascii", errors="ignore")
+
+
+def _decode_numbers(value: bytes) -> list[float]:
+    text = _decode_text(value)
+    return [float(part) for part in text.split("\\") if part]
+
+
+def _decode_float(value: bytes, default: float) -> float:
+    try:
+        return float(_decode_text(value))
+    except ValueError:
+        return default
+
+
+def _decode_int(value: bytes) -> int:
+    if len(value) == 2:
+        return int(struct.unpack("<H", value)[0])
+    if len(value) == 4:
+        return int(struct.unpack("<I", value)[0])
+    text = _decode_text(value)
+    return int(text) if text else 0
 
 
 def save_mosaic_png(volume_hu: np.ndarray, out_path: str | Path, n_slices: int = 12) -> Path | None:
@@ -150,8 +267,8 @@ def convert_mask_folder_to_nifti(dcm_dir: str | Path, mask_dir: str | Path, out_
     """Convert manual DICOM drawings in patient/mask to a binary mask.nii.gz."""
     try:
         import pydicom
-    except ImportError as exc:
-        raise ImportError("pydicom is required to convert mask DICOM files.") from exc
+    except ImportError:
+        pydicom = None
 
     dcm_dir = Path(dcm_dir)
     mask_dir = Path(mask_dir)
@@ -163,16 +280,24 @@ def convert_mask_folder_to_nifti(dcm_dir: str | Path, mask_dir: str | Path, out_
     slices = []
     for mask_file in mask_files:
         try:
-            dcm_ds = pydicom.dcmread(str(dcm_files[mask_file.name]), force=True)
-            mask_ds = pydicom.dcmread(str(mask_file), force=True)
-            dcm_arr = _raw_pixel_array(dcm_ds)
-            mask_arr = _raw_pixel_array(mask_ds)
+            if pydicom is None:
+                dcm_ds = _read_minimal_dicom(dcm_files[mask_file.name])
+                mask_ds = _read_minimal_dicom(mask_file)
+                dcm_arr = _raw_pixel_array_minimal(dcm_ds)
+                mask_arr = _raw_pixel_array_minimal(mask_ds)
+                position = _minimal_slice_position(mask_ds)
+            else:
+                dcm_ds = pydicom.dcmread(str(dcm_files[mask_file.name]), force=True)
+                mask_ds = pydicom.dcmread(str(mask_file), force=True)
+                dcm_arr = _raw_pixel_array(dcm_ds)
+                mask_arr = _raw_pixel_array(mask_ds)
+                position = _slice_position(mask_ds)
         except Exception:
             continue
         if dcm_arr.shape != mask_arr.shape:
             continue
         label = mask_arr != dcm_arr
-        slices.append((_slice_position(mask_ds), label, mask_ds))
+        slices.append((position, label, mask_ds))
     if not slices:
         raise FileNotFoundError(f"No readable matching DICOM/mask slices found in {dcm_dir} and {mask_dir}")
 
@@ -180,12 +305,12 @@ def convert_mask_folder_to_nifti(dcm_dir: str | Path, mask_dir: str | Path, out_
     label_vol = np.stack([item[1] for item in slices], axis=0)
     label_vol = _largest_components(label_vol, keep=8, min_voxels=min_voxels)
     first = slices[0][2]
-    pixel_spacing = getattr(first, "PixelSpacing", [1.0, 1.0])
+    pixel_spacing = first.get("pixel_spacing", [1.0, 1.0]) if isinstance(first, dict) else getattr(first, "PixelSpacing", [1.0, 1.0])
     sy, sx = float(pixel_spacing[0]), float(pixel_spacing[1])
     dz = abs(slices[1][0] - slices[0][0]) if len(slices) > 1 else 0.0
     if dz <= 0:
-        dz = float(getattr(first, "SliceThickness", 1.0))
-    ipp = getattr(first, "ImagePositionPatient", [0.0, 0.0, 0.0])
+        dz = float(first.get("slice_thickness", 1.0) if isinstance(first, dict) else getattr(first, "SliceThickness", 1.0))
+    ipp = first.get("image_position_patient", [0.0, 0.0, 0.0]) if isinstance(first, dict) else getattr(first, "ImagePositionPatient", [0.0, 0.0, 0.0])
     return save_nifti_volume(DicomVolume(label_vol.astype(np.uint8), (dz, sy, sx), (float(ipp[0]), float(ipp[1]), float(ipp[2]))), out_path)
 
 
@@ -193,6 +318,12 @@ def _raw_pixel_array(ds) -> np.ndarray:
     dtype = "<i2" if int(getattr(ds, "PixelRepresentation", 0)) else "<u2"
     rows, cols = int(ds.Rows), int(ds.Columns)
     return np.frombuffer(ds.PixelData, dtype=dtype, count=rows * cols).reshape(rows, cols)
+
+
+def _raw_pixel_array_minimal(meta: dict) -> np.ndarray:
+    dtype = "<i2" if int(meta.get("pixel_representation", 0)) else "<u2"
+    rows, cols = int(meta["rows"]), int(meta["columns"])
+    return np.frombuffer(meta["pixel_data"], dtype=dtype, count=rows * cols).reshape(rows, cols)
 
 
 def _should_rebuild_pretrain(case, meta_path: str | Path, input_mtime: float) -> tuple[bool, str]:
@@ -446,11 +577,14 @@ def main() -> None:
     parser.add_argument("--api_key", default=None)
     parser.add_argument("--api_base_url", default=None)
     parser.add_argument("--model", default="gemma-4-31b-it")
+    parser.add_argument("--patient", default=None, help="Process one patient folder name.")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
     client = GemmaClient(api_key=args.api_key, model=args.model, base_url=args.api_base_url)
     cases = discover_patients(args.data_root)
+    if args.patient:
+        cases = [case for case in cases if case.name == args.patient]
     print(f"[pretrain] found {len(cases)} patient folders")
     for case in cases:
         try:

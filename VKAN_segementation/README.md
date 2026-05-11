@@ -13,7 +13,7 @@ Patient naming:
 
 - `20210909WuJinHeng`: pre-TIPS.
 - `20210921WuJinHeng#`: post-TIPS, keeps brighter TIPS voxels.
-- Names containing `@` or `!` are skipped.
+- Names containing `@`, `!`, or `&` are skipped.
 
 ## Install
 
@@ -40,7 +40,7 @@ The default model name is `gemma-4-31b-it`. If the API is not configured or fail
 
 ## Step-by-step
 
-Generate coarse `pretrain.stl`:
+Generate `pretrain.nii.gz`, `mask.nii.gz`, and inspection `pretrain.stl`:
 
 ```powershell
 py VKAN_segementation\pretrain\preprocess.py --data_root D:\your_patient_root --model gemma-4-31b-it
@@ -72,9 +72,9 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 
 ## Outputs per patient
 
-- `pretrain.nii.gz`: coarse binary vessel candidate used by VKAN training.
+- `pretrain.nii.gz`: coarse binary vessel candidate used by VKAN training and prediction.
 - `mask.nii.gz`: binary training label derived from `mask` vs `dcm` raw pixel differences.
-- `pretrain.stl`: coarse vessel candidate for visual inspection; cases over 20,000KB are flagged for review.
+- `pretrain.stl`: coarse vessel candidate for visual inspection; empty masks and cases over 20,000KB are flagged for review.
 - `vkan_work/coarse_plan.json`: HU range and crop box used.
 - `vkan_work/pretrain_meta.json`: preprocessing version, QA status, NIfTI paths, and output statistics.
 - `vkan_work/pretrain_mask.npy`: coarse mask for debugging.
@@ -85,13 +85,14 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 
 ## Notes
 
+- Coarse preprocessing writes NIfTI masks first, so training no longer voxelizes large STL files. Cases marked `pretrain_quality=review` are skipped by training unless `--include_review` is passed.
 - Coarse preprocessing intentionally prioritizes recall. It keeps portal vein, splenic vein, short SMV, LPV/RPV, compensation veins when visible, and TIPS for post-TIPS folders.
 - The refinement model learns a full target occupancy, not a subtraction mask, so it can both delete false positives and fill small false negatives.
 - `grid_size=96` is a practical default. Increase to `128` if GPU memory allows.
 
 ## Code layout
 
-- `pretrain/`: DICOM loading, LLM/heuristic coarse planning, threshold/crop segmentation, and `pretrain.stl` export.
+- `pretrain/`: DICOM loading, LLM/heuristic coarse planning, threshold/crop segmentation, NIfTI export, mask conversion, and inspection STL export.
 - `refinement/`: NIfTI mask dataset, VKAN-style model, training, prediction, and the original `vkan.py` model kept for reuse.
 - `postprocess/`: final mesh check and smoothing.
 - `utils/`: shared patient discovery, Gemma client, STL conversion, voxelization, and smoothing helpers.

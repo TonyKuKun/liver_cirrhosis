@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import os
 import re
+import struct
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ from typing import Any, Iterable
 import numpy as np
 
 
-INVALID_MARKERS = ("@", "!")
+INVALID_MARKERS = ("@", "!", "&")
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,13 @@ class PatientCase:
     pretrain_stl: Path
     predict_stl: Path
     is_post_tips: bool
+
+
+@dataclass(frozen=True)
+class DicomVolume:
+    volume_hu: np.ndarray
+    spacing_zyx: tuple[float, float, float]
+    origin_xyz: tuple[float, float, float]
 
 
 def discover_patients(root: str | Path) -> list[PatientCase]:
@@ -133,11 +142,32 @@ def mask_to_stl(mask: np.ndarray, spacing_zyx: tuple[float, float, float], out_p
     out_path = Path(out_path)
     mask = np.asarray(mask, dtype=np.uint8)
     if mask.sum() == 0:
-        raise ValueError("Cannot write STL for an empty mask.")
+        return write_binary_stl(out_path, np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.int64))
     padded = np.pad(mask, 1, mode="constant")
     verts_zyx, faces, _, _ = measure.marching_cubes(padded, level=0.5, spacing=spacing_zyx)
     verts_zyx -= np.asarray(spacing_zyx, dtype=np.float32)
-    write_ascii_stl(out_path, verts_zyx[:, [2, 1, 0]], faces)
+    return write_binary_stl(out_path, verts_zyx[:, [2, 1, 0]], faces)
+
+
+def write_binary_stl(out_path: str | Path, vertices_xyz: np.ndarray, faces: np.ndarray, name: str = "vessel") -> Path:
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    v = np.asarray(vertices_xyz, dtype=np.float32)
+    f = np.asarray(faces, dtype=np.int64)
+    header = f"{name} binary stl".encode("ascii", errors="ignore")[:80].ljust(80, b" ")
+    with out_path.open("wb") as fp:
+        fp.write(header)
+        fp.write(struct.pack("<I", len(f)))
+        for tri in f:
+            p0, p1, p2 = v[tri[0]], v[tri[1]], v[tri[2]]
+            normal = np.cross(p1 - p0, p2 - p0)
+            norm = np.linalg.norm(normal)
+            if norm > 0:
+                normal = normal / norm
+            fp.write(struct.pack("<3f", float(normal[0]), float(normal[1]), float(normal[2])))
+            for p in (p0, p1, p2):
+                fp.write(struct.pack("<3f", float(p[0]), float(p[1]), float(p[2])))
+            fp.write(struct.pack("<H", 0))
     return out_path
 
 
@@ -161,6 +191,102 @@ def write_ascii_stl(out_path: str | Path, vertices_xyz: np.ndarray, faces: np.nd
             fp.write("    endloop\n  endfacet\n")
         fp.write(f"endsolid {name}\n")
     return out_path
+
+
+def save_nifti_volume(volume: DicomVolume, out_path: str | Path) -> Path:
+    """Write a simple NIfTI-1 .nii.gz volume in z-y-x array order."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    data = np.asarray(volume.volume_hu)
+    if data.dtype == np.bool_:
+        data = data.astype(np.uint8)
+    if data.dtype == np.uint8:
+        out = data.astype(np.uint8, copy=False)
+        datatype, bitpix = 2, 8
+    elif np.issubdtype(data.dtype, np.floating):
+        out = data.astype("<f4", copy=False)
+        datatype, bitpix = 16, 32
+    else:
+        out = data.astype("<i2", copy=False)
+        datatype, bitpix = 4, 16
+    header = bytearray(348)
+    struct.pack_into("<I", header, 0, 348)
+    struct.pack_into("<8h", header, 40, 3, int(out.shape[2]), int(out.shape[1]), int(out.shape[0]), 1, 1, 1, 1)
+    struct.pack_into("<h", header, 70, datatype)
+    struct.pack_into("<h", header, 72, bitpix)
+    struct.pack_into(
+        "<8f",
+        header,
+        76,
+        0.0,
+        float(volume.spacing_zyx[2]),
+        float(volume.spacing_zyx[1]),
+        float(volume.spacing_zyx[0]),
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    )
+    struct.pack_into("<f", header, 108, 352.0)
+    struct.pack_into("<f", header, 112, 1.0)
+    struct.pack_into("<f", header, 116, 0.0)
+    struct.pack_into("<h", header, 252, 1)
+    struct.pack_into("<h", header, 254, 1)
+    struct.pack_into("<4f", header, 280, 1.0, 0.0, 0.0, float(volume.origin_xyz[0]))
+    struct.pack_into("<4f", header, 296, 0.0, 1.0, 0.0, float(volume.origin_xyz[1]))
+    struct.pack_into("<4f", header, 312, 0.0, 0.0, 1.0, float(volume.origin_xyz[2]))
+    header[344:348] = b"n+1\0"
+    with gzip.open(out_path, "wb") as fp:
+        fp.write(header)
+        fp.write(b"\0\0\0\0")
+        fp.write(np.transpose(out, (2, 1, 0)).tobytes(order="C"))
+    return out_path
+
+
+def load_nifti_volume(path: str | Path) -> DicomVolume:
+    path = Path(path)
+    opener = gzip.open(path, "rb") if path.suffix == ".gz" else path.open("rb")
+    with opener as fp:
+        raw = fp.read()
+    if len(raw) < 352 or struct.unpack_from("<I", raw, 0)[0] != 348:
+        raise ValueError(f"Not a NIfTI-1 file: {path}")
+    dim = struct.unpack_from("<8h", raw, 40)
+    nx, ny, nz = int(dim[1]), int(dim[2]), int(dim[3])
+    datatype = struct.unpack_from("<h", raw, 70)[0]
+    pixdim = struct.unpack_from("<8f", raw, 76)
+    offset = int(round(struct.unpack_from("<f", raw, 108)[0]))
+    scl_slope = struct.unpack_from("<f", raw, 112)[0] or 1.0
+    scl_inter = struct.unpack_from("<f", raw, 116)[0]
+    dtype_map = {2: np.uint8, 4: "<i2", 8: "<i4", 16: "<f4", 64: "<f8"}
+    if datatype not in dtype_map:
+        raise ValueError(f"Unsupported NIfTI datatype {datatype}: {path}")
+    data = np.frombuffer(raw, dtype=dtype_map[datatype], count=nx * ny * nz, offset=offset).reshape((nx, ny, nz))
+    volume = np.transpose(data, (2, 1, 0)).astype(np.float32) * float(scl_slope) + float(scl_inter)
+    sx, sy, sz = float(pixdim[1] or 1.0), float(pixdim[2] or 1.0), float(pixdim[3] or 1.0)
+    origin = (
+        float(struct.unpack_from("<f", raw, 292)[0]),
+        float(struct.unpack_from("<f", raw, 308)[0]),
+        float(struct.unpack_from("<f", raw, 324)[0]),
+    )
+    return DicomVolume(volume_hu=volume, spacing_zyx=(sz, sy, sx), origin_xyz=origin)
+
+
+def resize_mask_to_grid(mask: np.ndarray, grid_size: int) -> np.ndarray:
+    mask = np.asarray(mask) > 0.5
+    if mask.shape == (grid_size, grid_size, grid_size):
+        return mask.astype(np.float32)
+    try:
+        from scipy import ndimage as ndi
+    except ImportError as exc:
+        raise ImportError("scipy is required to resize NIfTI masks.") from exc
+    zoom = [grid_size / max(int(n), 1) for n in mask.shape]
+    return (ndi.zoom(mask.astype(np.float32), zoom, order=0) > 0.5).astype(np.float32)
+
+
+def volume_bounds_xyz(shape_zyx: tuple[int, int, int], spacing_zyx: tuple[float, float, float], origin_xyz: tuple[float, float, float]) -> np.ndarray:
+    size_xyz = np.asarray([shape_zyx[2] * spacing_zyx[2], shape_zyx[1] * spacing_zyx[1], shape_zyx[0] * spacing_zyx[0]], dtype=np.float32)
+    origin = np.asarray(origin_xyz, dtype=np.float32)
+    return np.stack([origin, origin + size_xyz], axis=0)
 
 
 def smooth_stl(in_path: str | Path, out_path: str | Path, iterations: int = 8) -> Path:
