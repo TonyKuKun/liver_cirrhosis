@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -75,4 +74,3 @@ def collate_fn(items: list[dict]) -> dict:
         "bounds": torch.stack([item["bounds"] for item in items]),
         "is_post_tips": torch.stack([item["is_post_tips"] for item in items]),
     }
-
