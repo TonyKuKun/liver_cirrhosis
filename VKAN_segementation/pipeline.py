@@ -21,7 +21,12 @@ def main() -> None:
     parser.add_argument("--grid_size", type=int, default=96)
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--force_preprocess", action="store_true")
+    parser.add_argument("--force_preprocess",default='True', action="store_true", help="Force preprocessing for all patients, even if pretrain.stl already exists. Default is false, so only patients without pretrain.stl are processed.")
+    parser.add_argument(
+        "--skip_existing_pretrain",
+        action="store_true",
+        help="Skip preprocessing for patients that already have pretrain.stl. Default is false, so all patients are regenerated.",
+    )
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
@@ -33,6 +38,8 @@ def main() -> None:
         preprocess += ["--api_base_url", args.api_base_url]
     if args.force_preprocess:
         preprocess += ["--force"]
+    if args.skip_existing_pretrain:
+        preprocess += ["--skip_existing_pretrain"]
     run(preprocess)
 
     run(

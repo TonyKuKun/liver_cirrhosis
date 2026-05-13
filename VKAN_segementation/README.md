@@ -45,6 +45,9 @@ Generate inspection/training `pretrain.stl` from `patient/dcm/`:
 py VKAN_segementation\pretrain\preprocess.py --data_root D:\your_patient_root --model gemma-4-31b-it
 ```
 
+By default preprocessing regenerates every patient's `pretrain.stl`. Add `--skip_existing_pretrain`
+when you want to skip patients that already have `pretrain.stl`.
+
 Train:
 
 ```powershell

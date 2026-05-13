@@ -9,10 +9,13 @@ import numpy as np
 
 from pretrain.preprocess import (
     PRETRAIN_ALGORITHM_VERSION,
+    ask_for_cleanup_plan,
+    ask_for_coarse_plan,
     _cleanup_mask_by_region_growth,
     _crop_slices,
     _default_plan,
     _filter_components_by_reference_bbox,
+    _portal_seed_from_cleanup_plan,
     _portal_seed_from_reference,
     _portal_seed_from_plan,
     _reference_envelope_mask,
@@ -21,8 +24,21 @@ from pretrain.preprocess import (
     _segment_once,
     _sanitize_plan,
     _should_rebuild_pretrain,
+    _should_skip_existing_pretrain,
 )
 from utils.common import DicomVolume, PatientCase, discover_patients, mask_to_stl, write_binary_stl
+
+
+class _CaptureClient:
+    enabled = True
+
+    def __init__(self, response: dict | None = None) -> None:
+        self.response = response or {}
+        self.calls: list[tuple[str, str, list[Path]]] = []
+
+    def chat_json(self, system: str, prompt: str, image_paths: list[Path] | None = None) -> dict:
+        self.calls.append((system, prompt, image_paths or []))
+        return dict(self.response)
 
 
 def _binary_stl_points(path: Path) -> np.ndarray:
@@ -126,6 +142,38 @@ class PretrainRoiTests(unittest.TestCase):
 
         self.assertGreater(int(mask.sum()), 0)
         self.assertTrue(mask[5, 5, 5])
+
+    def test_post_tips_segmentation_honors_model_crop_instead_of_fixed_intersection(self) -> None:
+        vol = np.zeros((40, 40, 40), dtype=np.float32)
+        vol[18:24, 3:9, 10:16] = 105.0
+        plan = {
+            "hu_low": 80.0,
+            "hu_high": 140.0,
+            "crop": {"z": [0.40, 0.70], "y": [0.05, 0.30], "x": [0.20, 0.50]},
+            "include_tips": False,
+        }
+
+        mask = _segment_once(vol, plan, is_post_tips=True)
+
+        self.assertGreater(int(mask.sum()), 0)
+        self.assertTrue(mask[20, 5, 12])
+
+    def test_coarse_prompt_is_tips_specific_and_asks_for_sv_extent(self) -> None:
+        client = _CaptureClient()
+
+        ask_for_coarse_plan(client, "case#", True, {"p50": 40.0}, [])
+        tips_system, tips_prompt, _ = client.calls[-1]
+        ask_for_coarse_plan(client, "case", False, {"p50": 40.0}, [])
+        non_tips_system, non_tips_prompt, _ = client.calls[-1]
+
+        self.assertIn("cirrhosis", tips_system.lower())
+        self.assertIn("portal hypertension", tips_system.lower())
+        self.assertIn("TIPS stent", tips_prompt)
+        self.assertIn("bright gastric", tips_prompt)
+        self.assertIn("splenic vein", tips_prompt)
+        self.assertIn("long enough", tips_prompt)
+        self.assertIn("non-TIPS", non_tips_prompt)
+        self.assertIn("avoid bone", non_tips_prompt)
 
     def test_crop_slices_use_normalized_bounds(self) -> None:
         slices = _crop_slices((100, 200, 300), {"z": [0.25, 0.75], "y": [0.1, 0.6], "x": [0.2, 0.8]})
@@ -254,6 +302,20 @@ class PretrainRoiTests(unittest.TestCase):
         self.assertFalse(cleaned[3, 3, 3])
         self.assertEqual(info["seed_source"], "model_portal_seed")
 
+    def test_cleanup_prompt_and_seed_support_final_region_growth(self) -> None:
+        client = _CaptureClient(response={"cleanup_seed": {"z": 0.22, "y": 0.33, "x": 0.44}, "notes": "keep PV"})
+        volume = DicomVolume(np.zeros((20, 30, 40), dtype=np.float32), (1.0, 1.0, 1.0), (0.0, 0.0, 0.0))
+
+        cleanup_plan = ask_for_cleanup_plan(client, "case#", True, {"mask_voxels": 10}, {"hu_low": 80}, [])
+        seed, source = _portal_seed_from_cleanup_plan(cleanup_plan, volume)
+        system, prompt, _ = client.calls[-1]
+
+        self.assertIn("final cleanup", system.lower())
+        self.assertIn("portal vein", prompt.lower())
+        self.assertIn("TIPS", prompt)
+        self.assertEqual(source, "model_cleanup_seed")
+        np.testing.assert_allclose(seed, (0.22 * 19, 0.33 * 29, 0.44 * 39), atol=1e-6)
+
     def test_reference_envelope_mask_limits_candidate_to_pre_stl_neighborhood(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             patient = Path(tmp) / "case#"
@@ -294,6 +356,16 @@ class PretrainRoiTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertFalse(_should_rebuild_pretrain(case, meta, input_mtime=1.0)[0])
+
+    def test_skip_existing_pretrain_option_defaults_to_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "case"
+            (root / "dcm").mkdir(parents=True)
+            case = discover_patients(root)[0]
+            write_binary_stl(case.pretrain_stl, np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.int64))
+
+            self.assertFalse(_should_skip_existing_pretrain(case, skip_existing_pretrain=False))
+            self.assertTrue(_should_skip_existing_pretrain(case, skip_existing_pretrain=True))
 
 
 if __name__ == "__main__":
