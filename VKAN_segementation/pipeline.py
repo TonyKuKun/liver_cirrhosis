@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+
+DEFAULT_API_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-v4-pro"
+DEFAULT_API_KEY_ENV = "DEEPSEEK_API_KEY"
 
 
 def run(cmd: list[str]) -> None:
@@ -15,9 +21,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="End-to-end patient/dcm to portal vein STL workflow.")
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
     parser.add_argument("--out_dir", default=r"VKAN_segementation/runs/vkan")
-    parser.add_argument("--api_key", default='AIzaSyCUnLZXaUWemZe6aXEIpc_6KjZRB9PR288')
-    parser.add_argument("--api_base_url", default='https://generativelanguage.googleapis.com/v1beta/openai')
-    parser.add_argument("--model", default="gemma-4-31b-it")
+    parser.add_argument("--api_key", default=os.getenv(DEFAULT_API_KEY_ENV))
+    parser.add_argument("--api_base_url", default=DEFAULT_API_BASE_URL)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--grid_size", type=int, default=96)
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--batch_size", type=int, default=1)

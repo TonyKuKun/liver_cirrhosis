@@ -74,9 +74,15 @@ class GemmaClient:
         base_url: str | None = None,
         timeout: int = 90,
     ) -> None:
-        self.api_key = api_key or os.getenv("GEMMA_API_KEY") or os.getenv("OPENAI_API_KEY")
+        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("GEMMA_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.model = model
-        self.base_url = (base_url or os.getenv("GEMMA_API_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
+        self.base_url = (
+            base_url
+            or os.getenv("DEEPSEEK_API_BASE_URL")
+            or os.getenv("GEMMA_API_BASE_URL")
+            or os.getenv("OPENAI_BASE_URL")
+            or ""
+        ).rstrip("/")
         self.timeout = timeout
 
     @property
@@ -86,14 +92,18 @@ class GemmaClient:
     def chat_json(self, system: str, prompt: str, image_paths: list[str | Path] | None = None) -> dict[str, Any]:
         if not self.enabled:
             return {}
-        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-        for path in image_paths or []:
-            path = Path(path)
-            if not path.exists():
-                continue
-            mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-            b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-            content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        content: str | list[dict[str, Any]]
+        if "deepseek.com" in self.base_url.lower():
+            content = prompt
+        else:
+            content = [{"type": "text", "text": prompt}]
+            for path in image_paths or []:
+                path = Path(path)
+                if not path.exists():
+                    continue
+                mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+                b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+                content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],

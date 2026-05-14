@@ -1,10 +1,14 @@
-"""椎体逐节检测 + L3 上缘定位。
+"""椎体逐节检测 + L3 上缘定位 + Z 轴标定。
+
+v2 重写：
+- 逐层追踪椎体中心（不用全局中位数）
+- 用椎体横截面积的平滑曲线 + 梯度分析分割椎体
+- 用腰椎面积渐增的特征定位腰段
+- 多信号融合：膈肌距离 + 椎体大小 + 增强血管密度
 
 用法：
-    from vertebra_detector import detect_vertebrae, locate_l3_upper_border
-
-    vertebrae, info = detect_vertebrae(vol, spacing_zyx)
-    l3_z, l3_info = locate_l3_upper_border(vol, spacing_zyx, vertebrae)
+    from vertebra_detector import standardize_z_range
+    z_start, z_end, info = standardize_z_range(vol, spacing_zyx, spine_mask)
 """
 from __future__ import annotations
 
@@ -12,467 +16,427 @@ import numpy as np
 
 try:
     from scipy import ndimage as ndi
-    from scipy.signal import find_peaks
 except ImportError:
     ndi = None
-    find_peaks = None  # type: ignore[assignment]
 
 
-# ---------------------------------------------------------------------------
-# 常量
-# ---------------------------------------------------------------------------
 CORTICAL_BONE_HU = 400.0
-# 椎体在轴位上的最小面积（像素数），太小的不算
-MIN_VERTEBRAL_BODY_PIXELS = 80
-# 椎体在 z 方向的典型高度范围 (mm)
-VERTEBRAL_HEIGHT_MM = (15.0, 35.0)
-# 椎间盘典型高度 (mm)
-DISC_HEIGHT_MM = (4.0, 15.0)
-# 从 T12 到 L3 上缘跨越约 3 个椎体 ≈ 60-90mm
-T12_TO_L3_MM = 75.0
-# 膈肌到 T12 的典型距离 (mm) —— T12 椎体通常紧邻膈肌下方
-DIAPHRAGM_TO_T12_MM = 15.0
+VERTEBRAL_BODY_HU_LOW = 150.0
+VERTEBRAL_BODY_HU_HIGH = 1200.0
+MIN_VERTEBRAL_AREA_MM2 = 200.0
+LUNG_HU_THRESHOLD = -400.0
+LUNG_FRACTION_THRESHOLD = 0.03
+PORTAL_VEIN_HU_RANGE = (70.0, 360.0)
 
 
-def detect_vertebrae(
+# =========================================================================
+# 1. 逐层脊柱追踪
+# =========================================================================
+
+def _track_spine_per_slice(
     vol: np.ndarray,
     spacing_zyx: tuple[float, float, float],
     spine_mask: np.ndarray | None = None,
-) -> tuple[list[dict], dict]:
-    """检测每个椎体的 z 范围。
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """逐层追踪脊柱椎体：返回每层的中心坐标和截面积。
 
-    原理：
-    1. 沿 z 轴统计脊柱区域的骨质面积（截面积曲线）
-    2. 椎体 = 截面积的峰值区域（骨质密实）
-    3. 椎间盘 = 截面积的谷值（HU 较低，面积骤降）
-    4. 用 valley detection 分割每个椎体
-
-    参数：
-        vol: z-y-x HU 体积
-        spacing_zyx: 体素间距 (mm)
-        spine_mask: 可选，预计算的脊柱 mask。如果没有则自动检测。
+    与 v1 的区别：不用"最 posterior 的骨块 = 脊柱"，
+    而是从已知位置出发，利用椎体位置的连续性逐层追踪。
 
     返回：
-        vertebrae: [{"z_start": int, "z_end": int, "z_center": float,
-                     "area_mean": float, "index": int}, ...]
-                   按 z 从小到大排列，index=0 是最先出现的椎体
-        info: 调试信息
+        center_y, center_x: shape (nz,)，无椎体则 NaN
+        area_mm2: shape (nz,)
+        info
     """
-    if ndi is None or find_peaks is None:
-        return [], {"error": "scipy_not_available"}
-
     nz, ny, nx = vol.shape
+    sy, sx = float(spacing_zyx[1]), float(spacing_zyx[2])
+    pixel_area = sy * sx
+
+    center_y = np.full(nz, np.nan, dtype=np.float32)
+    center_x = np.full(nz, np.nan, dtype=np.float32)
+    area_mm2 = np.zeros(nz, dtype=np.float32)
+
+    mid_z = nz // 2
+    init_cy, init_cx = _find_initial_spine_center(vol, spacing_zyx, spine_mask, mid_z)
+
+    if init_cy is None:
+        return center_y, center_x, area_mm2, {"error": "no_initial_spine_center"}
+
+    search_ry = max(5, int(round(35.0 / sy)))
+    search_rx = max(5, int(round(35.0 / sx)))
+
+    for direction in (1, -1):
+        prev_cy, prev_cx = init_cy, init_cx
+        start = mid_z if direction == 1 else mid_z - 1
+        end = nz if direction == 1 else -1
+
+        for z in range(start, end, direction):
+            cy_int, cx_int = int(round(prev_cy)), int(round(prev_cx))
+            y0 = max(0, cy_int - search_ry)
+            y1 = min(ny, cy_int + search_ry + 1)
+            x0 = max(0, cx_int - search_rx)
+            x1 = min(nx, cx_int + search_rx + 1)
+
+            roi = vol[z, y0:y1, x0:x1]
+            bone = (roi >= VERTEBRAL_BODY_HU_LOW) & (roi <= VERTEBRAL_BODY_HU_HIGH)
+
+            if ndi is not None:
+                labels, n_labels = ndi.label(bone)
+                if n_labels == 0:
+                    continue
+                counts = np.bincount(labels.ravel())
+                counts[0] = 0
+                biggest = int(counts.argmax())
+                if counts[biggest] < max(10, int(MIN_VERTEBRAL_AREA_MM2 / pixel_area * 0.3)):
+                    continue
+                bone = (labels == biggest)
+
+            bone_area = float(bone.sum()) * pixel_area
+            if bone_area < MIN_VERTEBRAL_AREA_MM2 * 0.3:
+                continue
+
+            coords = np.argwhere(bone)
+            local_cy = float(coords[:, 0].mean())
+            local_cx = float(coords[:, 1].mean())
+            global_cy = local_cy + y0
+            global_cx = local_cx + x0
+
+            center_y[z] = global_cy
+            center_x[z] = global_cx
+            area_mm2[z] = bone_area
+
+            prev_cy = 0.7 * prev_cy + 0.3 * global_cy
+            prev_cx = 0.7 * prev_cx + 0.3 * global_cx
+
+    valid = ~np.isnan(center_y)
+    info = {
+        "valid_slices": int(valid.sum()),
+        "total_slices": nz,
+        "init_center_yz": [float(init_cy), float(init_cx)],
+    }
+    return center_y, center_x, area_mm2, info
+
+
+def _find_initial_spine_center(vol, spacing_zyx, spine_mask, target_z):
+    nz, ny, nx = vol.shape
+    if spine_mask is not None:
+        search_range = range(max(0, target_z - 10), min(nz, target_z + 11))
+        for z in search_range:
+            if spine_mask[z].any():
+                coords = np.argwhere(spine_mask[z])
+                return float(coords[:, 0].mean()), float(coords[:, 1].mean())
+    y_start = int(ny * 0.50)
+    x_start, x_end = int(nx * 0.30), int(nx * 0.70)
+    search_range = range(max(0, target_z - 15), min(nz, target_z + 16))
+    for z in search_range:
+        roi = vol[z, y_start:, x_start:x_end]
+        bone = roi > CORTICAL_BONE_HU
+        if bone.sum() < 20:
+            continue
+        coords = np.argwhere(bone)
+        return float(coords[:, 0].mean()) + y_start, float(coords[:, 1].mean()) + x_start
+    return None, None
+
+
+# =========================================================================
+# 2. 椎体分节
+# =========================================================================
+
+def _segment_vertebrae(area_mm2, center_y, spacing_zyx):
+    if ndi is None:
+        return [], {"error": "no_scipy"}
+    nz = len(area_mm2)
     dz = float(spacing_zyx[0])
-    info: dict = {"dz_mm": dz}
+    info = {"dz_mm": dz}
 
-    # --- Step 1: 获取脊柱中心线位置 ---
-    if spine_mask is None:
-        spine_center_y, spine_center_x = _estimate_spine_center(vol)
-    else:
-        coords = np.argwhere(spine_mask)
-        if len(coords) == 0:
-            return [], {"error": "empty_spine_mask"}
-        spine_center_y = float(np.median(coords[:, 1]))
-        spine_center_x = float(np.median(coords[:, 2]))
+    sigma = max(0.5, 1.5 / max(0.1, dz))
+    smoothed = ndi.gaussian_filter1d(area_mm2.astype(np.float64), sigma=sigma).astype(np.float32)
 
-    info["spine_center_yx"] = [spine_center_y, spine_center_x]
+    threshold = max(MIN_VERTEBRAL_AREA_MM2 * 0.4, float(smoothed.max()) * 0.15)
+    valid = smoothed > threshold
+    if not valid.any():
+        return [], {**info, "error": "no_valid_bone_region"}
 
-    # --- Step 2: 在脊柱区域提取 z 方向截面积曲线 ---
-    # 取脊柱中心附近的一个窗口（约 40x60mm）来统计骨质面积
-    wy = max(5, int(round(20.0 / float(spacing_zyx[1]))))  # ±20mm
-    wx = max(5, int(round(30.0 / float(spacing_zyx[2]))))  # ±30mm
-    cy, cx = int(round(spine_center_y)), int(round(spine_center_x))
-    y0, y1 = max(0, cy - wy), min(ny, cy + wy + 1)
-    x0, x1 = max(0, cx - wx), min(nx, cx + wx + 1)
+    segments = _find_continuous_segments(valid)
+    info["n_bone_segments"] = len(segments)
+    if not segments:
+        return [], {**info, "error": "no_segments"}
 
-    # 逐层统计高 HU 体素数 → 椎体截面积曲线
-    bone_area = np.zeros(nz, dtype=np.float32)
-    for z in range(nz):
-        roi = vol[z, y0:y1, x0:x1]
-        bone_area[z] = float((roi > CORTICAL_BONE_HU).sum())
+    longest = max(segments, key=lambda s: s[1] - s[0])
+    seg_start, seg_end = longest
+    seg_area = smoothed[seg_start:seg_end + 1]
 
-    # 平滑消除噪声
-    bone_area_smooth = ndi.gaussian_filter1d(bone_area, sigma=1.5)
-    info["bone_area_max"] = float(bone_area_smooth.max())
+    min_disc_gap_slices = max(2, int(round(12.0 / max(0.1, dz))))
+    half_w = min_disc_gap_slices
 
-    if bone_area_smooth.max() < MIN_VERTEBRAL_BODY_PIXELS:
-        return [], {"error": "no_significant_bone", **info}
+    disc_positions = []
+    for i in range(half_w, len(seg_area) - half_w):
+        val = seg_area[i]
+        left_max = seg_area[max(0, i - half_w):i].max()
+        right_max = seg_area[i + 1:min(len(seg_area), i + half_w + 1)].max()
+        if val < left_max * 0.80 and val < right_max * 0.80:
+            disc_positions.append(seg_start + i)
 
-    # --- Step 3: 找椎间盘位置（骨质面积的谷值）---
-    # 椎间盘是骨质截面积的局部最小值
-    # 反转曲线找峰值 = 找原曲线谷值
-    inverted = bone_area_smooth.max() - bone_area_smooth
+    filtered_discs = _filter_close_valleys(disc_positions, smoothed, min_disc_gap_slices)
+    info["n_disc_positions"] = len(filtered_discs)
 
-    # 椎间盘间距约 20-35mm（一个椎体高度）
-    min_distance_slices = max(3, int(round(VERTEBRAL_HEIGHT_MM[0] / max(0.1, dz))))
-    # prominence: 谷值要比两侧椎体低至少 30% 的峰值
-    prominence = float(bone_area_smooth.max()) * 0.15
-
-    valleys, valley_props = find_peaks(
-        inverted,
-        distance=min_distance_slices,
-        prominence=max(1.0, prominence),
-    )
-
-    # 只保留在有骨质的区域内的谷值
-    # 要求谷值两侧都有一定的骨质
-    valid_valleys = []
-    for v in sorted(valleys):
-        # 左右各看 5 层
-        left_area = float(bone_area_smooth[max(0, v - 5):v].max()) if v > 0 else 0
-        right_area = float(bone_area_smooth[v + 1:min(nz, v + 6)].max()) if v < nz - 1 else 0
-        if left_area > MIN_VERTEBRAL_BODY_PIXELS and right_area > MIN_VERTEBRAL_BODY_PIXELS:
-            valid_valleys.append(int(v))
-
-    info["n_valleys_raw"] = len(valleys)
-    info["n_valleys_valid"] = len(valid_valleys)
-    info["valley_positions"] = valid_valleys
-
-    if len(valid_valleys) < 2:
-        # 谷值太少，无法分割椎体
-        # 退化：把整个有骨质的区域当作一整段脊柱
-        has_bone = bone_area_smooth > MIN_VERTEBRAL_BODY_PIXELS * 0.3
-        if not has_bone.any():
-            return [], {"error": "no_bone_region", **info}
-        bone_region = np.where(has_bone)[0]
-        return [{"z_start": int(bone_region.min()), "z_end": int(bone_region.max()),
-                 "z_center": float((bone_region.min() + bone_region.max()) / 2),
-                 "area_mean": float(bone_area_smooth[bone_region].mean()),
-                 "index": 0}], {**info, "method": "single_segment"}
-
-    # --- Step 4: 用谷值分割椎体 ---
+    boundaries = [seg_start] + filtered_discs + [seg_end]
     vertebrae = []
-    # 第一个椎体：从有骨质的开始到第一个谷值
-    has_bone = bone_area_smooth > MIN_VERTEBRAL_BODY_PIXELS * 0.3
-    if has_bone.any():
-        first_bone = int(np.where(has_bone)[0].min())
-    else:
-        first_bone = 0
-
-    boundaries = [first_bone] + valid_valleys
-    # 最后一个椎体：从最后一个谷值到骨质消失
-    if has_bone.any():
-        last_bone = int(np.where(has_bone)[0].max())
-    else:
-        last_bone = nz - 1
-    boundaries.append(last_bone)
-
     for i in range(len(boundaries) - 1):
-        z_start = boundaries[i]
-        z_end = boundaries[i + 1]
-        if z_end - z_start < 2:
+        z_s, z_e = boundaries[i], boundaries[i + 1]
+        height_mm = float((z_e - z_s) * dz)
+        if height_mm < 10.0:
             continue
-        segment = bone_area_smooth[z_start:z_end + 1]
-        if segment.max() < MIN_VERTEBRAL_BODY_PIXELS * 0.3:
-            continue
+        seg = smoothed[z_s:z_e + 1]
         vertebrae.append({
-            "z_start": z_start,
-            "z_end": z_end,
-            "z_center": float((z_start + z_end) / 2),
-            "height_mm": float((z_end - z_start) * dz),
-            "area_mean": float(segment.mean()),
-            "area_max": float(segment.max()),
+            "z_start": z_s, "z_end": z_e,
+            "z_center": float((z_s + z_e) / 2),
+            "height_mm": round(height_mm, 1),
+            "area_mean_mm2": round(float(seg.mean()), 1),
+            "area_max_mm2": round(float(seg.max()), 1),
             "index": len(vertebrae),
         })
 
     info["n_vertebrae"] = len(vertebrae)
-    info["method"] = "valley_segmentation"
     return vertebrae, info
 
 
-def _estimate_spine_center(vol: np.ndarray) -> tuple[float, float]:
-    """在没有 spine_mask 的情况下，估算脊柱的中心 y, x。"""
+def _find_continuous_segments(valid):
+    segments = []
+    in_seg, start = False, 0
+    for i in range(len(valid)):
+        if valid[i] and not in_seg:
+            start = i; in_seg = True
+        elif not valid[i] and in_seg:
+            if i - start >= 3:
+                segments.append((start, i - 1))
+            in_seg = False
+    if in_seg and len(valid) - start >= 3:
+        segments.append((start, len(valid) - 1))
+    return segments
+
+
+def _filter_close_valleys(positions, curve, min_gap):
+    if not positions:
+        return []
+    filtered = [positions[0]]
+    for p in positions[1:]:
+        if p - filtered[-1] >= min_gap:
+            filtered.append(p)
+        elif curve[p] < curve[filtered[-1]]:
+            filtered[-1] = p
+    return filtered
+
+
+# =========================================================================
+# 3. L3 定位：多信号融合
+# =========================================================================
+
+def _detect_diaphragm_slice(vol):
+    if ndi is None:
+        return None, None
     nz, ny, nx = vol.shape
-    # 在中间 30% 层取平均，找高密度骨质的质心
-    z_start = int(nz * 0.35)
-    z_end = int(nz * 0.65)
-    bone_sum_yx = np.zeros((ny, nx), dtype=np.float64)
-    for z in range(z_start, z_end):
-        bone_sum_yx += (vol[z] > CORTICAL_BONE_HU).astype(np.float64)
-
-    if bone_sum_yx.max() == 0:
-        # fallback：假设后正中
-        return float(ny * 0.75), float(nx * 0.50)
-
-    if ndi is not None:
-        # 找最大的骨质团块（应该是脊柱）
-        binary = bone_sum_yx > bone_sum_yx.max() * 0.3
-        labels, n = ndi.label(binary)
-        if n > 0:
-            counts = np.bincount(labels.ravel())
-            counts[0] = 0
-            biggest = int(counts.argmax())
-            coords = np.argwhere(labels == biggest)
-            return float(coords[:, 0].mean()), float(coords[:, 1].mean())
-
-    coords = np.argwhere(bone_sum_yx > bone_sum_yx.max() * 0.3)
-    if len(coords) == 0:
-        return float(ny * 0.75), float(nx * 0.50)
-    return float(coords[:, 0].mean()), float(coords[:, 1].mean())
-
-
-def classify_vertebrae_direction(
-    vol: np.ndarray,
-    spacing_zyx: tuple[float, float, float],
-    vertebrae: list[dict],
-) -> tuple[str, dict]:
-    """判断 z 轴方向：z 增大是头端(superior)还是足端(inferior)。
-
-    利用肺组织检测：如果 z 较小端有肺，则 z 从上到下（z 增大 = 向足端）。
-    """
-    nz, ny, nx = vol.shape
-    info: dict = {}
-
-    # 检测肺组织在 z 的哪一端
-    lung_count_low = 0  # z 较小端
-    lung_count_high = 0  # z 较大端
-    check_range = max(5, nz // 10)
-
-    for z in range(min(check_range, nz)):
-        lung_count_low += int((vol[z] < -400).sum())
-    for z in range(max(0, nz - check_range), nz):
-        lung_count_high += int((vol[z] < -400).sum())
-
-    info["lung_count_low_z"] = lung_count_low
-    info["lung_count_high_z"] = lung_count_high
-
-    if lung_count_low > lung_count_high * 2:
-        direction = "z_increasing_is_inferior"  # z=0 头端，z 增大向下
-    elif lung_count_high > lung_count_low * 2:
-        direction = "z_increasing_is_superior"  # z=0 足端，z 增大向上
+    lung_fracs = np.zeros(nz, dtype=np.float32)
+    for z in range(nz):
+        body = vol[z] > -500.0
+        body = ndi.binary_fill_holes(body)
+        body_area = int(body.sum())
+        if body_area < int(ny * nx * 0.05):
+            continue
+        lung_fracs[z] = float(((vol[z] < LUNG_HU_THRESHOLD) & body).sum()) / float(body_area)
+    has_lung = lung_fracs > LUNG_FRACTION_THRESHOLD
+    if not has_lung.any():
+        return None, None
+    lung_idx = np.where(has_lung)[0]
+    lung_center = (lung_idx.min() + lung_idx.max()) / 2.0
+    mid_z = nz // 2
+    if lung_center < mid_z:
+        return int(lung_idx.max()), "z_down"
     else:
-        # 不确定 → 看椎体大小趋势（腰椎比胸椎大）
-        if len(vertebrae) >= 3:
-            first_area = vertebrae[0]["area_mean"]
-            last_area = vertebrae[-1]["area_mean"]
-            if last_area > first_area * 1.3:
-                direction = "z_increasing_is_inferior"  # 后面的椎体更大 = 腰椎
-            elif first_area > last_area * 1.3:
-                direction = "z_increasing_is_superior"
-            else:
-                direction = "unknown"
-        else:
-            direction = "unknown"
-
-    info["direction"] = direction
-    return direction, info
+        return int(lung_idx.min()), "z_up"
 
 
-def locate_l3_upper_border(
-    vol: np.ndarray,
-    spacing_zyx: tuple[float, float, float],
-    vertebrae: list[dict] | None = None,
-    spine_mask: np.ndarray | None = None,
-    diaphragm_z: int | None = None,
-) -> tuple[int | None, dict]:
-    """定位 L3 椎体上缘。
+def _estimate_portal_vessel_z_peak(vol, spacing_zyx):
+    if ndi is None:
+        return None
+    nz, ny, nx = vol.shape
+    y_end = int(ny * 0.65)
+    x_start, x_end = int(nx * 0.15), int(nx * 0.85)
+    vessel_density = np.zeros(nz, dtype=np.float32)
+    for z in range(nz):
+        roi = vol[z, :y_end, x_start:x_end]
+        vessel_density[z] = float(((roi >= PORTAL_VEIN_HU_RANGE[0]) &
+                                    (roi <= PORTAL_VEIN_HU_RANGE[1])).sum())
+    smoothed = ndi.gaussian_filter1d(vessel_density, sigma=5.0)
+    if smoothed.max() <= 0:
+        return None
+    threshold = smoothed.max() * 0.6
+    high_density = smoothed > threshold
+    if not high_density.any():
+        return int(smoothed.argmax())
+    indices = np.where(high_density)[0]
+    weights = smoothed[indices]
+    return int(round(float(np.average(indices, weights=weights))))
 
-    策略（按优先级）：
-    1. 如果检测到了多个椎体，从膈肌端向下数：
-       - T12 ≈ 膈肌附近第一个椎体
-       - L1 = T12 下一个
-       - L2 = L1 下一个
-       - L3 上缘 = L2 下一个椎体的起始位置
-    2. 如果椎体检测失败但有膈肌位置，用距离估算
-    3. 最终 fallback
 
-    参数：
-        vol: z-y-x HU 体积
-        spacing_zyx: 体素间距
-        vertebrae: detect_vertebrae 的输出
-        spine_mask: 可选
-        diaphragm_z: 膈肌 z 位置
-
-    返回：
-        l3_z: L3 上缘的 z index，或 None
-        info: 调试信息
-    """
+def locate_l3_upper_border(vol, spacing_zyx, vertebrae, diaphragm_z, z_direction, area_mm2=None):
     nz = vol.shape[0]
     dz = float(spacing_zyx[0])
-    info: dict = {"dz_mm": dz}
+    info = {}
 
-    # --- 椎体检测（如果没有传入）---
-    if vertebrae is None:
-        vertebrae, detect_info = detect_vertebrae(vol, spacing_zyx, spine_mask)
-        info["vertebra_detection"] = detect_info
+    l3_from_counting = None
+    if diaphragm_z is not None and len(vertebrae) >= 4 and z_direction is not None:
+        l3_from_counting, count_info = _l3_by_counting(vertebrae, diaphragm_z, z_direction, dz)
+        info["counting"] = count_info
 
-    if len(vertebrae) < 2:
-        # 椎体检测失败 → 用膈肌距离估算
-        return _fallback_l3_from_diaphragm(vol, spacing_zyx, diaphragm_z, info)
+    l3_from_size = None
+    if len(vertebrae) >= 5 and area_mm2 is not None:
+        l3_from_size, size_info = _l3_by_size_transition(vertebrae, area_mm2, z_direction, dz)
+        info["size_transition"] = size_info
 
-    # --- 判断 z 方向 ---
-    direction, dir_info = classify_vertebrae_direction(vol, spacing_zyx, vertebrae)
-    info["z_direction"] = dir_info
-
-    # --- 找到膈肌附近的椎体（T12）---
-    if diaphragm_z is not None:
-        # 找离膈肌最近的椎体 → 大致是 T11 或 T12
-        t12_candidates = []
-        for v in vertebrae:
-            dist = abs(v["z_center"] - diaphragm_z) * dz
-            t12_candidates.append((dist, v))
-        t12_candidates.sort(key=lambda x: x[0])
-        diaphragm_vertebra = t12_candidates[0][1]
-        diaphragm_vertebra_idx = diaphragm_vertebra["index"]
-        info["diaphragm_vertebra_idx"] = diaphragm_vertebra_idx
-        info["diaphragm_vertebra_dist_mm"] = t12_candidates[0][0]
-    else:
-        # 没有膈肌信息 → 用肺组织判断哪端是头端
-        if direction == "z_increasing_is_inferior":
-            diaphragm_vertebra_idx = 0  # z 最小端 = 头端，第一个椎体 ≈ 最高的胸椎
-        elif direction == "z_increasing_is_superior":
-            diaphragm_vertebra_idx = len(vertebrae) - 1
+    portal_peak = _estimate_portal_vessel_z_peak(vol, spacing_zyx)
+    l3_from_portal = None
+    if portal_peak is not None:
+        offset_slices = int(round(55.0 / max(0.1, dz)))
+        if z_direction == "z_down":
+            l3_from_portal = min(nz - 1, portal_peak + offset_slices)
+        elif z_direction == "z_up":
+            l3_from_portal = max(0, portal_peak - offset_slices)
         else:
-            # 不确定方向 → 取面积较小的一端（胸椎比腰椎小）
-            if vertebrae[0]["area_mean"] < vertebrae[-1]["area_mean"]:
-                diaphragm_vertebra_idx = 0
+            a = min(nz - 1, portal_peak + offset_slices)
+            b = max(0, portal_peak - offset_slices)
+            l3_from_portal = a if abs(a - nz // 2) < abs(b - nz // 2) else b
+        info["portal_peak_z"] = portal_peak
+        info["l3_from_portal"] = l3_from_portal
+
+    estimates = []
+    if l3_from_counting is not None:
+        estimates.append(("counting", l3_from_counting, 1.0))
+    if l3_from_size is not None:
+        estimates.append(("size", l3_from_size, 0.7))
+    if l3_from_portal is not None:
+        estimates.append(("portal", l3_from_portal, 0.5))
+
+    if not estimates:
+        if diaphragm_z is not None:
+            offset = int(round(90.0 / max(0.1, dz)))
+            if z_direction == "z_down":
+                l3_z = min(nz - 1, diaphragm_z + offset)
+            elif z_direction == "z_up":
+                l3_z = max(0, diaphragm_z - offset)
             else:
-                diaphragm_vertebra_idx = len(vertebrae) - 1
-        info["diaphragm_vertebra_idx"] = diaphragm_vertebra_idx
-        info["diaphragm_vertebra_method"] = "area_heuristic"
-
-    # --- 从 T12 向腰椎方向数 3 个椎体 → L3 上缘 ---
-    # T12 ≈ 膈肌处椎体
-    # 向腰椎方向 = z 增大方向（如果 z_increasing_is_inferior）
-    #              或 z 减小方向（如果 z_increasing_is_superior）
-
-    if direction == "z_increasing_is_inferior":
-        # z 增大 = 向下 = 向腰椎
-        # T12 之后第3个椎体 = L3
-        l3_idx = diaphragm_vertebra_idx + 3
-        if l3_idx < len(vertebrae):
-            l3_z = vertebrae[l3_idx]["z_start"]
-            info.update({"l3_vertebra_idx": l3_idx, "l3_z": l3_z, "method": "count_from_diaphragm"})
+                l3_z = int(nz * 0.65)
+            info.update({"method": "diaphragm_offset_fallback", "l3_z": l3_z})
             return l3_z, info
-        else:
-            # 椎体不够 → 用最后一个椎体的下端
-            l3_z = vertebrae[-1]["z_end"]
-            info.update({"l3_z": l3_z, "method": "last_vertebra_end", "vertebrae_short": True})
-            return l3_z, info
+        info.update({"method": "volume_fraction_fallback", "l3_z": int(nz * 0.65)})
+        return int(nz * 0.65), info
 
-    elif direction == "z_increasing_is_superior":
-        # z 增大 = 向上 = 向胸椎。从膈肌椎体向 z 减小方向数
-        l3_idx = diaphragm_vertebra_idx - 3
-        if l3_idx >= 0:
-            l3_z = vertebrae[l3_idx]["z_end"]  # z_end 是较大的 z = 上缘（因为 z 增大是向上）
-            info.update({"l3_vertebra_idx": l3_idx, "l3_z": l3_z, "method": "count_from_diaphragm"})
-            return l3_z, info
-        else:
-            l3_z = vertebrae[0]["z_start"]
-            info.update({"l3_z": l3_z, "method": "first_vertebra_start", "vertebrae_short": True})
-            return l3_z, info
-
-    else:
-        # 方向不确定 → 取所有椎体约 65% 处作为 L3 估算
-        total_span = vertebrae[-1]["z_end"] - vertebrae[0]["z_start"]
-        l3_z = int(vertebrae[0]["z_start"] + total_span * 0.65)
-        info.update({"l3_z": l3_z, "method": "65_percent_fallback"})
-        return l3_z, info
-
-
-def _fallback_l3_from_diaphragm(
-    vol: np.ndarray,
-    spacing_zyx: tuple[float, float, float],
-    diaphragm_z: int | None,
-    info: dict,
-) -> tuple[int | None, dict]:
-    """椎体检测失败时的 fallback。"""
-    nz = vol.shape[0]
-    dz = float(spacing_zyx[0])
-
-    if diaphragm_z is not None:
-        # T12 ≈ 膈肌下方 15mm，L3 上缘 ≈ T12 + 75mm
-        offset_mm = DIAPHRAGM_TO_T12_MM + T12_TO_L3_MM
-        offset_slices = int(round(offset_mm / max(0.1, dz)))
-        mid_z = nz // 2
-        if diaphragm_z < mid_z:
-            l3_z = min(nz - 1, diaphragm_z + offset_slices)
-        else:
-            l3_z = max(0, diaphragm_z - offset_slices)
-        info.update({"l3_z": l3_z, "method": "diaphragm_offset_fallback", "offset_mm": offset_mm})
-        return l3_z, info
-
-    # 都没有 → 用 volume 的 65%
-    l3_z = int(nz * 0.65)
-    info.update({"l3_z": l3_z, "method": "volume_fraction_fallback"})
+    total_weight = sum(w for _, _, w in estimates)
+    weighted_z = sum(z * w for _, z, w in estimates) / total_weight
+    l3_z = max(0, min(nz - 1, int(round(weighted_z))))
+    info.update({"method": "multi_signal_fusion",
+                 "estimates": [{"signal": n, "z": z, "weight": w} for n, z, w in estimates],
+                 "l3_z": l3_z})
     return l3_z, info
 
 
-def standardize_z_range(
-    vol: np.ndarray,
-    spacing_zyx: tuple[float, float, float],
-    spine_mask: np.ndarray | None = None,
-    diaphragm_z: int | None = None,
-    margin_mm: float = 20.0,
-) -> tuple[int, int, dict]:
-    """统一接口：返回 (z_start, z_end, info)。
+def _l3_by_counting(vertebrae, diaphragm_z, z_direction, dz):
+    info = {}
+    dists = [(abs(v["z_center"] - diaphragm_z) * dz, v) for v in vertebrae]
+    dists.sort(key=lambda x: x[0])
+    nearest_dist_mm = dists[0][0]
+    t12_idx = dists[0][1]["index"]
+    info.update({"t12_candidate_idx": t12_idx, "t12_dist_mm": round(nearest_dist_mm, 1)})
+    if nearest_dist_mm > 50.0:
+        return None, {**info, "warning": "t12_too_far"}
+    if z_direction == "z_down":
+        l3_idx = t12_idx + 3
+        if l3_idx < len(vertebrae):
+            return vertebrae[l3_idx]["z_start"], {**info, "l3_idx": l3_idx}
+        return vertebrae[-1]["z_end"], {**info, "l3_idx": "clamped_last"}
+    elif z_direction == "z_up":
+        l3_idx = t12_idx - 3
+        if l3_idx >= 0:
+            return vertebrae[l3_idx]["z_end"], {**info, "l3_idx": l3_idx}
+        return vertebrae[0]["z_start"], {**info, "l3_idx": "clamped_first"}
+    return None, {**info, "error": "unknown_direction"}
 
-    z_start = 膈肌层（上界）
-    z_end = L3 上缘层（下界）
-    """
+
+def _l3_by_size_transition(vertebrae, area_mm2, z_direction, dz):
+    info = {}
+    if len(vertebrae) < 5:
+        return None, {"error": "too_few"}
+    areas = np.array([v["area_mean_mm2"] for v in vertebrae])
+    median_area = float(np.median(areas))
+    lumbar_start_idx = None
+    for i in range(len(areas)):
+        if areas[i] > median_area * 1.15:
+            if i + 2 < len(areas) and all(areas[j] > median_area for j in range(i, min(i + 3, len(areas)))):
+                lumbar_start_idx = i
+                break
+    if lumbar_start_idx is None:
+        return None, {"error": "no_transition"}
+    l3_idx = lumbar_start_idx + 2
+    l3_z = vertebrae[l3_idx]["z_start"] if l3_idx < len(vertebrae) else vertebrae[-1]["z_end"]
+    info.update({"lumbar_start_idx": lumbar_start_idx, "l3_idx": l3_idx, "l3_z": l3_z})
+    return l3_z, info
+
+
+# =========================================================================
+# 4. 统一接口
+# =========================================================================
+
+def detect_vertebrae(vol, spacing_zyx, spine_mask=None):
+    """返回 (vertebrae_list, area_mm2_per_slice, info)。"""
+    center_y, center_x, area_mm2, track_info = _track_spine_per_slice(vol, spacing_zyx, spine_mask)
+    if track_info.get("error"):
+        return [], area_mm2, track_info
+    vertebrae, seg_info = _segment_vertebrae(area_mm2, center_y, spacing_zyx)
+    info = {"tracking": track_info, "segmentation": seg_info, "n_vertebrae": len(vertebrae)}
+    return vertebrae, area_mm2, info
+
+
+def standardize_z_range(vol, spacing_zyx, spine_mask=None, diaphragm_z=None, margin_mm=20.0):
+    """统一接口：返回 (z_start, z_end, info)。"""
     nz = vol.shape[0]
     dz = float(spacing_zyx[0])
-    info: dict = {}
+    info = {}
 
-    # 膈肌检测
+    z_direction = None
     if diaphragm_z is None:
-        diaphragm_z = _detect_diaphragm_slice(vol)
+        diaphragm_z, z_direction = _detect_diaphragm_slice(vol)
     info["diaphragm_z"] = diaphragm_z
+    info["z_direction"] = z_direction
 
-    # 椎体检测 + L3 定位
-    vertebrae, vert_info = detect_vertebrae(vol, spacing_zyx, spine_mask)
+    vertebrae, area_mm2, vert_info = detect_vertebrae(vol, spacing_zyx, spine_mask)
     info["vertebra_detection"] = vert_info
 
-    l3_z, l3_info = locate_l3_upper_border(vol, spacing_zyx, vertebrae, spine_mask, diaphragm_z)
+    l3_z, l3_info = locate_l3_upper_border(vol, spacing_zyx, vertebrae, diaphragm_z, z_direction, area_mm2)
     info["l3_detection"] = l3_info
 
     if diaphragm_z is not None and l3_z is not None:
-        z_start = min(diaphragm_z, l3_z)
-        z_end = max(diaphragm_z, l3_z)
+        z_start, z_end = min(diaphragm_z, l3_z), max(diaphragm_z, l3_z)
     elif diaphragm_z is not None:
-        z_start = min(diaphragm_z, nz - 1)
-        z_end = max(diaphragm_z, nz - 1)
+        default_range = int(round(180.0 / max(0.1, dz)))
+        if z_direction == "z_down":
+            z_start, z_end = diaphragm_z, min(nz - 1, diaphragm_z + default_range)
+        elif z_direction == "z_up":
+            z_start, z_end = max(0, diaphragm_z - default_range), diaphragm_z
+        else:
+            z_start, z_end = max(0, diaphragm_z - default_range // 2), min(nz - 1, diaphragm_z + default_range // 2)
     elif l3_z is not None:
-        z_start = 0
-        z_end = l3_z
+        z_start, z_end = 0, l3_z
     else:
-        z_start = int(nz * 0.25)
-        z_end = int(nz * 0.80)
+        z_start, z_end = int(nz * 0.20), int(nz * 0.82)
 
-    # 安全边距
     margin_slices = max(1, int(round(margin_mm / max(0.1, dz))))
     z_start = max(0, z_start - margin_slices)
     z_end = min(nz - 1, z_end + margin_slices)
 
     info.update({
-        "z_start": z_start,
-        "z_end": z_end,
+        "z_start": z_start, "z_end": z_end,
         "z_range_slices": z_end - z_start,
-        "z_range_mm": float((z_end - z_start) * dz),
-        "n_vertebrae_detected": len(vertebrae),
+        "z_range_mm": round(float((z_end - z_start) * dz), 1),
         "vertebrae": vertebrae,
     })
     return z_start, z_end, info
-
-
-def _detect_diaphragm_slice(vol: np.ndarray) -> int | None:
-    """检测膈肌层面（与 v3e 一致）。"""
-    if ndi is None:
-        return None
-    nz, ny, nx = vol.shape
-    lung_fracs = []
-    for z in range(nz):
-        body = vol[z] > -500.0
-        body = ndi.binary_fill_holes(body) if ndi else body
-        body_area = int(body.sum())
-        if body_area < int(ny * nx * 0.05):
-            lung_fracs.append(0.0)
-            continue
-        lung_fracs.append(float(((vol[z] < -400.0) & body).sum()) / float(body_area))
-    lung_fracs_arr = np.asarray(lung_fracs, dtype=np.float32)
-    has_lung = lung_fracs_arr > 0.03
-    if not has_lung.any():
-        return None
-    lung_idx = np.where(has_lung)[0]
-    lung_center = (lung_idx.min() + lung_idx.max()) / 2.0
-    return int(lung_idx.max()) if lung_center < nz // 2 else int(lung_idx.min())

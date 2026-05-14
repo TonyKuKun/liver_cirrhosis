@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import struct
 import sys
@@ -99,20 +100,25 @@ def load_dicom_series(dcm_dir: str | Path) -> DicomVolume:
     if not slices:
         raise FileNotFoundError(f"No readable DICOM slices found in {dcm_dir}")
     slices.sort(key=_slice_position)
-    arrays = []
-    for ds in slices:
+    # 预分配 volume 并逐层填充，避免 list+stack 的双倍内存开销
+    rows = int(getattr(slices[0], "Rows", 512))
+    cols = int(getattr(slices[0], "Columns", 512))
+    volume = np.empty((len(slices), rows, cols), dtype=np.float32)
+    for i, ds in enumerate(slices):
         try:
             arr = ds.pixel_array.astype(np.float32)
         except Exception:
             arr = _raw_pixel_array(ds).astype(np.float32)
-        arrays.append(arr * float(getattr(ds, "RescaleSlope", 1.0)) + float(getattr(ds, "RescaleIntercept", 0.0)))
-    volume = np.stack(arrays, axis=0)
+        volume[i] = arr * float(getattr(ds, "RescaleSlope", 1.0)) + float(getattr(ds, "RescaleIntercept", 0.0))
+        del arr
     ps = getattr(slices[0], "PixelSpacing", [1.0, 1.0])
     sy, sx = float(ps[0]), float(ps[1])
     dz = abs(_slice_position(slices[1]) - _slice_position(slices[0])) if len(slices) > 1 else 0.0
     if dz <= 0:
         dz = float(getattr(slices[0], "SliceThickness", 1.0))
     ipp = getattr(slices[0], "ImagePositionPatient", [0.0, 0.0, 0.0])
+    del slices
+    gc.collect()
     return DicomVolume(volume_hu=volume, spacing_zyx=(dz, sy, sx),
                        origin_xyz=(float(ipp[0]), float(ipp[1]), float(ipp[2])))
 
@@ -131,16 +137,20 @@ def _load_dicom_series_minimal(dcm_dir: str | Path) -> DicomVolume:
     if not slices:
         raise FileNotFoundError(f"No readable uncompressed DICOM slices found in {dcm_dir}")
     slices.sort(key=_minimal_slice_position)
-    arrays = []
-    for ds in slices:
+    rows, cols = int(slices[0]["rows"]), int(slices[0]["columns"])
+    volume = np.empty((len(slices), rows, cols), dtype=np.float32)
+    for i, ds in enumerate(slices):
         arr = _raw_pixel_array_minimal(ds).astype(np.float32)
-        arrays.append(arr * float(ds.get("rescale_slope", 1.0)) + float(ds.get("rescale_intercept", 0.0)))
-    volume = np.stack(arrays, axis=0)
+        volume[i] = arr * float(ds.get("rescale_slope", 1.0)) + float(ds.get("rescale_intercept", 0.0))
+        del arr
+        ds.pop("pixel_data", None)  # 释放原始像素数据
     sy, sx = [float(v) for v in slices[0].get("pixel_spacing", [1.0, 1.0])[:2]]
     dz = abs(_minimal_slice_position(slices[1]) - _minimal_slice_position(slices[0])) if len(slices) > 1 else 0.0
     if dz <= 0:
         dz = float(slices[0].get("slice_thickness", 1.0))
     ipp = [float(v) for v in slices[0].get("image_position_patient", [0.0, 0.0, 0.0])[:3]]
+    del slices
+    gc.collect()
     return DicomVolume(volume_hu=volume, spacing_zyx=(dz, sy, sx), origin_xyz=(ipp[0], ipp[1], ipp[2]))
 
 
@@ -299,12 +309,19 @@ def _detect_spine_mask(vol: np.ndarray) -> np.ndarray:
 
 
 def _spine_center_yx(spine_mask: np.ndarray) -> tuple[float, float] | None:
-    """返回脊柱中心 (y, x) 的归一化坐标。"""
-    coords = np.argwhere(spine_mask)
-    if len(coords) == 0:
+    """返回脊柱中心 (y, x) 的归一化坐标。内存安全：逐层统计而非全量 argwhere。"""
+    nz, ny, nx = spine_mask.shape
+    sum_y, sum_x, total = 0.0, 0.0, 0
+    # 每 4 层采样一次，足够精确且节省内存
+    for z in range(0, nz, 4):
+        ys, xs = np.where(spine_mask[z])
+        if len(ys) > 0:
+            sum_y += float(ys.sum())
+            sum_x += float(xs.sum())
+            total += len(ys)
+    if total == 0:
         return None
-    ny, nx = spine_mask.shape[1], spine_mask.shape[2]
-    return (float(np.median(coords[:, 1])) / ny, float(np.median(coords[:, 2])) / nx)
+    return (float(sum_y / total) / ny, float(sum_x / total) / nx)
 
 
 # =========================================================================
@@ -956,42 +973,118 @@ def _portal_seed_from_plan(plan, volume):
         return None, None
 
 
+def _label_int32(mask: np.ndarray):
+    """内存优化版 ndi.label：输出 int32 而非 int64，节省 50% 内存。"""
+    out = np.empty(mask.shape, dtype=np.int32)
+    n = ndi.label(mask, output=out)
+    return out, int(n)
+
+
+def _count_labels(labels: np.ndarray, n: int) -> np.ndarray:
+    """内存安全的 label 计数，逐层统计避免创建完整 int64 副本。
+
+    np.bincount(labels.ravel().astype(np.intp)) 会分配 ~860 MiB（112M×8B），
+    此函数逐层处理，峰值内存仅 512×512×4B ≈ 1 MiB。
+    """
+    counts = np.zeros(n + 1, dtype=np.int64)
+    for z in range(labels.shape[0]):
+        # 每次只取一层 ravel — 仅 512*512 个 int32 = 1 MiB
+        sl = labels[z].ravel()
+        # np.bincount 对 int32 小数组不需要 astype
+        c = np.bincount(sl, minlength=n + 1)
+        counts[:len(c)] += c
+    return counts
+
+
+def _find_seed_label(labels: np.ndarray, mask: np.ndarray, seed_zyx,
+                     spacing_zyx, max_snap_mm: float = REGION_GROW_MAX_SEED_SNAP_MM):
+    """在 seed 附近找到最近的前景体素的 label，不做全量 argwhere。"""
+    nz, ny, nx = labels.shape
+    sp = np.asarray(spacing_zyx, dtype=np.float32)
+    sz, sy, sx = int(round(seed_zyx[0])), int(round(seed_zyx[1])), int(round(seed_zyx[2]))
+    sz, sy, sx = max(0, min(nz - 1, sz)), max(0, min(ny - 1, sy)), max(0, min(nx - 1, sx))
+
+    # 先直接检查 seed 位置
+    if mask[sz, sy, sx]:
+        return int(labels[sz, sy, sx]), 0.0, (sz, sy, sx)
+
+    # 在递增的搜索半径内找最近的前景体素
+    max_r_voxels = max(3, int(round(max_snap_mm / float(np.min(sp))))) + 1
+    for r in range(1, max_r_voxels + 1):
+        z0, z1 = max(0, sz - r), min(nz, sz + r + 1)
+        y0, y1 = max(0, sy - r), min(ny, sy + r + 1)
+        x0, x1 = max(0, sx - r), min(nx, sx + r + 1)
+        patch = mask[z0:z1, y0:y1, x0:x1]
+        if patch.any():
+            local_coords = np.argwhere(patch)  # 小 patch，内存安全
+            # 转回全局坐标
+            global_coords = local_coords + np.array([z0, y0, x0])
+            dists_mm = np.sqrt(np.sum(((global_coords.astype(np.float32)
+                                        - np.array(seed_zyx, dtype=np.float32)) * sp) ** 2, axis=1))
+            best = int(np.argmin(dists_mm))
+            gz, gy, gx = global_coords[best]
+            return int(labels[gz, gy, gx]), float(dists_mm[best]), (int(gz), int(gy), int(gx))
+
+    return None, float("inf"), None
+
+
 def _region_grow_from_seed(mask, seed_zyx, spacing_zyx=(1, 1, 1),
                            bridge_mm=REGION_GROW_BRIDGE_MM, seed_source="explicit"):
+    """内存优化版区域生长：int32 labels + 局部 seed 搜索 + 原地结果构建。"""
     mask = np.asarray(mask, dtype=bool)
     info = {"enabled": bool(seed_zyx is not None and ndi is not None),
             "seed_source": seed_source, "input_voxels": int(mask.sum())}
     if seed_zyx is None or ndi is None or mask.sum() == 0:
         info["output_voxels"] = int(mask.sum())
         return mask, info
-    labels, n = ndi.label(mask)
+
+    labels, n = _label_int32(mask)
     if n <= 1:
+        del labels
         info["output_voxels"] = int(mask.sum())
         return mask, info
-    coords = np.argwhere(mask)
-    seed = np.asarray(seed_zyx, dtype=np.float32)
-    sp = np.asarray(spacing_zyx, dtype=np.float32)
-    delta_mm = (coords.astype(np.float32) - seed) * sp
-    dist2 = np.sum(delta_mm ** 2, axis=1)
-    ni = int(np.argmin(dist2))
-    nearest_mm = float(np.sqrt(dist2[ni]))
+
+    # 局部搜索 seed 最近的前景体素（不做全量 argwhere）
+    ml, nearest_mm, nearest_pos = _find_seed_label(
+        labels, mask, seed_zyx, spacing_zyx, REGION_GROW_MAX_SEED_SNAP_MM,
+    )
     info["nearest_seed_distance_mm"] = round(nearest_mm, 2)
-    if nearest_mm > REGION_GROW_MAX_SEED_SNAP_MM:
+
+    if ml is None:
+        del labels
         info.update({"output_voxels": int(mask.sum()), "skipped_reason": "seed_too_far"})
         return mask, info
-    z, y, x = coords[ni]
-    ml = int(labels[z, y, x])
+
+    # 主连通域
     mc = (labels == ml)
+    sp = np.asarray(spacing_zyx, dtype=np.float32)
     bv = max(1, int(round(bridge_mm / float(np.min(sp)))))
     bz = ndi.binary_dilation(mc, iterations=bv)
+    del mc  # 释放
+
+    # 桥接检测
     bridged = {ml}
-    counts = np.bincount(labels.ravel())
+    counts = _count_labels(labels, n)
+    nz_vol = labels.shape[0]
     for lb in range(1, n + 1):
         if lb == ml or counts[lb] < 32:
             continue
-        if np.logical_and(bz, labels == lb).sum() > 0:
+        # 逐层检查重叠，避免创建完整 (labels==lb) 数组
+        found = False
+        for zz in range(nz_vol):
+            if np.any((labels[zz] == lb) & bz[zz]):
+                found = True
+                break
+        if found:
             bridged.add(lb)
-    result = np.isin(labels, list(bridged))
+    del bz  # 释放
+
+    # 原地构建结果：不用 np.isin（它会创建完整副本）
+    result = np.zeros(mask.shape, dtype=bool)
+    for lb in bridged:
+        result |= (labels == lb)
+    del labels  # 释放
+
     info.update({"output_voxels": int(result.sum()), "bridged_components": len(bridged) - 1,
                  "removed_components": n - len(bridged)})
     return result, info
@@ -1047,16 +1140,21 @@ def _fill_small_holes(mask, max_vox=500):
         return mask
     filled = ndi.binary_fill_holes(mask)
     holes = filled & ~mask
+    del filled
     if holes.sum() == 0:
+        del holes
         return mask
-    hl, nh = ndi.label(holes)
+    hl, nh = _label_int32(holes)
+    del holes
     if nh == 0:
+        del hl
         return mask
-    counts = np.bincount(hl.ravel())
+    counts = _count_labels(hl, nh)
     sm = np.zeros_like(mask)
     for i in range(1, nh + 1):
         if counts[i] <= max_vox:
             sm |= (hl == i)
+    del hl
     return mask | sm
 
 
@@ -1175,13 +1273,22 @@ def _crop_slices(shape, crop):
 def _largest_components(mask, keep=6, min_voxels=64):
     if ndi is None:
         return mask
-    labels, n = ndi.label(mask)
+    labels, n = _label_int32(mask)
     if n == 0:
+        del labels
         return mask
-    counts = np.bincount(labels.ravel())
+    counts = _count_labels(labels, n)
     counts[0] = 0
     chosen = [i for i in np.argsort(counts)[::-1][:keep] if counts[i] >= min_voxels]
-    return np.isin(labels, chosen)
+    if not chosen:
+        del labels
+        return np.zeros(mask.shape, dtype=bool)
+    # 原地构建，不用 np.isin
+    result = np.zeros(mask.shape, dtype=bool)
+    for lb in chosen:
+        result |= (labels == lb)
+    del labels
+    return result
 
 
 def _binary_stl_triangle_count(path):
@@ -1207,12 +1314,13 @@ def _pretrain_quality_details(mask, stl_bytes, max_voxels=TARGET_VOXELS):
     if voxels > max_voxels:
         issues.append("too_many_voxels")
     if ndi and voxels > 0:
-        labels, n = ndi.label(mask)
-        counts = np.bincount(labels.ravel())
+        labels, n = _label_int32(mask)
+        counts = _count_labels(labels, n)
         cc = int(np.count_nonzero(counts[1:] >= 64))
         stats["components"] = cc
         if cc > 16:
             issues.append("too_many_components")
+        del labels
     return ("review" if issues else "ok", issues, stats)
 
 
@@ -1366,6 +1474,7 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     (work_dir / "threshold_search.json").write_text(
         json.dumps(threshold_info, indent=2, default=str), encoding="utf-8",
     )
+    gc.collect()  # 回收阈值搜索的临时数组
 
     # ================================================================
     # Step 5: 分割 + 区域生长
