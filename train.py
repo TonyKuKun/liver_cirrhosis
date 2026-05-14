@@ -1,26 +1,9 @@
 """
 K-Fold Cross-Validation Trainer for PVP Prediction
 ====================================================
-- Stratified K-fold by `is_post_tips` (avoids TIPS-imbalanced folds)
-- AdamW optimizer + cosine annealing schedule
-- Early stopping based on validation MAE
-- Saves: best model per fold, normalization stats, per-fold metrics
-
-Usage
-─────
-    python train.py --data_root /path/to/patients \\
-                    --out_dir   ./runs/v3_full \\
-                    --n_folds 5 --epochs 300 --batch_size 8
-
-Outputs
-─────
-    out_dir/
-      ├── fold_0/best.pt, history.csv
-      ├── fold_1/best.pt, history.csv
-      ├── ...
-      ├── normalization.pt        (profile_mean/std, aux_mean/std, label_mean/std)
-      ├── splits.json             (which patient is in which fold)
-      └── summary.json            (mean/std MAE, RMSE, R² across folds)
+v4.1 — PVP-stratified splits: each fold's train AND val cover
+the full PVP range (low/mid/high), preventing the "never seen
+a high PVP during training" failure mode.
 """
 
 import os
@@ -30,7 +13,7 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold, StratifiedKFold
@@ -50,7 +33,6 @@ from model import PortalPressureNet, PhysicsInformedLoss, count_params
 # Checkpoint I/O
 # =====================================================================
 def safe_torch_save(obj, path):
-    """Write checkpoints via a temporary file, then atomically replace target."""
     path = os.fspath(path)
     out_dir = os.path.dirname(path)
     if out_dir:
@@ -87,7 +69,6 @@ def safe_torch_save(obj, path):
 # Metrics
 # =====================================================================
 def compute_metrics(preds, labels):
-    """preds, labels: 1-D numpy arrays of REAL-SCALE PVP values (mmHg)."""
     err = preds - labels
     mae = np.mean(np.abs(err))
     rmse = np.sqrt(np.mean(err ** 2))
@@ -97,54 +78,147 @@ def compute_metrics(preds, labels):
     return float(mae), float(rmse), float(r2)
 
 
+# =====================================================================
+# PVP-STRATIFIED SPLITS (the key fix)
+# =====================================================================
+def _pvp_bin_for_subjects(data, n_bins=3):
+    """
+    Assign each SUBJECT a PVP severity bin based on their max PVP.
+
+    Why max? A subject with pre-TIPS PVP=38 and post-TIPS PVP=20 should
+    be in the "high" stratum — the model needs to see PVP=38 in training.
+
+    Returns:
+        subject_bin: dict  {subject_id: int}
+        bin_edges:   list  [lower, upper] cutoff values
+    """
+    # Collect per-subject max PVP
+    subject_max = {}
+    for d in data:
+        sid = subject_id_from_name(d['name'])
+        subject_max[sid] = max(subject_max.get(sid, -np.inf), float(d['label']))
+
+    # Percentile-based bins (equal-frequency)
+    vals = np.array(list(subject_max.values()))
+    pcts = np.linspace(0, 100, n_bins + 1)[1:-1]  # e.g. [33.3, 66.7] for n_bins=3
+    edges = list(np.percentile(vals, pcts))
+
+    def _bin(v):
+        for i, e in enumerate(edges):
+            if v < e:
+                return i
+        return len(edges)
+
+    subject_bin = {sid: _bin(v) for sid, v in subject_max.items()}
+    return subject_bin, edges
+
+
 def make_cv_splits(data, n_folds, seed, split_mode="subject"):
+    """
+    PVP-stratified group K-fold.
+
+    Stratification is by PVP severity bin (tertiles), NOT by is_post_tips.
+    This ensures each fold's training AND validation sets contain
+    patients from the full PVP range.
+
+    Subject grouping is preserved (pre/post TIPS pairs stay together).
+    """
     indices = np.arange(len(data))
-    strat_y = np.array([int(d["is_post_tips"]) for d in data])
-    min_class = min((strat_y == 0).sum(), (strat_y == 1).sum())
+    groups = np.array([subject_id_from_name(d['name']) for d in data])
+
+    # ── PVP-stratified labels ─────────────────────────────
+    subject_bin, bin_edges = _pvp_bin_for_subjects(data, n_bins=3)
+    strat_y = np.array([subject_bin[subject_id_from_name(d['name'])] for d in data])
+
+    n_unique_groups = len(set(groups))
+    min_class = min(np.bincount(strat_y))
 
     if split_mode == "subject":
-        groups = np.array([subject_id_from_name(d["name"]) for d in data])
-        n_groups = len(set(groups))
-        if n_groups < n_folds:
-            raise RuntimeError(f"Need at least {n_folds} subject groups, have {n_groups}")
+        if n_unique_groups < n_folds:
+            raise RuntimeError(f"Need ≥{n_folds} subject groups, have {n_unique_groups}")
+
         if min_class >= n_folds:
             splitter = StratifiedGroupKFold(
-                n_splits=n_folds, shuffle=True, random_state=seed
-            )
+                n_splits=n_folds, shuffle=True, random_state=seed)
             split_iter = splitter.split(indices, strat_y, groups)
-            method = "StratifiedGroupKFold"
+            method = "StratifiedGroupKFold(PVP_tertile)"
         else:
             splitter = GroupKFold(n_splits=n_folds)
             split_iter = splitter.split(indices, strat_y, groups)
-            method = "GroupKFold"
-        splits = [(train_idx, val_idx) for train_idx, val_idx in split_iter]
+            method = "GroupKFold(fallback)"
+
+        splits = list(split_iter)
         return splits, {
             "split_mode": split_mode,
             "method": method,
-            "n_subjects": int(n_groups),
-            "post_tips": int((strat_y == 1).sum()),
-            "pre_tips": int((strat_y == 0).sum()),
+            "stratify_by": "PVP_tertile",
+            "bin_edges": [float(e) for e in bin_edges],
+            "n_subjects": int(n_unique_groups),
+            "post_tips": int(sum(1 for d in data if d['is_post_tips'])),
+            "pre_tips": int(sum(1 for d in data if not d['is_post_tips'])),
         }
 
     if split_mode == "sample":
         if min_class >= n_folds:
             splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
             split_iter = splitter.split(indices, strat_y)
-            method = "StratifiedKFold"
+            method = "StratifiedKFold(PVP_tertile)"
         else:
             from sklearn.model_selection import KFold
             splitter = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
             split_iter = splitter.split(indices)
-            method = "KFold"
-        splits = [(train_idx, val_idx) for train_idx, val_idx in split_iter]
+            method = "KFold(fallback)"
+        splits = list(split_iter)
         return splits, {
             "split_mode": split_mode,
             "method": method,
-            "post_tips": int((strat_y == 1).sum()),
-            "pre_tips": int((strat_y == 0).sum()),
+            "stratify_by": "PVP_tertile",
+            "bin_edges": [float(e) for e in bin_edges],
+            "post_tips": int(sum(1 for d in data if d['is_post_tips'])),
+            "pre_tips": int(sum(1 for d in data if not d['is_post_tips'])),
         }
 
-    raise ValueError("--split_mode must be either 'subject' or 'sample'")
+    raise ValueError("--split_mode must be 'subject' or 'sample'")
+
+
+def _print_fold_pvp_distribution(data, splits, label='PVP'):
+    """Print per-fold PVP distribution so the user can verify balance."""
+    print(f"\n[Splits] Per-fold {label} distribution:")
+    labels = np.array([float(d['label']) for d in data])
+    for fi, (train_idx, val_idx) in enumerate(splits):
+        tr_l = labels[train_idx]
+        va_l = labels[val_idx]
+        tr_lo = (tr_l < 20).sum(); tr_hi = (tr_l >= 30).sum()
+        va_lo = (va_l < 20).sum(); va_hi = (va_l >= 30).sum()
+        print(f"  Fold {fi}: train n={len(train_idx):2d} "
+              f"(<20:{tr_lo} 20-30:{len(train_idx)-tr_lo-tr_hi} >30:{tr_hi}) "
+              f"[{tr_l.min():.0f},{tr_l.max():.0f}]  |  "
+              f"val n={len(val_idx):2d} "
+              f"(<20:{va_lo} 20-30:{len(val_idx)-va_lo-va_hi} >30:{va_hi}) "
+              f"[{va_l.min():.0f},{va_l.max():.0f}]")
+
+
+# =====================================================================
+# Extreme-value weighted sampling (optional, mild)
+# =====================================================================
+def _make_sampler(full_ds, train_idx, power=1.5):
+    """
+    Optional: oversample extreme PVP during training.
+    power=1.5 is mild; set power=0 to disable (plain shuffle).
+    """
+    if power <= 0:
+        return None  # caller should use shuffle=True
+    labels = np.array([full_ds.data[i]['label'] for i in train_idx])
+    median = np.median(labels)
+    std = max(np.std(labels), 1e-6)
+    dist = np.abs(labels - median) / std
+    weights = 1.0 + dist ** power
+    weights = weights / weights.mean()
+    return WeightedRandomSampler(
+        weights=torch.from_numpy(weights).double(),
+        num_samples=len(train_idx),
+        replacement=True,
+    )
 
 
 # =====================================================================
@@ -155,13 +229,12 @@ def run_epoch(model, loader, criterion, device, mu_y, sigma_y,
     is_train = optimizer is not None
     model.train(is_train)
 
-    total_loss, total_main = 0.0, 0.0
+    total_loss = 0.0
     loss_log_sum = {}
     preds_real, labels_real = [], []
     n_seen = 0
 
     for batch in loader:
-        # Move tensors to device
         for k, v in batch.items():
             if torch.is_tensor(v):
                 batch[k] = v.to(device, non_blocking=True)
@@ -180,11 +253,9 @@ def run_epoch(model, loader, criterion, device, mu_y, sigma_y,
             optimizer.step()
 
         total_loss += L.item() * bsz
-        total_main += log['main'] * bsz
         for k, v in log.items():
             loss_log_sum[k] = loss_log_sum.get(k, 0.0) + v * bsz
 
-        # Real-scale predictions for metrics
         pvp_n = out['pvp_pred'].detach().squeeze(-1).cpu().numpy()
         preds_real.append(pvp_n * sigma_y + mu_y)
         labels_real.append(batch['label'].detach().cpu().numpy())
@@ -213,12 +284,20 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
 
     train_ds = Subset(full_ds, train_idx.tolist())
     val_ds   = Subset(full_ds, val_idx.tolist())
-    train_ld = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                          collate_fn=collate_fn, num_workers=0, drop_last=False)
-    val_ld   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                          collate_fn=collate_fn, num_workers=0, drop_last=False)
 
-    model = PortalPressureNet(d_hidden=args.d_hidden, dropout=args.dropout).to(device)
+    # Extreme-value oversampling (mild)
+    sampler = _make_sampler(full_ds, train_idx.tolist(), power=args.sample_power)
+    train_ld = DataLoader(train_ds, batch_size=args.batch_size,
+                          sampler=sampler if sampler else None,
+                          shuffle=(sampler is None),
+                          collate_fn=collate_fn, num_workers=0, drop_last=False)
+    val_ld = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                        collate_fn=collate_fn, num_workers=0, drop_last=False)
+
+    model = PortalPressureNet(
+        d_hidden=args.d_hidden, dropout=args.dropout,
+        gnn_layers=args.gnn_layers, use_residual=args.use_residual,
+    ).to(device)
     if fold_idx == 0:
         total, train = count_params(model)
         print(f"[Train] Model params: {total:,} (trainable {train:,})")
@@ -233,6 +312,9 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
         lambda_smooth=args.lambda_smooth,
         lambda_physio=args.lambda_physio,
         lambda_mono=args.lambda_mono,
+        # lambda_spread=args.lambda_spread,
+        # extremity_alpha=args.extremity_alpha,
+        lambda_residual=args.lambda_residual,
         huber_delta=args.huber_delta,
     ).to(device)
 
@@ -242,21 +324,20 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
     best_val_mae = float('inf')
     best_epoch = 0
     epochs_no_improve = 0
-    history_lines = ['epoch,phase,total,main,murray,press,smooth,physio,mono,mae,rmse,r2\n']
+    history_lines = ['epoch,phase,total,main,murray,press,smooth,physio,mono,spread,mae,rmse,r2\n']
 
     for epoch in range(1, args.epochs + 1):
         train_log = run_epoch(model, train_ld, criterion, device, mu_y, sigma_y,
                               optimizer=optimizer, scheduler=scheduler)
-        val_log   = run_epoch(model, val_ld,   criterion, device, mu_y, sigma_y,
-                              optimizer=None, scheduler=None)
+        val_log   = run_epoch(model, val_ld,   criterion, device, mu_y, sigma_y)
 
         for phase, log in (('train', train_log), ('val', val_log)):
             history_lines.append(
                 f"{epoch},{phase},{log['total']:.5f},{log['main']:.5f},"
                 f"{log.get('murray',0):.5f},{log.get('press',0):.5f},"
                 f"{log.get('smooth',0):.5f},{log.get('physio',0):.5f},"
-                f"{log.get('mono',0):.5f},{log['mae']:.4f},"
-                f"{log['rmse']:.4f},{log['r2']:.4f}\n"
+                f"{log.get('mono',0):.5f},{log.get('spread',0):.5f},"
+                f"{log['mae']:.4f},{log['rmse']:.4f},{log['r2']:.4f}\n"
             )
 
         if val_log['mae'] < best_val_mae - 1e-4:
@@ -278,38 +359,34 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
             print(f"[Fold {fold_idx} | Ep {epoch:3d}] "
                   f"train={train_log['total']:.4f} "
                   f"(main={train_log['main']:.3f} murr={train_log['murray']:.3f} "
-                  f"press={train_log['press']:.3f} smth={train_log['smooth']:.3f} "
-                  f"phys={train_log['physio']:.3f}) mae={train_log['mae']:.2f} "
-                  f"| val={val_log['total']:.4f} "
-                  f"(main={val_log['main']:.3f} murr={val_log['murray']:.3f} "
-                  f"press={val_log['press']:.3f} phys={val_log['physio']:.3f}) "
-                  f"mae={val_log['mae']:.2f} r2={val_log['r2']:.2f} "
-                  f"| best={best_val_mae:.2f}@{best_epoch}")
+                  f"sprd={train_log.get('spread',0):.3f}) "
+                  f"mae={train_log['mae']:.2f} "
+                  f"| val={val_log['total']:.4f} mae={val_log['mae']:.2f} "
+                  f"r2={val_log['r2']:.2f} | best={best_val_mae:.2f}@{best_epoch}")
 
         if epochs_no_improve >= args.patience:
-            print(f"[Fold {fold_idx}] Early stopping at epoch {epoch} "
+            print(f"[Fold {fold_idx}] Early stop at ep {epoch} "
                   f"(best mae={best_val_mae:.3f} @ ep {best_epoch})")
             break
 
     with open(os.path.join(out_fold, 'history.csv'), 'w') as f:
         f.writelines(history_lines)
 
-    # Reload best for final report and OOF diagnostics
+    # Reload best for OOF diagnostics
     ckpt = torch.load(os.path.join(out_fold, 'best.pt'), map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
     val_rows = collect_prediction_rows(
-        model, val_ld, device, fold_idx, full_ds.label_mean, full_ds.label_std
-    )
+        model, val_ld, device, fold_idx, full_ds.label_mean, full_ds.label_std)
     write_prediction_csv(val_rows, os.path.join(out_fold, 'val_predictions.csv'))
 
     return {
-        'fold':     fold_idx,
+        'fold': fold_idx,
         'best_epoch': ckpt['epoch'],
-        'val_mae':  ckpt['val_mae'],
+        'val_mae': ckpt['val_mae'],
         'val_rmse': ckpt['val_rmse'],
-        'val_r2':   ckpt['val_r2'],
-        'n_train':  len(train_idx),
-        'n_val':    len(val_idx),
+        'val_r2': ckpt['val_r2'],
+        'n_train': len(train_idx),
+        'n_val': len(val_idx),
     }, val_rows
 
 
@@ -325,22 +402,31 @@ def main():
     ap.add_argument('--seed',      type=int, default=42)
     ap.add_argument('--split_mode', choices=['subject', 'sample'], default='subject')
     # Optimization
-    ap.add_argument('--epochs',       type=int,   default=500)
+    ap.add_argument('--epochs',       type=int,   default=300)
     ap.add_argument('--batch_size',   type=int,   default=8)
     ap.add_argument('--lr',           type=float, default=1e-3)
     ap.add_argument('--weight_decay', type=float, default=1e-4)
-    ap.add_argument('--patience',     type=int,   default=100)
+    ap.add_argument('--patience',     type=int,   default=40)
     ap.add_argument('--print_every',  type=int,   default=10)
     # Model
-    ap.add_argument('--d_hidden',     type=int,   default=64)
+    ap.add_argument('--d_hidden',     type=int,   default=32)
     ap.add_argument('--dropout',      type=float, default=0.3)
+    ap.add_argument('--gnn_layers',   type=int,   default=2)
+    ap.add_argument('--use_residual', action='store_true', default=True)
+    ap.add_argument('--no_residual',  dest='use_residual', action='store_false')
     # Loss weights
-    ap.add_argument('--huber_delta',   type=float, default=1.0)
-    ap.add_argument('--lambda_murray', type=float, default=0.10)
-    ap.add_argument('--lambda_press',  type=float, default=0.05)
-    ap.add_argument('--lambda_smooth', type=float, default=0.01)
-    ap.add_argument('--lambda_physio', type=float, default=0.01)
-    ap.add_argument('--lambda_mono',   type=float, default=0.05)
+    ap.add_argument('--huber_delta',      type=float, default=1.0)
+    ap.add_argument('--lambda_murray',    type=float, default=0.10)
+    ap.add_argument('--lambda_press',     type=float, default=0.05)
+    ap.add_argument('--lambda_smooth',    type=float, default=0.01)
+    ap.add_argument('--lambda_physio',    type=float, default=0.01)
+    ap.add_argument('--lambda_mono',      type=float, default=0.05)
+    ap.add_argument('--lambda_spread',    type=float, default=0.20)
+    ap.add_argument('--extremity_alpha',  type=float, default=1.0)
+    ap.add_argument('--lambda_residual',  type=float, default=0.05)
+    # Sampling
+    ap.add_argument('--sample_power',     type=float, default=1.5,
+                    help='Extreme-value oversampling power (0=disabled)')
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -349,12 +435,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"[Train] Device: {device}")
 
-    # Load full dataset (computes normalization once on the whole set)
     full_ds = PortalVeinDataset(args.data_root, n_points=args.n_points, verbose=True)
     if len(full_ds) < args.n_folds:
-        raise RuntimeError(f"Need at least {args.n_folds} patients, have {len(full_ds)}")
+        raise RuntimeError(f"Need ≥{args.n_folds} patients, have {len(full_ds)}")
 
-    # Save normalization stats (loaded for inference)
     torch.save({
         'profile_mean': full_ds.profile_mean,
         'profile_std':  full_ds.profile_std,
@@ -365,12 +449,12 @@ def main():
     }, os.path.join(args.out_dir, 'normalization.pt'))
 
     splits, split_info = make_cv_splits(
-        full_ds.data, args.n_folds, args.seed, split_mode=args.split_mode
-    )
-    strat_y = np.array([int(d['is_post_tips']) for d in full_ds.data])
-    print(f"[Train] Using {split_info['method']} "
-          f"(mode={split_info['split_mode']}, post-TIPS={split_info['post_tips']}, "
-          f"pre-TIPS={split_info['pre_tips']})")
+        full_ds.data, args.n_folds, args.seed, split_mode=args.split_mode)
+
+    print(f"[Train] Split method: {split_info['method']}")
+    print(f"  Stratified by: {split_info.get('stratify_by', 'N/A')}")
+    print(f"  Bin edges: {split_info.get('bin_edges', [])}")
+    _print_fold_pvp_distribution(full_ds.data, splits)
 
     splits_dict = {'split_info': split_info, 'folds': []}
     fold_results = []
@@ -385,9 +469,14 @@ def main():
             'train_subject_ids': sorted({subject_id_from_name(n) for n in train_names}),
             'val_subject_ids': sorted({subject_id_from_name(n) for n in val_names}),
         })
-        print(f"\n========== Fold {fi}/{args.n_folds-1} "
-              f"(n_train={len(train_idx)}, n_val={len(val_idx)}, "
-              f"val_post_tips={int(strat_y[val_idx].sum())}) ==========")
+        # Per-fold PVP stats
+        train_labels = [full_ds.data[i]['label'] for i in train_idx]
+        val_labels = [full_ds.data[i]['label'] for i in val_idx]
+        print(f"\n{'='*60}")
+        print(f"Fold {fi}/{args.n_folds-1}: "
+              f"train n={len(train_idx)} [{min(train_labels):.0f}-{max(train_labels):.0f}], "
+              f"val n={len(val_idx)} [{min(val_labels):.0f}-{max(val_labels):.0f}]")
+        print(f"{'='*60}")
         res, val_rows = train_fold(fi, train_idx, val_idx, full_ds, args, device)
         fold_results.append(res)
         all_oof_rows.extend(val_rows)
@@ -397,12 +486,11 @@ def main():
     write_prediction_csv(all_oof_rows, os.path.join(args.out_dir, 'oof_predictions.csv'))
     write_group_summary(all_oof_rows, os.path.join(args.out_dir, 'oof_group_summary.json'))
 
-    # Aggregate metrics
     maes  = np.array([r['val_mae']  for r in fold_results])
     rmses = np.array([r['val_rmse'] for r in fold_results])
     r2s   = np.array([r['val_r2']   for r in fold_results])
     summary = {
-        'n_folds':  args.n_folds,
+        'n_folds': args.n_folds,
         'fold_results': fold_results,
         'val_mae_mean':  float(maes.mean()),
         'val_mae_std':   float(maes.std()),
@@ -415,10 +503,12 @@ def main():
     }
     with open(os.path.join(args.out_dir, 'summary.json'), 'w') as f:
         json.dump(summary, f, indent=2)
-    print("\n========== Summary ==========")
+    print(f"\n{'='*60}")
+    print("Summary")
+    print(f"{'='*60}")
     print(f"  MAE  : {summary['val_mae_mean']:.3f} ± {summary['val_mae_std']:.3f}")
     print(f"  RMSE : {summary['val_rmse_mean']:.3f} ± {summary['val_rmse_std']:.3f}")
-    print(f"  R2   : {summary['val_r2_mean']:.3f} +/- {summary['val_r2_std']:.3f}")
+    print(f"  R²   : {summary['val_r2_mean']:.3f} ± {summary['val_r2_std']:.3f}")
 
 
 if __name__ == '__main__':

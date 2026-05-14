@@ -696,7 +696,7 @@ class PhysicsInformedLoss(nn.Module):
     def __init__(self, lambda_murray=0.10, lambda_press=0.05,
                  lambda_smooth=0.01, lambda_physio=0.01,
                  lambda_mono=0.05, lambda_residual=0.05,
-                 severity_alpha=0.5, huber_delta=1.0):
+                 severity_alpha=0.5, huber_delta=1.0):   # severity_alpha 和 huber_delta 现在无用但保留
         super().__init__()
         self.lambda_murray   = lambda_murray
         self.lambda_press    = lambda_press
@@ -704,9 +704,11 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_physio   = lambda_physio
         self.lambda_mono     = lambda_mono
         self.lambda_residual = lambda_residual
+        # 以下参数不再用于 L_main，但保留以保证接口兼容
         self.severity_alpha  = severity_alpha
         self.huber_delta     = huber_delta
 
+    # 辅助方法 _hinge_outside_range 保持不变（被 L_physio 使用）
     @staticmethod
     def _hinge_outside_range(x, lo, hi, mask):
         scale_lo = max(abs(lo), 1.0)
@@ -719,40 +721,14 @@ class PhysicsInformedLoss(nn.Module):
     def forward(self, model_out, label_norm, batch):
         pvp_pred = model_out['pvp_pred'].squeeze(-1)
 
-        # ── Severity-aware main loss ─────────────────────────
-        # High PVP samples (label_norm >> 0) get more weight, preventing
-        # the model from "playing it safe" by regressing toward the mean.
-        #
-        # weight_i = 1 + α · max(0, label_norm_i)
-        #   → label at mean: weight = 1 (normal)
-        #   → label 2σ above mean: weight = 1 + 2α (boosted)
-        #
-        # Also: asymmetric — underpredicting high PVP is penalized MORE
-        # than overpredicting, because clinical consequence of missing
-        # severe portal hypertension is much worse.
-        severity_weight = 1.0 + self.severity_alpha * F.relu(label_norm)
+        # ── L_main: 纯 L2 Loss（均方误差）──────────────────
+        L_main = F.mse_loss(pvp_pred, label_norm)
 
-        err = pvp_pred - label_norm
-        # Asymmetric Huber: underprediction (err < 0) of high-label gets ×1.5
-        under_penalty = torch.where(
-            (err < 0) & (label_norm > 0.5),   # underpredicting high PVP
-            torch.full_like(err, 1.5),
-            torch.ones_like(err),
-        )
-        abs_err = err.abs()
-        huber_elem = torch.where(
-            abs_err <= self.huber_delta,
-            0.5 * err.pow(2),
-            self.huber_delta * (abs_err - 0.5 * self.huber_delta),
-        )
-        L_main = (huber_elem * severity_weight * under_penalty).mean()
-
-        # ── L_residual: keep the residual small ─────────────
-        # The physics path should do most of the work; the residual
-        # only corrects what physics genuinely cannot capture.
+        # ── L_residual: 保持不变 ───────────────────────────
         pvp_residual = model_out.get('pvp_residual', torch.zeros_like(pvp_pred))
         L_residual = pvp_residual.squeeze(-1).pow(2).mean()
 
+        # ── Murray 定律损失 ────────────────────────────────
         flow = model_out['flow_out']
         jp = model_out['junction']
         m_in = jp['inflow_active']
@@ -773,9 +749,10 @@ class PhysicsInformedLoss(nn.Module):
         L_murr_bo = (d_bo.pow(2).sum(-1) * m_bo_w).sum() / m_bo_w.sum().clamp(1)
         L_murray = L_murr_in + L_murr_co + L_murr_bo
 
+        # ── 压力一致性损失 ────────────────────────────────
         L_press = jp['press_resid_bifurc'].sum() / m_bo.sum().clamp(1)
 
-        # Smoothness on hydraulic_diameter profile (was eq_diameter)
+        # ── 平滑性损失（基于 hydraulic_diameter）──────────
         profiles    = batch['profiles']
         point_valid = batch['point_valid']
         seg_mask    = batch['segment_mask']
@@ -785,7 +762,7 @@ class PhysicsInformedLoss(nn.Module):
             alive = seg_mask[:, si] > 0
             if alive.sum() == 0:
                 continue
-            r = profiles[alive, si, :, P_HDIAM] * 0.5
+            r = profiles[alive, si, :, P_HDIAM] * 0.5   # 半径
             v = point_valid[alive, si]
             d2r = r[:, 2:] - 2.0 * r[:, 1:-1] + r[:, :-2]
             mw = v[:, 2:] * v[:, 1:-1] * v[:, :-2]
@@ -794,7 +771,7 @@ class PhysicsInformedLoss(nn.Module):
         if n_seg > 0:
             L_smooth = L_smooth / n_seg
 
-        # Physio hinge on WSS and Re
+        # ── 生理范围损失（WSS & Re）─────────────────────
         L_physio = torch.tensor(0.0, device=pvp_pred.device)
         n_seg = 0
         for si in range(N_SEGMENTS):
@@ -811,7 +788,7 @@ class PhysicsInformedLoss(nn.Module):
         if n_seg > 0:
             L_physio = L_physio / n_seg
 
-        # Monotonicity of ΔP
+        # ── 压力单调性损失 ──────────────────────────────
         L_mono = torch.tensor(0.0, device=pvp_pred.device)
         n_seg = 0
         for si in range(N_SEGMENTS):
@@ -827,6 +804,7 @@ class PhysicsInformedLoss(nn.Module):
         if n_seg > 0:
             L_mono = L_mono / n_seg
 
+        # ── 安全数值处理 ────────────────────────────────
         def _safe(x, cap=1e3):
             if not torch.is_tensor(x):
                 x = torch.tensor(float(x), device=pvp_pred.device)
@@ -838,20 +816,24 @@ class PhysicsInformedLoss(nn.Module):
         L_smooth_s = _safe(L_smooth)
         L_physio_s = _safe(L_physio)
         L_mono_s   = _safe(L_mono)
+        L_residual_s = _safe(L_residual)
 
-        L_total = (L_main_s
+        L_total = (5 * L_main_s
                    + self.lambda_murray * L_murray_s
                    + self.lambda_press  * L_press_s
                    + self.lambda_smooth * L_smooth_s
                    + self.lambda_physio * L_physio_s
                    + self.lambda_mono   * L_mono_s
-                   + self.lambda_residual * _safe(L_residual))
+                   + self.lambda_residual * L_residual_s)
 
         log = {
-            'main': float(L_main_s.detach()), 'murray': float(L_murray_s.detach()),
-            'press': float(L_press_s.detach()), 'smooth': float(L_smooth_s.detach()),
-            'physio': float(L_physio_s.detach()), 'mono': float(L_mono_s.detach()),
-            'residual': float(_safe(L_residual).detach()),
+            'main': float(L_main_s.detach()),
+            'murray': float(L_murray_s.detach()),
+            'press': float(L_press_s.detach()),
+            'smooth': float(L_smooth_s.detach()),
+            'physio': float(L_physio_s.detach()),
+            'mono': float(L_mono_s.detach()),
+            'residual': float(L_residual_s.detach()),
             'total': float(L_total.detach()),
         }
         return L_total, log
