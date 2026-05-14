@@ -203,6 +203,139 @@ class AttentionPool(nn.Module):
 
 
 # =====================================================================
+# Module 3.5 — Vessel Topology GNN (dense attention, 8-node graph)
+# =====================================================================
+class VesselGraphNet(nn.Module):
+    """
+    Graph Attention on the 8-node vessel topology.
+
+    AttentionPool compresses each branch independently — it doesn't know
+    that SV dilation + MPV narrowing *together* mean high confluence pressure.
+    GNN lets cross-branch reasoning happen BEFORE the predictor sees them.
+
+    Dense masked self-attention (8 nodes is tiny; no need for sparse ops).
+    """
+
+    _EDGE_PAIRS = [
+        ('sv',  'mpv'), ('smv', 'mpv'),
+        ('mpv', 'lpv'), ('mpv', 'rpv'), ('mpv', 'tips'),
+        ('lgv', 'mpv'), ('pgv', 'mpv'),
+        ('sv',  'smv'), ('lpv', 'rpv'),
+    ]
+
+    def __init__(self, d_hidden: int, n_layers: int = 2, dropout: float = 0.1):
+        super().__init__()
+        adj = torch.zeros(N_SEGMENTS, N_SEGMENTS)
+        for s_name, d_name in self._EDGE_PAIRS:
+            si, di = SEG_INDEX[s_name], SEG_INDEX[d_name]
+            adj[si, di] = 1.0
+            adj[di, si] = 1.0
+        adj = adj + torch.eye(N_SEGMENTS)
+        self.register_buffer('adj', adj)
+
+        self.layers = nn.ModuleList()
+        for _ in range(n_layers):
+            self.layers.append(nn.ModuleDict({
+                'Wq': nn.Linear(d_hidden, d_hidden, bias=False),
+                'Wk': nn.Linear(d_hidden, d_hidden, bias=False),
+                'Wv': nn.Linear(d_hidden, d_hidden, bias=False),
+                'ffn': nn.Sequential(
+                    nn.Linear(d_hidden, d_hidden * 2), nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(d_hidden * 2, d_hidden),
+                ),
+                'norm1': nn.LayerNorm(d_hidden),
+                'norm2': nn.LayerNorm(d_hidden),
+                'drop':  nn.Dropout(dropout),
+            }))
+
+    def forward(self, node_embed, segment_mask):
+        """node_embed: (B, S, H), segment_mask: (B, S) → (B, S, H)"""
+        h = node_embed
+        adj = self.adj.unsqueeze(0)
+        pair_mask = segment_mask.unsqueeze(1) * segment_mask.unsqueeze(2)
+        edge_mask = adj * pair_mask
+
+        for layer in self.layers:
+            Q = layer['Wq'](h)
+            K = layer['Wk'](h)
+            V = layer['Wv'](h)
+            attn = torch.bmm(Q, K.transpose(1, 2)) / math.sqrt(h.size(-1))
+            attn = attn.masked_fill(edge_mask < 0.5, float('-inf'))
+            attn = F.softmax(attn, dim=-1)
+            attn = torch.nan_to_num(attn, nan=0.0)
+            attn = layer['drop'](attn)
+            msg = torch.bmm(attn, V)
+            h = layer['norm1'](h + msg)
+            h = layer['norm2'](h + layer['ffn'](h))
+            h = h * segment_mask.unsqueeze(-1)
+        return h
+
+
+# =====================================================================
+# Module 3.6 — Physics Residual Net (non-Poiseuille correction)
+# =====================================================================
+class PhysicsResidualNet(nn.Module):
+    """
+    Parallel learnable path that captures what Poiseuille cannot:
+    turbulence, entrance effects, vortices in PVT lumens.
+
+    Initialized to output **zero** → at epoch 0 prediction equals pure
+    physics path. Residual gradually learns corrections during training.
+    """
+
+    def __init__(self, d_in: int, d_hidden: int = 32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_in, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, d_hidden // 2),
+            nn.GELU(),
+            nn.Linear(d_hidden // 2, 1),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, features):
+        return self.net(features)
+
+    @staticmethod
+    def extract_features(hemo_per_seg, profiles, point_valid, segment_mask):
+        """
+        Per-branch non-Poiseuille indicators: max_Re, max_WSS,
+        min_solidity, mean_solidity, max|dA/ds|.
+        Returns (B, S * 5 = 40).
+        """
+        B = segment_mask.size(0)
+        feats = []
+        for si in range(N_SEGMENTS):
+            h = hemo_per_seg[si]
+            v = point_valid[:, si]
+            alive = segment_mask[:, si].unsqueeze(-1)
+            big_neg = torch.full_like(v, -1e9)
+            big_pos = torch.full_like(v, 1e9)
+
+            re_v  = torch.where(v > 0.5, h['reynolds'],  big_neg)
+            wss_v = torch.where(v > 0.5, h['wss_pa'],    big_neg)
+            sol   = profiles[:, si, :, P_SOLID]
+            sol_mn = torch.where(v > 0.5, sol, big_pos)
+            sol_mx = torch.where(v > 0.5, sol, big_neg)
+            dads  = torch.where(v > 0.5, profiles[:, si, :, P_DADS].abs(), big_neg)
+
+            max_re   = re_v.max(-1).values  * alive.squeeze(-1)
+            max_wss  = wss_v.max(-1).values * alive.squeeze(-1)
+            min_sol  = sol_mn.min(-1).values
+            min_sol  = torch.where(alive.squeeze(-1) > 0.5, min_sol,
+                                   torch.ones_like(min_sol))
+            mean_sol = (sol * v).sum(-1) / v.sum(-1).clamp(1) * alive.squeeze(-1)
+            max_dads = dads.max(-1).values  * alive.squeeze(-1)
+
+            feats.extend([max_re, max_wss, min_sol, mean_sol, max_dads])
+        return torch.stack(feats, dim=-1)
+
+
+# =====================================================================
 # Module 4 — Flow Rate Estimator
 # =====================================================================
 class FlowRateEstimator(nn.Module):
@@ -395,29 +528,38 @@ class JunctionPhysics(nn.Module):
 # =====================================================================
 class PortalPressureNet(nn.Module):
 
-    def __init__(self, d_hidden: int = 32, dropout: float = 0.3):
+    def __init__(self, d_hidden: int = 32, dropout: float = 0.3,
+                 gnn_layers: int = 2, use_residual: bool = True):
         super().__init__()
         self.d_hidden = d_hidden
+        self.use_residual = use_residual
 
+        # ── Existing modules ─────────────────────────────────
         self.geom_encoder = GeometryEncoder(
             d_in=N_PROFILE_FEAT, d_hidden=d_hidden,
             n_blocks=3, dropout=dropout * 0.3,
         )
         self.branch_pool = AttentionPool(d_hidden, d_attn=16)
+
+        # ── NEW: Graph message passing on vessel topology ────
+        self.vessel_gnn = VesselGraphNet(
+            d_hidden=d_hidden, n_layers=gnn_layers, dropout=dropout * 0.3,
+        )
+
         self.flow_est = FlowRateEstimator(
             d_branch=d_hidden, d_aux=N_AUX, d_hidden=d_hidden,
         )
         self.hydro = PoiseuilleHydrodynamics()
         self.junction_phys = JunctionPhysics()
 
-        # Predictor input dims
-        d_branches = N_SEGMENTS * d_hidden  # branch embeddings
-        d_q        = N_SEGMENTS             # flow rates
-        d_junction = 15                     # junction features (7 base + 8 log dP)
-        d_in = d_branches + d_q + d_junction + N_AUX
+        # ── Physics-based predictor (main path) ──────────────
+        d_branches = N_SEGMENTS * d_hidden
+        d_q        = N_SEGMENTS
+        d_junction = 15
+        d_fused = d_branches + d_q + d_junction + N_AUX
 
         self.predictor = nn.Sequential(
-            nn.Linear(d_in, d_hidden * 2),
+            nn.Linear(d_fused, d_hidden * 2),
             nn.LayerNorm(d_hidden * 2),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -426,6 +568,16 @@ class PortalPressureNet(nn.Module):
             nn.Dropout(dropout * 0.5),
             nn.Linear(d_hidden, 1),
         )
+
+        # ── NEW: Residual correction path ────────────────────
+        # Captures non-Poiseuille effects (turbulence, vortices, entrance
+        # effects) that the deterministic physics layer cannot model.
+        # Initialized to output 0 → starts from pure physics prediction.
+        d_residual_feats = N_SEGMENTS * 5   # 40 (from extract_features)
+        self.residual_net = PhysicsResidualNet(
+            d_in=d_fused + d_residual_feats, d_hidden=d_hidden,
+        ) if use_residual else None
+
         self._init_weights()
 
     def _init_weights(self):
@@ -482,10 +634,14 @@ class PortalPressureNet(nn.Module):
             branch_embed[:, si] = pooled * seg_alive
             attn_weights[:, si] = aw
 
+        # ── NEW: Graph message passing ───────────────────────
+        # Each branch embedding now "knows" about its topological neighbors
+        branch_embed = self.vessel_gnn(branch_embed, segment_mask)
+
         # Junction-end diameters (hydraulic diameter at idx 0)
         junction_diam = profiles[:, :, 0, P_HDIAM]
 
-        # Flow estimation
+        # Flow estimation (uses GNN-enriched embeddings)
         branch_resistance = self._branch_resistance_prior(
             profiles, arc_lengths, point_valid, segment_mask)
         flow_out = self.flow_est(
@@ -502,14 +658,27 @@ class PortalPressureNet(nn.Module):
         # Junction physics
         jp = self.junction_phys(hemo_per_seg, flow_out, segment_mask, has_tips)
 
-        # Fuse and predict
+        # ── Physics-based prediction (main path) ─────────────
         branch_flat = branch_embed.reshape(B, -1)
         fused = torch.cat([branch_flat, Q, jp['features'], aux_norm], dim=-1)
         fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
-        pvp_pred = self.predictor(fused)
+        pvp_physics = self.predictor(fused)
+
+        # ── NEW: Residual correction path ────────────────────
+        pvp_residual = torch.zeros_like(pvp_physics)
+        if self.use_residual and self.residual_net is not None:
+            resid_feats = PhysicsResidualNet.extract_features(
+                hemo_per_seg, profiles, point_valid, segment_mask)
+            resid_feats = torch.nan_to_num(resid_feats, nan=0.0, posinf=0.0, neginf=0.0)
+            resid_input = torch.cat([fused, resid_feats], dim=-1)
+            pvp_residual = self.residual_net(resid_input)
+
+        pvp_pred = pvp_physics + pvp_residual
 
         return {
             'pvp_pred': pvp_pred, 'Q': Q, 'flow_out': flow_out,
+            'pvp_physics': pvp_physics,      # interpretable physics-only prediction
+            'pvp_residual': pvp_residual,    # non-Poiseuille correction
             'attn_weights': attn_weights, 'hemo_per_seg': hemo_per_seg,
             'junction': jp, 'branch_embed': branch_embed,
             'endpoint_dP': torch.stack(
@@ -526,14 +695,17 @@ class PhysicsInformedLoss(nn.Module):
 
     def __init__(self, lambda_murray=0.10, lambda_press=0.05,
                  lambda_smooth=0.01, lambda_physio=0.01,
-                 lambda_mono=0.05, huber_delta=1.0):
+                 lambda_mono=0.05, lambda_residual=0.05,
+                 severity_alpha=0.5, huber_delta=1.0):
         super().__init__()
-        self.lambda_murray  = lambda_murray
-        self.lambda_press   = lambda_press
-        self.lambda_smooth  = lambda_smooth
-        self.lambda_physio  = lambda_physio
-        self.lambda_mono    = lambda_mono
-        self.main = nn.HuberLoss(delta=huber_delta)
+        self.lambda_murray   = lambda_murray
+        self.lambda_press    = lambda_press
+        self.lambda_smooth   = lambda_smooth
+        self.lambda_physio   = lambda_physio
+        self.lambda_mono     = lambda_mono
+        self.lambda_residual = lambda_residual
+        self.severity_alpha  = severity_alpha
+        self.huber_delta     = huber_delta
 
     @staticmethod
     def _hinge_outside_range(x, lo, hi, mask):
@@ -546,7 +718,40 @@ class PhysicsInformedLoss(nn.Module):
 
     def forward(self, model_out, label_norm, batch):
         pvp_pred = model_out['pvp_pred'].squeeze(-1)
-        L_main = self.main(pvp_pred, label_norm)
+
+        # ── Severity-aware main loss ─────────────────────────
+        # High PVP samples (label_norm >> 0) get more weight, preventing
+        # the model from "playing it safe" by regressing toward the mean.
+        #
+        # weight_i = 1 + α · max(0, label_norm_i)
+        #   → label at mean: weight = 1 (normal)
+        #   → label 2σ above mean: weight = 1 + 2α (boosted)
+        #
+        # Also: asymmetric — underpredicting high PVP is penalized MORE
+        # than overpredicting, because clinical consequence of missing
+        # severe portal hypertension is much worse.
+        severity_weight = 1.0 + self.severity_alpha * F.relu(label_norm)
+
+        err = pvp_pred - label_norm
+        # Asymmetric Huber: underprediction (err < 0) of high-label gets ×1.5
+        under_penalty = torch.where(
+            (err < 0) & (label_norm > 0.5),   # underpredicting high PVP
+            torch.full_like(err, 1.5),
+            torch.ones_like(err),
+        )
+        abs_err = err.abs()
+        huber_elem = torch.where(
+            abs_err <= self.huber_delta,
+            0.5 * err.pow(2),
+            self.huber_delta * (abs_err - 0.5 * self.huber_delta),
+        )
+        L_main = (huber_elem * severity_weight * under_penalty).mean()
+
+        # ── L_residual: keep the residual small ─────────────
+        # The physics path should do most of the work; the residual
+        # only corrects what physics genuinely cannot capture.
+        pvp_residual = model_out.get('pvp_residual', torch.zeros_like(pvp_pred))
+        L_residual = pvp_residual.squeeze(-1).pow(2).mean()
 
         flow = model_out['flow_out']
         jp = model_out['junction']
@@ -639,12 +844,14 @@ class PhysicsInformedLoss(nn.Module):
                    + self.lambda_press  * L_press_s
                    + self.lambda_smooth * L_smooth_s
                    + self.lambda_physio * L_physio_s
-                   + self.lambda_mono   * L_mono_s)
+                   + self.lambda_mono   * L_mono_s
+                   + self.lambda_residual * _safe(L_residual))
 
         log = {
             'main': float(L_main_s.detach()), 'murray': float(L_murray_s.detach()),
             'press': float(L_press_s.detach()), 'smooth': float(L_smooth_s.detach()),
             'physio': float(L_physio_s.detach()), 'mono': float(L_mono_s.detach()),
+            'residual': float(_safe(L_residual).detach()),
             'total': float(L_total.detach()),
         }
         return L_total, log

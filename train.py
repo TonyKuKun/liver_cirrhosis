@@ -319,20 +319,20 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data_root', type=str, default=r"F:\PCG data\dataset\test4all_sample")
-    ap.add_argument('--out_dir',   type=str, default='./runs/v3')
+    ap.add_argument('--out_dir',   type=str, default='./runs/v4')
     ap.add_argument('--n_points',  type=int, default=100)
     ap.add_argument('--n_folds',   type=int, default=5)
     ap.add_argument('--seed',      type=int, default=42)
     ap.add_argument('--split_mode', choices=['subject', 'sample'], default='subject')
     # Optimization
-    ap.add_argument('--epochs',       type=int,   default=300)
+    ap.add_argument('--epochs',       type=int,   default=500)
     ap.add_argument('--batch_size',   type=int,   default=8)
     ap.add_argument('--lr',           type=float, default=1e-3)
     ap.add_argument('--weight_decay', type=float, default=1e-4)
-    ap.add_argument('--patience',     type=int,   default=40)
+    ap.add_argument('--patience',     type=int,   default=100)
     ap.add_argument('--print_every',  type=int,   default=10)
     # Model
-    ap.add_argument('--d_hidden',     type=int,   default=32)
+    ap.add_argument('--d_hidden',     type=int,   default=64)
     ap.add_argument('--dropout',      type=float, default=0.3)
     # Loss weights
     ap.add_argument('--huber_delta',   type=float, default=1.0)
