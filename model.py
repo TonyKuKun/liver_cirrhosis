@@ -24,6 +24,7 @@ from dataset import (
     N_PROFILE_FEAT, N_SEGMENTS, SEGMENTS, SEG_INDEX, N_AUX,
     P_AREA, P_HDIAM, P_PERIM, P_CURV, P_TORS, P_INSC,
     P_SOLID, P_RRAT, P_DADS, P_CIRC, P_NCOMP,
+    AUX_SPLEEN_VOL_IDX, AUX_LIVER_VOL_IDX,
 )
 
 
@@ -38,6 +39,59 @@ Q_REF_M3_PER_S            = 800.0 * 1e-6 / 60.0   # ≈ 1.33e-5 m³/s
 WSS_PHYSIO_LO_PA   = 0.05
 WSS_PHYSIO_HI_PA   = 5.0
 RE_PHYSIO_HI       = 1500.0
+
+
+# =====================================================================
+# Module 0 — Splenic Flow Estimator (patient-specific Q)
+# =====================================================================
+class SplenicFlowEstimator(nn.Module):
+    """
+    Converts organ volumes → patient-specific portal flow scale factor.
+
+    Physics: ΔP = Q × R. The model computes R from geometry, but Q was
+    a constant (800 mL/min). In reality Q varies 700–1800 mL/min between
+    patients. Spleen volume is a measurable proxy for splanchnic blood
+    flow because splenomegaly = splanchnic hyperemia = higher Q.
+
+    Output: q_scale (B,) — multiplier on Q_REF.
+        q_scale ≈ 1.0 for normal spleen (~200 mL)
+        q_scale > 1.0 for splenomegaly (larger spleen → more flow)
+
+    Initialized to output 1.0 for all inputs → starts from constant-Q.
+    """
+
+    def __init__(self, d_hidden: int = 8):
+        super().__init__()
+        # Input: [log(spleen_vol), log(liver_vol), spleen/liver_ratio, organ_valid_mask]
+        self.net = nn.Sequential(
+            nn.Linear(4, d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 1),
+        )
+        # Init to output 0 → exp(0) = 1.0 → q_scale starts at 1.0
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, organ_volumes, organ_valid):
+        """
+        organ_volumes: (B, 2) — [spleen_ml, liver_ml]
+        organ_valid:   (B, 2) — [spleen_present, liver_present]
+        Returns: q_scale (B,) — multiplicative factor on Q_REF
+        """
+        spleen = organ_volumes[:, 0].clamp(min=1.0)
+        liver  = organ_volumes[:, 1].clamp(min=1.0)
+        ratio  = spleen / liver.clamp(min=1.0)
+        feats = torch.stack([
+            torch.log(spleen) * organ_valid[:, 0],
+            torch.log(liver)  * organ_valid[:, 1],
+            ratio * (organ_valid[:, 0] * organ_valid[:, 1]),
+            organ_valid.sum(dim=-1),  # how many organs we have data for
+        ], dim=-1)
+
+        log_scale = self.net(feats).squeeze(-1)  # (B,)
+        # Clamp to prevent extreme scaling: q_scale ∈ [0.3, 3.0]
+        q_scale = torch.exp(log_scale.clamp(-1.2, 1.1))
+        return q_scale
 
 
 # =====================================================================
@@ -552,11 +606,16 @@ class PortalPressureNet(nn.Module):
         self.hydro = PoiseuilleHydrodynamics()
         self.junction_phys = JunctionPhysics()
 
+        # ── NEW: Patient-specific Q from organ volumes ───────
+        # Replaces constant Q_REF with spleen-volume-modulated flow
+        self.q_estimator = SplenicFlowEstimator(d_hidden=8)
+
         # ── Physics-based predictor (main path) ──────────────
         d_branches = N_SEGMENTS * d_hidden
         d_q        = N_SEGMENTS
         d_junction = 15
-        d_fused = d_branches + d_q + d_junction + N_AUX
+        d_qscale   = 1                          # q_scale feature
+        d_fused = d_branches + d_q + d_junction + d_qscale + N_AUX
 
         self.predictor = nn.Sequential(
             nn.Linear(d_fused, d_hidden * 2),
@@ -579,6 +638,18 @@ class PortalPressureNet(nn.Module):
         ) if use_residual else None
 
         self._init_weights()
+        # Re-apply zero-init for modules that must start at identity/zero
+        # (_init_weights uses kaiming for ALL Linear layers, overriding zeros)
+        self.q_estimator.net[-1].weight.data.zero_()
+        self.q_estimator.net[-1].bias.data.zero_()
+        if self.residual_net is not None:
+            self.residual_net.net[-1].weight.data.zero_()
+            self.residual_net.net[-1].bias.data.zero_()
+        for head in [self.flow_est.inflow_head[-1],
+                     self.flow_est.conf_outflow_head[-1],
+                     self.flow_est.bif_outflow_head[-1]]:
+            head.weight.data.zero_()
+            head.bias.data.zero_()
 
     def _init_weights(self):
         for m in self.modules():
@@ -620,9 +691,18 @@ class PortalPressureNet(nn.Module):
         point_valid   = batch['point_valid']
         segment_mask  = batch['segment_mask']
         aux_norm      = batch['aux_norm']
+        organ_volumes = batch.get('organ_volumes',
+                                  torch.zeros(profiles.size(0), 2, device=profiles.device))
+        organ_valid   = batch.get('organ_valid',
+                                  torch.zeros(profiles.size(0), 2, device=profiles.device))
         has_tips      = batch.get('is_post_tips', segment_mask[:, SEG_INDEX['tips']])
 
         B, S, N, _ = profiles.shape
+
+        # ── Patient-specific Q scale from organ volumes ──────
+        # q_scale > 1 for splenomegaly (more splanchnic flow)
+        # q_scale ≈ 1 when volumes unavailable (falls back to Q_REF)
+        q_scale = self.q_estimator(organ_volumes, organ_valid)  # (B,)
 
         # ── Per-branch encoding ──────────────────────────────
         branch_embed  = torch.zeros(B, S, self.d_hidden, device=profiles.device)
@@ -634,37 +714,44 @@ class PortalPressureNet(nn.Module):
             branch_embed[:, si] = pooled * seg_alive
             attn_weights[:, si] = aw
 
-        # ── NEW: Graph message passing ───────────────────────
-        # Each branch embedding now "knows" about its topological neighbors
+        # Graph message passing
         branch_embed = self.vessel_gnn(branch_embed, segment_mask)
 
-        # Junction-end diameters (hydraulic diameter at idx 0)
+        # Junction-end diameters
         junction_diam = profiles[:, :, 0, P_HDIAM]
 
-        # Flow estimation (uses GNN-enriched embeddings)
+        # Flow estimation (relative Q: fractions summing to 1)
         branch_resistance = self._branch_resistance_prior(
             profiles, arc_lengths, point_valid, segment_mask)
         flow_out = self.flow_est(
             branch_embed, aux_norm, segment_mask, junction_diam, branch_resistance)
-        Q = flow_out['Q']
+        Q = flow_out['Q']  # (B, S) relative fractions
 
-        # Per-branch Poiseuille hydrodynamics
+        # ── Per-branch Poiseuille with patient-specific Q ────
+        # Q_abs = Q_rel × Q_REF × q_scale (patient-specific)
+        # The Poiseuille layer already multiplies Q_rel by Q_REF internally,
+        # so we pass Q_rel × q_scale to get patient-specific absolute flow.
+        Q_scaled = Q * q_scale.unsqueeze(-1)  # (B, S)
         hemo_per_seg = []
         for si in range(S):
             h = self.hydro(profiles[:, si], arc_lengths[:, si],
-                           point_valid[:, si], Q[:, si])
+                           point_valid[:, si], Q_scaled[:, si])
             hemo_per_seg.append(h)
 
         # Junction physics
         jp = self.junction_phys(hemo_per_seg, flow_out, segment_mask, has_tips)
 
-        # ── Physics-based prediction (main path) ─────────────
+        # ── Physics-based prediction ─────────────────────────
         branch_flat = branch_embed.reshape(B, -1)
-        fused = torch.cat([branch_flat, Q, jp['features'], aux_norm], dim=-1)
+        fused = torch.cat([
+            branch_flat, Q, jp['features'],
+            q_scale.unsqueeze(-1),  # explicit Q scale as feature
+            aux_norm,
+        ], dim=-1)
         fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
         pvp_physics = self.predictor(fused)
 
-        # ── NEW: Residual correction path ────────────────────
+        # Residual correction
         pvp_residual = torch.zeros_like(pvp_physics)
         if self.use_residual and self.residual_net is not None:
             resid_feats = PhysicsResidualNet.extract_features(
@@ -677,8 +764,9 @@ class PortalPressureNet(nn.Module):
 
         return {
             'pvp_pred': pvp_pred, 'Q': Q, 'flow_out': flow_out,
-            'pvp_physics': pvp_physics,      # interpretable physics-only prediction
-            'pvp_residual': pvp_residual,    # non-Poiseuille correction
+            'pvp_physics': pvp_physics,
+            'pvp_residual': pvp_residual,
+            'q_scale': q_scale,              # for interpretability
             'attn_weights': attn_weights, 'hemo_per_seg': hemo_per_seg,
             'junction': jp, 'branch_embed': branch_embed,
             'endpoint_dP': torch.stack(
@@ -696,7 +784,8 @@ class PhysicsInformedLoss(nn.Module):
     def __init__(self, lambda_murray=0.10, lambda_press=0.05,
                  lambda_smooth=0.01, lambda_physio=0.01,
                  lambda_mono=0.05, lambda_residual=0.05,
-                 severity_alpha=0.5, huber_delta=1.0):   # severity_alpha 和 huber_delta 现在无用但保留
+                 lambda_spread=0.50, extremity_alpha=1.5,
+                 huber_delta=1.0):
         super().__init__()
         self.lambda_murray   = lambda_murray
         self.lambda_press    = lambda_press
@@ -704,11 +793,10 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_physio   = lambda_physio
         self.lambda_mono     = lambda_mono
         self.lambda_residual = lambda_residual
-        # 以下参数不再用于 L_main，但保留以保证接口兼容
-        self.severity_alpha  = severity_alpha
+        self.lambda_spread   = lambda_spread
+        self.extremity_alpha = extremity_alpha
         self.huber_delta     = huber_delta
 
-    # 辅助方法 _hinge_outside_range 保持不变（被 L_physio 使用）
     @staticmethod
     def _hinge_outside_range(x, lo, hi, mask):
         scale_lo = max(abs(lo), 1.0)
@@ -721,14 +809,60 @@ class PhysicsInformedLoss(nn.Module):
     def forward(self, model_out, label_norm, batch):
         pvp_pred = model_out['pvp_pred'].squeeze(-1)
 
-        # ── L_main: 纯 L2 Loss（均方误差）──────────────────
-        L_main = F.mse_loss(pvp_pred, label_norm)
+        # ══════════════════════════════════════════════════════
+        # FIX 1: Bidirectional extremity weighting
+        # ══════════════════════════════════════════════════════
+        # Problem: MSE-optimal prediction has lower variance than labels.
+        # Solution: give extreme samples (BOTH high AND low) more weight.
+        #
+        # weight_i = 1 + α · |label_norm_i|²
+        #   → sample at the mean (label_norm=0): weight = 1
+        #   → sample 1σ from mean: weight = 1 + α
+        #   → sample 2σ from mean: weight = 1 + 4α (quadratic boost)
+        #
+        # This forces the model to "care more" about getting extremes right,
+        # at the cost of slightly higher error near the mean.
+        extremity = label_norm.abs()
+        extremity_weight = 1.0 + self.extremity_alpha * extremity.pow(2)
 
-        # ── L_residual: 保持不变 ───────────────────────────
+        # Asymmetric: underpredicting high PVP is clinically worse
+        err = pvp_pred - label_norm
+        asym = torch.where(
+            (err < 0) & (label_norm > 0.5),
+            torch.full_like(err, 1.5),
+            torch.ones_like(err),
+        )
+
+        abs_err = err.abs()
+        huber_elem = torch.where(
+            abs_err <= self.huber_delta,
+            0.5 * err.pow(2),
+            self.huber_delta * (abs_err - 0.5 * self.huber_delta),
+        )
+        L_main = (huber_elem * extremity_weight * asym).mean()
+
+        # ══════════════════════════════════════════════════════
+        # FIX 2: Anti-shrinkage variance matching loss
+        # ══════════════════════════════════════════════════════
+        # Directly penalizes when prediction variance is lower than
+        # label variance within the batch. This is the key anti-
+        # compression signal.
+        #
+        # L_spread = max(0, 1 - Var(pred) / Var(label))²
+        #   → pred variance matches label: L_spread = 0
+        #   → pred variance too low:       L_spread > 0 (penalty)
+        #   → pred variance too high:      L_spread = 0 (no penalty)
+        if pvp_pred.numel() >= 4:
+            pred_var = pvp_pred.var()
+            label_var = label_norm.var().clamp(min=1e-3)
+            L_spread = F.relu(1.0 - pred_var / label_var).pow(2)
+        else:
+            L_spread = torch.tensor(0.0, device=pvp_pred.device)
+
+        # L_residual: keep residual path small
         pvp_residual = model_out.get('pvp_residual', torch.zeros_like(pvp_pred))
         L_residual = pvp_residual.squeeze(-1).pow(2).mean()
 
-        # ── Murray 定律损失 ────────────────────────────────
         flow = model_out['flow_out']
         jp = model_out['junction']
         m_in = jp['inflow_active']
@@ -749,10 +883,9 @@ class PhysicsInformedLoss(nn.Module):
         L_murr_bo = (d_bo.pow(2).sum(-1) * m_bo_w).sum() / m_bo_w.sum().clamp(1)
         L_murray = L_murr_in + L_murr_co + L_murr_bo
 
-        # ── 压力一致性损失 ────────────────────────────────
         L_press = jp['press_resid_bifurc'].sum() / m_bo.sum().clamp(1)
 
-        # ── 平滑性损失（基于 hydraulic_diameter）──────────
+        # Smoothness on hydraulic_diameter profile (was eq_diameter)
         profiles    = batch['profiles']
         point_valid = batch['point_valid']
         seg_mask    = batch['segment_mask']
@@ -762,7 +895,7 @@ class PhysicsInformedLoss(nn.Module):
             alive = seg_mask[:, si] > 0
             if alive.sum() == 0:
                 continue
-            r = profiles[alive, si, :, P_HDIAM] * 0.5   # 半径
+            r = profiles[alive, si, :, P_HDIAM] * 0.5
             v = point_valid[alive, si]
             d2r = r[:, 2:] - 2.0 * r[:, 1:-1] + r[:, :-2]
             mw = v[:, 2:] * v[:, 1:-1] * v[:, :-2]
@@ -771,7 +904,7 @@ class PhysicsInformedLoss(nn.Module):
         if n_seg > 0:
             L_smooth = L_smooth / n_seg
 
-        # ── 生理范围损失（WSS & Re）─────────────────────
+        # Physio hinge on WSS and Re
         L_physio = torch.tensor(0.0, device=pvp_pred.device)
         n_seg = 0
         for si in range(N_SEGMENTS):
@@ -788,7 +921,7 @@ class PhysicsInformedLoss(nn.Module):
         if n_seg > 0:
             L_physio = L_physio / n_seg
 
-        # ── 压力单调性损失 ──────────────────────────────
+        # Monotonicity of ΔP
         L_mono = torch.tensor(0.0, device=pvp_pred.device)
         n_seg = 0
         for si in range(N_SEGMENTS):
@@ -804,7 +937,6 @@ class PhysicsInformedLoss(nn.Module):
         if n_seg > 0:
             L_mono = L_mono / n_seg
 
-        # ── 安全数值处理 ────────────────────────────────
         def _safe(x, cap=1e3):
             if not torch.is_tensor(x):
                 x = torch.tensor(float(x), device=pvp_pred.device)
@@ -816,24 +948,22 @@ class PhysicsInformedLoss(nn.Module):
         L_smooth_s = _safe(L_smooth)
         L_physio_s = _safe(L_physio)
         L_mono_s   = _safe(L_mono)
-        L_residual_s = _safe(L_residual)
 
-        L_total = (10 * L_main_s
+        L_total = (L_main_s
                    + self.lambda_murray * L_murray_s
                    + self.lambda_press  * L_press_s
                    + self.lambda_smooth * L_smooth_s
                    + self.lambda_physio * L_physio_s
                    + self.lambda_mono   * L_mono_s
-                   + self.lambda_residual * L_residual_s)
+                   + self.lambda_residual * _safe(L_residual)
+                   + self.lambda_spread  * _safe(L_spread))
 
         log = {
-            'main': float(L_main_s.detach()),
-            'murray': float(L_murray_s.detach()),
-            'press': float(L_press_s.detach()),
-            'smooth': float(L_smooth_s.detach()),
-            'physio': float(L_physio_s.detach()),
-            'mono': float(L_mono_s.detach()),
-            'residual': float(L_residual_s.detach()),
+            'main': float(L_main_s.detach()), 'murray': float(L_murray_s.detach()),
+            'press': float(L_press_s.detach()), 'smooth': float(L_smooth_s.detach()),
+            'physio': float(L_physio_s.detach()), 'mono': float(L_mono_s.detach()),
+            'residual': float(_safe(L_residual).detach()),
+            'spread': float(_safe(L_spread).detach()),
             'total': float(L_total.detach()),
         }
         return L_total, log

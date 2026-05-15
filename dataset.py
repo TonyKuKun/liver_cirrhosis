@@ -110,6 +110,13 @@ AUX_KEYS = [
     'mpv_min_max_diameter_ratio',
     'splenic_dominance_index',
     'collateral_burden_score',
+    # ─── G: Organ volumes from STL (3) — NEW ───
+    # Spleen volume = proxy for splanchnic blood flow Q (the MISSING variable)
+    # Liver volume = proxy for functional hepatic mass / intrahepatic resistance
+    # Ratio = validated portal hypertension severity marker
+    'spleen_volume_ml',
+    'liver_volume_ml',
+    'spleen_liver_ratio',
     # ─── Flags (3) ───
     'has_lgv',
     'has_pgv',
@@ -121,9 +128,12 @@ N_AUX = len(AUX_KEYS)  # 26
 AUX_LOOKUP = {}
 _SYSTEM_KEYS = set()
 _GLOBAL_KEYS = {'has_lgv', 'has_pgv', 'has_tips'}
+_STL_KEYS = {'spleen_volume_ml', 'liver_volume_ml', 'spleen_liver_ratio'}
 for k in AUX_KEYS:
     if k in _GLOBAL_KEYS:
         AUX_LOOKUP[k] = ('global', k)
+    elif k in _STL_KEYS:
+        AUX_LOOKUP[k] = ('stl', k)  # computed from STL files, not JSON
     else:
         AUX_LOOKUP[k] = ('system', k)
         _SYSTEM_KEYS.add(k)
@@ -135,6 +145,10 @@ AUX_FLAG_INDICES = [
         'cavernous_transformation_flag', 'pvt_severity_grade',
     ]
 ]
+
+# Indices of organ volume features (for model's Q estimation)
+AUX_SPLEEN_VOL_IDX = AUX_KEYS.index('spleen_volume_ml')
+AUX_LIVER_VOL_IDX  = AUX_KEYS.index('liver_volume_ml')
 
 
 # ── Sentinel keys kept for evaluation (NOT input) ─────────────────────
@@ -172,6 +186,59 @@ def _safe_float(v, default=np.nan):
         return f if np.isfinite(f) else default
     except (TypeError, ValueError):
         return default
+
+
+def _compute_stl_volume_ml(stl_path):
+    """
+    Compute volume of a closed STL mesh in mL (= cm³).
+
+    Uses the divergence theorem: for each triangle with vertices v0,v1,v2,
+    the signed volume contribution is v0 · (v1 × v2) / 6.
+    Sum over all faces, take absolute value → volume in mm³ → convert to mL.
+
+    Returns np.nan if the file doesn't exist or parsing fails.
+    """
+    if not os.path.exists(stl_path):
+        return np.nan
+    try:
+        with open(stl_path, 'rb') as f:
+            header = f.read(80)
+        is_ascii = header[:5] == b'solid' and b'\x00' not in header
+
+        if is_ascii:
+            verts = []
+            with open(stl_path, 'r', errors='replace') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('vertex'):
+                        parts = line.split()
+                        verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
+            verts = np.array(verts, dtype=np.float64).reshape(-1, 3, 3)  # (n_tri, 3, 3)
+        else:
+            with open(stl_path, 'rb') as f:
+                f.read(80)
+                n_tri = int(np.frombuffer(f.read(4), dtype=np.uint32)[0])
+                data = f.read(n_tri * 50)
+            # Each facet: 12 bytes normal + 36 bytes vertices + 2 bytes attr
+            dt = np.dtype([('normal', '<f4', 3), ('verts', '<f4', (3, 3)), ('attr', '<u2')])
+            facets = np.frombuffer(data, dtype=dt, count=n_tri)
+            verts = facets['verts'].astype(np.float64)  # (n_tri, 3, 3)
+
+        if len(verts) < 4:
+            return np.nan
+
+        # Signed volume via divergence theorem
+        v0 = verts[:, 0, :]
+        v1 = verts[:, 1, :]
+        v2 = verts[:, 2, :]
+        cross = np.cross(v1, v2)
+        signed_vol = np.sum(v0 * cross) / 6.0
+        volume_mm3 = abs(signed_vol)
+        volume_ml = volume_mm3 / 1000.0  # mm³ → cm³ = mL
+        return float(volume_ml) if volume_ml > 0.1 else np.nan
+
+    except Exception:
+        return np.nan
 
 
 def _resample(arr, n_target):
@@ -289,8 +356,31 @@ class PortalVeinDataset(Dataset):
                 elif isinstance(info, bool) and info:
                     segment_mask[si] = 1.0
 
+            # ── Organ volumes from STL ──────────────────────────
+            seg_dir = os.path.join(p['dir'], 'segmentation')
+            spleen_vol = _compute_stl_volume_ml(os.path.join(seg_dir, 'spleen.stl'))
+            liver_vol  = _compute_stl_volume_ml(os.path.join(seg_dir, 'liver.stl'))
+            sl_ratio = np.nan
+            if np.isfinite(spleen_vol) and np.isfinite(liver_vol) and liver_vol > 1.0:
+                sl_ratio = spleen_vol / liver_vol
+            stl_values = {
+                'spleen_volume_ml': spleen_vol,
+                'liver_volume_ml':  liver_vol,
+                'spleen_liver_ratio': sl_ratio,
+            }
+
             # ── Aux scalars ────────────────────────────────────
-            aux, aux_mask = self._load_aux(unified)
+            aux, aux_mask = self._load_aux(unified, stl_values=stl_values)
+
+            # Organ volumes as separate tensor (for model's Q estimation)
+            organ_vols = np.array([
+                spleen_vol if np.isfinite(spleen_vol) else 0.0,
+                liver_vol  if np.isfinite(liver_vol)  else 0.0,
+            ], dtype=np.float32)
+            organ_valid = np.array([
+                float(np.isfinite(spleen_vol)),
+                float(np.isfinite(liver_vol)),
+            ], dtype=np.float32)
 
             # ── 3D endpoints (for viz / junction physics) ──────
             endpoints_3d = self._load_endpoints_3d(unified)
@@ -311,14 +401,16 @@ class PortalVeinDataset(Dataset):
 
             return {
                 'name': p['name'],
-                'profiles':      profiles,        # (S, N, 11)
-                'point_valid':   point_valid,     # (S, N)
-                'arc_lengths':   arc_lengths,     # (S, N) mm
-                'segment_mask':  segment_mask,    # (S,)
-                'aux_scalars':   aux,             # (26,)
-                'aux_mask':      aux_mask,        # (26,)
-                'endpoints_3d':  endpoints_3d,    # (S, 2, 3) mm
-                'confluence_3d': confluence_3d,   # (3,)
+                'profiles':      profiles,
+                'point_valid':   point_valid,
+                'arc_lengths':   arc_lengths,
+                'segment_mask':  segment_mask,
+                'aux_scalars':   aux,
+                'aux_mask':      aux_mask,
+                'organ_volumes': organ_vols,    # (2,) [spleen_ml, liver_ml]
+                'organ_valid':   organ_valid,   # (2,) [spleen_present, liver_present]
+                'endpoints_3d':  endpoints_3d,
+                'confluence_3d': confluence_3d,
                 'label':         np.float32(label),
                 'is_post_tips':  is_post_tips,
                 'extras_for_eval': extras_for_eval,
@@ -329,16 +421,16 @@ class PortalVeinDataset(Dataset):
                       f"{type(e).__name__}: {e}")
             return None
 
-    def _load_aux(self, unified):
+    def _load_aux(self, unified, stl_values=None):
         out = np.zeros(N_AUX, dtype=np.float32)
         mask = np.zeros(N_AUX, dtype=np.float32)
+        stl_values = stl_values or {}
 
-        # System features: available in system.all_values
+        # System features
         sys_all = {}
         sys_d = unified.get('system', {})
         if isinstance(sys_d, dict):
             sys_all = sys_d.get('all_values', {}) or {}
-            # Also merge 'available' dict (some schemas put values here)
             avail = sys_d.get('available', {})
             if isinstance(avail, dict):
                 for k, v in avail.items():
@@ -351,6 +443,8 @@ class PortalVeinDataset(Dataset):
             section, jkey = AUX_LOOKUP[key]
             if section == 'global':
                 v = _safe_float(glob.get(jkey, None), np.nan)
+            elif section == 'stl':
+                v = _safe_float(stl_values.get(jkey, None), np.nan)
             else:  # system
                 v = _safe_float(sys_all.get(jkey, None), np.nan)
 
@@ -563,6 +657,8 @@ class PortalVeinDataset(Dataset):
             'aux_scalars':     torch.from_numpy(aux).float(),
             'aux_norm':        torch.from_numpy(aux_norm).float(),
             'aux_mask':        torch.from_numpy(d['aux_mask']).float(),
+            'organ_volumes':   torch.from_numpy(d['organ_volumes']).float(),
+            'organ_valid':     torch.from_numpy(d['organ_valid']).float(),
             'endpoints_3d':    torch.from_numpy(d['endpoints_3d']).float(),
             'confluence_3d':   torch.from_numpy(d['confluence_3d']).float(),
             'is_post_tips':    torch.tensor(float(d['is_post_tips'])),
@@ -578,6 +674,7 @@ class PortalVeinDataset(Dataset):
 def collate_fn(items):
     tensor_keys = ['profiles', 'profiles_norm', 'arc_lengths', 'point_valid',
                    'segment_mask', 'aux_scalars', 'aux_norm', 'aux_mask',
+                   'organ_volumes', 'organ_valid',
                    'endpoints_3d', 'confluence_3d', 'is_post_tips',
                    'label', 'label_norm']
     out = {}

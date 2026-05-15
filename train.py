@@ -373,7 +373,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data_root', type=str, default=r"F:\PCG data\dataset\test4all_sample")
     ap.add_argument('--out_dir',   type=str, default='./runs/v4')
-    ap.add_argument('--n_points',  type=int, default=100)
+    ap.add_argument('--n_points',  type=int, default=200)
     ap.add_argument('--n_folds',   type=int, default=5)
     ap.add_argument('--seed',      type=int, default=42)
     ap.add_argument('--split_mode', choices=['subject', 'sample'], default='subject')
