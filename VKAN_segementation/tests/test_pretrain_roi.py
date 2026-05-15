@@ -11,6 +11,7 @@ from pretrain.preprocess import (
     PRETRAIN_ALGORITHM_VERSION,
     ask_for_cleanup_plan,
     ask_for_coarse_plan,
+    _apply_llm_removal,
     _cleanup_mask_by_region_growth,
     _crop_slices,
     _default_plan,
@@ -18,6 +19,7 @@ from pretrain.preprocess import (
     _portal_seed_from_cleanup_plan,
     _portal_seed_from_reference,
     _portal_seed_from_plan,
+    _portal_seed_from_volume,
     _reference_envelope_mask,
     _reference_crop_from_stl,
     _should_run_region_growth,
@@ -26,6 +28,8 @@ from pretrain.preprocess import (
     _should_rebuild_pretrain,
     _should_skip_existing_pretrain,
 )
+from pretrain.threshold_scorer import _score_coronal_tree, _select_best_candidate, search_best_threshold
+from pretrain.z_standardizer import _validate_z_range, standardize_z_range
 from utils.common import DicomVolume, PatientCase, discover_patients, mask_to_stl, write_binary_stl
 
 
@@ -93,7 +97,7 @@ class PretrainRoiTests(unittest.TestCase):
             is_post_tips=False,
         )
 
-        self.assertGreaterEqual(plan["hu_low"], 90)
+        self.assertGreaterEqual(plan["hu_low"], 80)
         self.assertLessEqual(plan["hu_high"], 420)
         self.assertLessEqual(plan["crop"]["z"][1] - plan["crop"]["z"][0], 0.46)
         self.assertLessEqual(plan["crop"]["y"][1] - plan["crop"]["y"][0], 0.40)
@@ -113,7 +117,7 @@ class PretrainRoiTests(unittest.TestCase):
         self.assertLessEqual(plan["crop"]["y"][1] - plan["crop"]["y"][0], 0.48)
         self.assertLessEqual(plan["crop"]["x"][1] - plan["crop"]["x"][0], 0.70)
 
-    def test_tips_plan_preserves_model_low_portal_threshold(self) -> None:
+    def test_tips_plan_clamps_model_low_portal_threshold_to_search_floor(self) -> None:
         plan = _sanitize_plan(
             {
                 "hu_low": 75,
@@ -124,7 +128,7 @@ class PretrainRoiTests(unittest.TestCase):
             is_post_tips=True,
         )
 
-        self.assertEqual(plan["hu_low"], 75.0)
+        self.assertEqual(plan["hu_low"], 80.0)
         self.assertEqual(plan["hu_high"], 260.0)
         self.assertEqual(plan["portal_seed"], {"z": 0.55, "y": 0.5, "x": 0.45})
 
@@ -212,7 +216,7 @@ class PretrainRoiTests(unittest.TestCase):
         np.testing.assert_allclose(shifted_points.min(axis=0) - base_points.min(axis=0), [-10.0, -20.0, -30.0], atol=1e-5)
         np.testing.assert_allclose(shifted_points.max(axis=0) - base_points.max(axis=0), [-10.0, -20.0, -30.0], atol=1e-5)
 
-    def test_reference_pre_stl_builds_patient_space_crop(self) -> None:
+    def test_reference_pre_stl_debug_crop_builds_patient_space_crop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             patient = Path(tmp) / "case#"
             (patient / "dcm").mkdir(parents=True)
@@ -270,7 +274,7 @@ class PretrainRoiTests(unittest.TestCase):
         self.assertEqual(info["kept_components"], 1)
         self.assertEqual(info["removed_components"], 1)
 
-    def test_portal_seed_prefers_vessel_stl_over_pre_stl(self) -> None:
+    def test_reference_stls_are_not_used_as_portal_seed_priors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             patient = Path(tmp) / "case#"
             (patient / "dcm").mkdir(parents=True)
@@ -283,9 +287,21 @@ class PretrainRoiTests(unittest.TestCase):
 
             seed, source = _portal_seed_from_reference(case, volume)
 
-        self.assertEqual(source, "vessel.stl")
+        self.assertIsNone(source)
+        self.assertIsNone(seed)
+
+    def test_dicom_portal_seed_uses_volume_not_reference_stl(self) -> None:
+        volume = DicomVolume(np.zeros((20, 30, 40), dtype=np.float32), (1.0, 1.0, 1.0), (0.0, 0.0, 0.0))
+        volume.volume_hu[10:13, 8:11, 18:21] = 160.0
+        plan = {"hu_low": 80.0, "hu_high": 350.0, "crop": {"z": [0.2, 0.8], "y": [0.1, 0.7], "x": [0.2, 0.8]}}
+
+        seed, source, info = _portal_seed_from_volume(volume, plan, spine_center_yx=(0.8, 0.5))
+
+        self.assertEqual(source, "dicom_portal_hu_density")
+        self.assertIsNotNone(seed)
         assert seed is not None
-        self.assertLess(seed[0], 5.0)
+        self.assertGreater(seed[0], 9)
+        self.assertEqual(info["source"], "dicom_portal_hu_density")
 
     def test_model_portal_seed_can_drive_region_growth_without_reference(self) -> None:
         volume = DicomVolume(np.zeros((20, 30, 40), dtype=np.float32), (1.0, 1.0, 1.0), (0.0, 0.0, 0.0))
@@ -316,7 +332,50 @@ class PretrainRoiTests(unittest.TestCase):
         self.assertEqual(source, "model_cleanup_seed")
         np.testing.assert_allclose(seed, (0.22 * 19, 0.33 * 29, 0.44 * 39), atol=1e-6)
 
-    def test_reference_envelope_mask_limits_candidate_to_pre_stl_neighborhood(self) -> None:
+    def test_llm_removal_skips_overwide_region_boxes(self) -> None:
+        mask = np.ones((10, 10, 10), dtype=bool)
+        vol = np.zeros(mask.shape, dtype=np.float32)
+        refine = {
+            "assessment": "needs_cleanup",
+            "remove_regions": [{"z_frac": [0, 1], "y_frac": [0, 1], "x_frac": [0, 1]}],
+        }
+
+        cleaned, info = _apply_llm_removal(mask, vol, refine, None, (1.0, 1.0, 1.0))
+
+        self.assertEqual(int(cleaned.sum()), int(mask.sum()))
+        self.assertEqual(info["regions_removed"], 0)
+        self.assertEqual(info["skipped_regions"][0]["reason"], "region_too_large")
+
+    def test_llm_disconnected_cleanup_rolls_back_when_too_destructive(self) -> None:
+        mask = np.zeros((12, 12, 12), dtype=bool)
+        mask[1:3, 1:3, 1:3] = True
+        mask[6:11, 6:11, 6:11] = True
+        vol = np.zeros(mask.shape, dtype=np.float32)
+        refine = {"assessment": "needs_cleanup", "remove_disconnected_blobs": True}
+
+        cleaned, info = _apply_llm_removal(mask, vol, refine, (1.5, 1.5, 1.5), (1.0, 1.0, 1.0))
+
+        self.assertEqual(int(cleaned.sum()), int(mask.sum()))
+        self.assertTrue(cleaned[8, 8, 8])
+        self.assertEqual(info["region_grow_after"]["skipped_reason"], "would_remove_too_much")
+
+    def test_llm_removal_preserves_high_hu_tips_voxels(self) -> None:
+        mask = np.zeros((10, 10, 10), dtype=bool)
+        mask[2:7, 2:7, 2:7] = True
+        vol = np.zeros(mask.shape, dtype=np.float32)
+        vol[3, 3, 3] = 650.0
+        refine = {
+            "assessment": "needs_cleanup",
+            "remove_regions": [{"z_frac": [0.2, 0.4], "y_frac": [0.2, 0.4], "x_frac": [0.2, 0.4]}],
+        }
+
+        cleaned, info = _apply_llm_removal(mask, vol, refine, None, (1.0, 1.0, 1.0))
+
+        self.assertTrue(cleaned[3, 3, 3])
+        self.assertLess(int(cleaned.sum()), int(mask.sum()))
+        self.assertEqual(info["regions_removed"], 1)
+
+    def test_reference_envelope_mask_is_disabled_for_pretrain_priors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             patient = Path(tmp) / "case#"
             (patient / "dcm").mkdir(parents=True)
@@ -328,16 +387,85 @@ class PretrainRoiTests(unittest.TestCase):
 
             envelope, info = _reference_envelope_mask(case, volume, radius_mm=2.0)
 
-        self.assertIsNotNone(envelope)
-        assert envelope is not None
-        self.assertTrue(envelope[4, 4, 4])
-        self.assertTrue(envelope[5, 5, 5])
-        self.assertFalse(envelope[12, 12, 12])
-        self.assertEqual(info["source"], "pre.stl")
+        self.assertIsNone(envelope)
+        self.assertFalse(info["enabled"])
+        self.assertTrue(info["debug_only"])
+        self.assertEqual(info["skipped_reason"], "pre.stl_not_allowed_as_pretrain_prior")
 
     def test_region_growth_is_skipped_when_pre_stl_envelope_applies(self) -> None:
-        self.assertFalse(_should_run_region_growth({"applied": True, "source": "pre.stl"}))
+        self.assertTrue(_should_run_region_growth({"applied": True, "source": "pre.stl"}))
         self.assertTrue(_should_run_region_growth({"applied": False}))
+
+    def test_short_z_standardization_falls_back_to_wide_portal_range(self) -> None:
+        ok, reason = _validate_z_range(
+            0, 38, 1.25, diaphragm_z=16, iliac_z=22,
+            iliac_info={"status": "detected", "width_at_iliac_mm": 55.4},
+        )
+
+        self.assertFalse(ok)
+        self.assertIn(reason, {"z_range_too_short", "diaphragm_iliac_too_close", "iliac_edge_width_unstable"})
+
+    def test_threshold_search_returns_same_mask_used_for_best_candidate(self) -> None:
+        vol = np.zeros((16, 16, 16), dtype=np.float32)
+        vol[4:8, 4:8, 4:8] = 100.0
+        vol[10:12, 10:12, 10:12] = 180.0
+        plan = {"hu_low": 100.0, "hu_high": 220.0, "crop": {"z": [0, 1], "y": [0, 1], "x": [0, 1]}}
+
+        best_plan, info, mask = search_best_threshold(
+            vol, plan, None, (5.0, 5.0, 5.0), (1.0, 1.0, 1.0), False,
+            _segment_once, region_grow_fn=lambda m, s, sp: (m, {"output_voxels": int(m.sum())}),
+            hu_low_candidates=[80, 100, 180], return_best_mask=True,
+        )
+
+        self.assertEqual(best_plan["hu_low"], info["best_hu_low"])
+        self.assertEqual(int(mask.sum()), info["best_voxels"])
+
+    def test_coronal_tree_score_prefers_tree_over_blob_projection(self) -> None:
+        tree = np.zeros((40, 12, 40), dtype=bool)
+        tree[8:32, 5:7, 19:21] = True
+        tree[18:22, 5:7, 8:32] = True
+        blob = np.zeros_like(tree)
+        blob[8:32, 4:9, 8:32] = True
+
+        tree_score, tree_info = _score_coronal_tree(tree, (1.0, 1.0, 1.0))
+        blob_score, blob_info = _score_coronal_tree(blob, (1.0, 1.0, 1.0))
+
+        self.assertGreater(tree_score, blob_score)
+        self.assertLess(tree_info["fill_ratio"], blob_info["fill_ratio"])
+        self.assertGreaterEqual(tree_info["z_extent_mm"], 20)
+        self.assertGreaterEqual(tree_info["x_extent_mm"], 20)
+
+    def test_coronal_selection_prefers_viable_lower_threshold_over_tiny_high_threshold(self) -> None:
+        candidates = [
+            {
+                "hu_low": 150.0,
+                "selection_score": 77.0,
+                "voxels": 100_000,
+                "median_area_mm2": 320.0,
+                "coronal_tree": 15.0,
+                "coronal_fill_ratio": 0.56,
+                "coronal_z_extent_mm": 160.0,
+                "coronal_x_extent_mm": 63.0,
+                "main_fraction": 0.70,
+                "coronal_low_threshold_candidate": True,
+            },
+            {
+                "hu_low": 170.0,
+                "selection_score": 88.0,
+                "voxels": 24_000,
+                "median_area_mm2": 125.0,
+                "coronal_tree": 15.0,
+                "coronal_fill_ratio": 0.55,
+                "coronal_z_extent_mm": 160.0,
+                "coronal_x_extent_mm": 33.0,
+                "main_fraction": 0.65,
+                "coronal_low_threshold_candidate": False,
+            },
+        ]
+
+        best = _select_best_candidate(candidates)
+
+        self.assertEqual(best["hu_low"], 150.0)
 
     def test_pretrain_rebuilds_when_stl_missing_meta_missing_or_version_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

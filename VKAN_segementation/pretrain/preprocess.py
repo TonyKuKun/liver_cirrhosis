@@ -1,13 +1,13 @@
 """pretrain v4 — 完整的门静脉预分割流程。
 
 依赖模块：
-    vertebra_detector  — 椎体逐节检测 + L3 定位 + Z 轴标定
+    z_standardizer     — 横膈膜 + 髂骨 Z 轴标定
     threshold_scorer   — 解剖结构感知的阈值评分 + 搜索
 
 流程：
     1. DICOM 加载
     2. 脊柱检测（硬排除）
-    3. 椎体分节 → 膈肌 + L3 上缘 → Z 轴标定
+    3. 横膈膜 + 髂骨 → Z 轴标定
     4. CT 预览图（冠状位/矢状位 MIP + 肝门区关键层）
     5. LLM 初始规划（喂入检测到的解剖信息）
     6. 阈值搜索（完整性 + 可分离性 + 连通性评分）
@@ -43,15 +43,14 @@ except ImportError:
 
 # 本地模块
 try:
-    from .vertebra_detector import standardize_z_range, detect_vertebrae
+    from .z_standardizer import standardize_z_range
     from .threshold_scorer import search_best_threshold, score_threshold
 except ImportError:
     try:
-        from vertebra_detector import standardize_z_range, detect_vertebrae
+        from z_standardizer import standardize_z_range
         from threshold_scorer import search_best_threshold, score_threshold
     except ImportError:
         standardize_z_range = None  # type: ignore[assignment]
-        detect_vertebrae = None  # type: ignore[assignment]
         search_best_threshold = None  # type: ignore[assignment]
         score_threshold = None  # type: ignore[assignment]
 
@@ -71,6 +70,10 @@ SPINE_DILATE_ITERATIONS = 4
 REGION_GROW_BRIDGE_MM = 8.0
 REGION_GROW_MAX_SEED_SNAP_MM = 25.0
 MAX_REFINE_ROUNDS = 2
+MAX_LLM_REGION_REMOVE_FRACTION = 0.20
+MAX_LLM_TOTAL_REMOVE_FRACTION = 0.35
+MIN_LLM_CLEANUP_KEEP_FRACTION = 0.55
+PRESERVE_HIGH_HU_THRESHOLD = 400.0
 
 
 @dataclass(frozen=True)
@@ -479,34 +482,20 @@ def _build_anatomy_context(
     }
 
     # Z 轴标定结果
+    iliac_info = z_info.get("iliac", {})
     ctx["z_axis"] = {
         "diaphragm_z": z_info.get("diaphragm_z"),
         "diaphragm_z_normalized": round(z_info["diaphragm_z"] / nz, 3) if z_info.get("diaphragm_z") is not None else None,
-        "l3_z": z_info.get("l3_detection", {}).get("l3_z"),
-        "l3_z_normalized": round(z_info["l3_detection"]["l3_z"] / nz, 3)
-            if z_info.get("l3_detection", {}).get("l3_z") is not None else None,
+        "iliac_z": iliac_info.get("iliac_z"),
+        "iliac_z_normalized": round(iliac_info["iliac_z"] / nz, 3) if iliac_info.get("iliac_z") is not None else None,
+        "z_direction": z_info.get("z_direction"),
         "valid_z_range": [z_info.get("z_start", 0), z_info.get("z_end", nz - 1)],
         "valid_z_range_normalized": [
             round(z_info.get("z_start", 0) / nz, 3),
             round(z_info.get("z_end", nz - 1) / nz, 3),
         ],
         "valid_z_range_mm": z_info.get("z_range_mm"),
-        "z_direction": z_info.get("l3_detection", {}).get("z_direction", {}).get("direction"),
     }
-
-    # 椎体检测结果
-    vertebrae = z_info.get("vertebrae", [])
-    if vertebrae:
-        ctx["vertebrae_detected"] = {
-            "count": len(vertebrae),
-            "summary": [
-                {"index": v["index"],
-                 "z_range": [v["z_start"], v["z_end"]],
-                 "z_normalized": [round(v["z_start"] / nz, 3), round(v["z_end"] / nz, 3)],
-                 "height_mm": round(v.get("height_mm", 0), 1)}
-                for v in vertebrae
-            ],
-        }
 
     # 脊柱信息
     ctx["spine"] = {
@@ -524,6 +513,7 @@ def _build_anatomy_context(
 def _build_planning_system_prompt() -> str:
     return (
         "You are an expert radiologist assisting in portal venous CT vessel extraction.\n"
+        "The cohort includes cirrhosis, portal hypertension, non-TIPS, and post-TIPS cases.\n"
         "Return STRICT JSON only — no markdown, no explanation.\n\n"
 
         "== YOUR TASK ==\n"
@@ -567,12 +557,13 @@ def _build_planning_system_prompt() -> str:
         "- Use the detected anatomy data: spine center is provided, place your seed ANTERIOR to it.\n\n"
 
         "== USING THE DETECTED ANATOMY DATA ==\n"
-        "- z_axis.valid_z_range_normalized: this is the diaphragm-to-L3 range we detected.\n"
+        "- z_axis.valid_z_range_normalized: the diaphragm-to-iliac range we detected.\n"
         "  Your crop z should be WITHIN this range.\n"
+        "- z_axis.diaphragm_z: upper boundary (diaphragm level).\n"
+        "- z_axis.iliac_z: lower boundary (where iliac/pelvic bone appears — below the portal system).\n"
         "- spine.center_y/x: the spine location. Your portal_seed.y must be well anterior\n"
         "  (smaller y value) to this.\n"
-        "- vertebrae_detected: individual vertebra positions. The portal vein confluence is\n"
-        "  typically at the T12-L1 vertebral level.\n\n"
+        "- The portal vein confluence is typically midway between diaphragm and iliac bone.\n\n"
 
         "== PREVIEW IMAGES (in order) ==\n"
         "1. coronal_mip.png — Coronal MIP (y 25-60%). LOOK HERE FIRST.\n"
@@ -596,8 +587,9 @@ def _build_planning_request(is_post_tips: bool) -> str:
         "  \"portal_seed\": {\"z\": <normalized 0-1>, \"y\": <normalized 0-1>, \"x\": <normalized 0-1>},\n"
         + (
             "  \"include_tips\": <boolean>,\n"
-            "  \"tips_hu_low\": <number, typically 400-600>,\n"
+            "  \"tips_hu_low\": <number, typically 400-600 for the TIPS stent>,\n"
             "  \"tips_hu_high\": <number, typically 1500-3071>,\n"
+            "  \"tips_extent_notes\": <string, describe whether the TIPS stent and splenic vein are long enough; note any bright gastric vein>,\n"
         if is_post_tips else "")
         + "  \"estimated_portal_hu\": <number, your estimate of portal vein trunk HU>,\n"
         "  \"estimated_liver_hu\": <number, your estimate of liver parenchyma HU>,\n"
@@ -606,7 +598,8 @@ def _build_planning_request(is_post_tips: bool) -> str:
         "  \"notes\": <string>\n"
         "}\n\n"
         "REMEMBER:\n"
-        "- hu_low should capture the dimmest branch you want to keep, NOT the trunk.\n"
+        + ("- This is a post-TIPS case; include the TIPS stent when visible.\n" if is_post_tips else "- This is a non-TIPS case; avoid bone and do not invent a stent.\n")
+        + "- hu_low should capture the dimmest branch you want to keep, NOT the trunk.\n"
         "- If estimated_hu_gap < 30, set hu_low conservatively low (80-100) because\n"
         "  separation will be difficult regardless.\n"
         "- If estimated_hu_gap > 50, you can afford a higher hu_low for cleaner results.\n"
@@ -621,14 +614,14 @@ def ask_for_coarse_plan(
     is_post_tips: bool,
     stats: dict,
     previews: list[Path],
-    anatomy_context: dict,
+    anatomy_context: dict | None = None,
 ) -> dict:
     """LLM 初始规划：喂入所有检测到的解剖信息。"""
     system = _build_planning_system_prompt()
     prompt = {
         "patient": patient_name,
         "is_post_tips": is_post_tips,
-        "detected_anatomy": anatomy_context,
+        "detected_anatomy": anatomy_context or {},
         "request": _build_planning_request(is_post_tips),
     }
     return client.chat_json(system, json.dumps(prompt, ensure_ascii=True), previews)
@@ -811,7 +804,9 @@ def _build_refine_request(round_num: int, mask_stats: dict, threshold_context: d
         "RULES:\n"
         '- If the result is a clean portal vein tree → set assessment to "ok" and stop.\n'
         '- If there are blobs but they look disconnected → set remove_disconnected_blobs=true.\n'
+        "- Be conservative: removal boxes must be tight and should not cover portal branches.\n"
         "- Only use remove_regions for large unwanted masses that are connected to the portal tree.\n"
+        "- Do not remove the TIPS stent or other bright in-target channel voxels.\n"
         '- Set hu_adjustment to "raise_low" ONLY if you see liver parenchyma fused with branches.\n'
         '- Set hu_adjustment to "lower_low" ONLY if the tree looks incomplete (missing branches).\n'
         f"- Current mask has {mask_stats.get('voxels', 0)} voxels.\n"
@@ -830,24 +825,85 @@ def _ask_llm_refine_stl(client, stl_views, patient_name, is_post_tips,
 
 
 def _apply_llm_removal(mask, vol, refine_result, seed_zyx, spacing_zyx):
-    info = {"regions_removed": 0, "voxels_before": int(mask.sum())}
+    info = {"regions_removed": 0, "voxels_before": int(mask.sum()), "skipped_regions": []}
     if refine_result.get("assessment") == "ok":
         info.update({"action": "no_change", "voxels_after": int(mask.sum())})
         return mask, info
-    mask = mask.copy()
+    original = np.asarray(mask, dtype=bool)
+    mask = original.copy()
+    preserve = _high_hu_preserve_mask(original, vol)
     nz, ny, nx = mask.shape
     for region in refine_result.get("remove_regions", []):
         try:
             zf, yf, xf = region.get("z_frac", [0, 1]), region.get("y_frac", [0, 1]), region.get("x_frac", [0, 1])
-            mask[int(zf[0]*nz):int(zf[1]*nz), int(yf[0]*ny):int(yf[1]*ny), int(xf[0]*nx):int(xf[1]*nx)] = False
+            region_slices = _normalized_region_slices((nz, ny, nx), zf, yf, xf)
+            if region_slices is None:
+                info["skipped_regions"].append({"reason": "invalid_region", "region": region})
+                continue
+            removable = mask[region_slices] & ~preserve[region_slices]
+            remove_voxels = int(removable.sum())
+            if remove_voxels == 0:
+                info["skipped_regions"].append({"reason": "empty_or_preserved", "region": region})
+                continue
+            before = max(1, int(mask.sum()))
+            if remove_voxels / before > MAX_LLM_REGION_REMOVE_FRACTION:
+                info["skipped_regions"].append({
+                    "reason": "region_too_large",
+                    "remove_voxels": remove_voxels,
+                    "fraction": round(remove_voxels / before, 4),
+                    "region": region,
+                })
+                continue
+            if (int(mask.sum()) - remove_voxels) < int(info["voxels_before"] * (1.0 - MAX_LLM_TOTAL_REMOVE_FRACTION)):
+                info["skipped_regions"].append({
+                    "reason": "total_removal_too_large",
+                    "remove_voxels": remove_voxels,
+                    "region": region,
+                })
+                continue
+            region_view = mask[region_slices]
+            region_view[removable] = False
             info["regions_removed"] += 1
+            info.setdefault("region_removed_voxels", 0)
+            info["region_removed_voxels"] += remove_voxels
         except Exception:
+            info["skipped_regions"].append({"reason": "exception", "region": region})
             continue
     if refine_result.get("remove_disconnected_blobs") and seed_zyx is not None and ndi is not None:
-        mask, gi = _region_grow_from_seed(mask, seed_zyx, spacing_zyx, REGION_GROW_BRIDGE_MM, "refine")
-        info["region_grow_after"] = gi
+        cleaned, gi = _region_grow_from_seed(mask, seed_zyx, spacing_zyx, REGION_GROW_BRIDGE_MM, "refine")
+        cleaned = cleaned | preserve
+        keep_fraction = float(int(cleaned.sum()) / max(1, int(mask.sum())))
+        gi["keep_fraction"] = round(keep_fraction, 4)
+        if keep_fraction >= MIN_LLM_CLEANUP_KEEP_FRACTION:
+            mask = cleaned
+            info["region_grow_after"] = gi
+        else:
+            gi["skipped_reason"] = "would_remove_too_much"
+            info["region_grow_after"] = gi
+    mask = mask | preserve
     info.update({"voxels_after": int(mask.sum()), "action": "cleaned"})
     return mask, info
+
+
+def _normalized_region_slices(shape, zf, yf, xf):
+    slices = []
+    for n, frac in zip(shape, (zf, yf, xf)):
+        if not isinstance(frac, (list, tuple)) or len(frac) != 2:
+            return None
+        a, b = sorted((float(frac[0]), float(frac[1])))
+        a, b = max(0.0, min(a, 1.0)), max(0.0, min(b, 1.0))
+        if b - a < 0.01:
+            return None
+        s = max(0, min(n, int(round(a * n))))
+        e = max(s + 1, min(n, int(round(b * n))))
+        slices.append(slice(s, e))
+    return tuple(slices)
+
+
+def _high_hu_preserve_mask(mask, vol):
+    if vol is None or np.shape(vol) != np.shape(mask):
+        return np.zeros_like(mask, dtype=bool)
+    return np.asarray(mask, dtype=bool) & (np.asarray(vol) >= PRESERVE_HIGH_HU_THRESHOLD)
 
 
 def _adjust_threshold_from_llm(plan, refine_result):
@@ -861,7 +917,7 @@ def _adjust_threshold_from_llm(plan, refine_result):
 
 
 # =========================================================================
-# STL 参考、seed、region grow
+# Debug references, seed, region grow
 # =========================================================================
 
 def _tree_mtime(p):
@@ -882,12 +938,9 @@ def _stl_bounds_xyz(path):
     return pts.min(axis=0), pts.max(axis=0)
 
 
-def _reference_crop_from_stl(case, volume, padding=(0.06, 0.05, 0.05)):
-    ref = case.path / "pre.stl"
-    if not ref.exists():
-        return None
+def _stl_bounds_as_normalized_crop(path, volume, padding=(0.0, 0.0, 0.0)):
     try:
-        bmin, bmax = _stl_bounds_xyz(ref)
+        bmin, bmax = _stl_bounds_xyz(path)
     except Exception:
         return None
     sh = np.asarray(volume.volume_hu.shape, dtype=np.float32)
@@ -902,34 +955,47 @@ def _reference_crop_from_stl(case, volume, padding=(0.06, 0.05, 0.05)):
     return {"z": [float(lo[0]), float(hi[0])], "y": [float(lo[1]), float(hi[1])], "x": [float(lo[2]), float(hi[2])]}
 
 
-def _reference_envelope_mask(case, volume, radius_mm=16.0):
+def _reference_crop_from_stl(case, volume, padding=(0.06, 0.05, 0.05), padding_zyx=None):
+    """Debug-only pre.stl crop. Production pretrain must not consume it."""
     ref = case.path / "pre.stl"
-    info = {"enabled": False, "source": None, "radius_mm": float(radius_mm), "voxels": 0}
-    if not ref.exists() or ndi is None:
-        return None, info
-    try:
-        pts = _stl_vertices_xyz(ref)
-    except Exception as e:
-        info["error"] = str(e)
-        return None, info
-    sp = np.asarray(volume.spacing_zyx, dtype=np.float32)
-    og = np.asarray(volume.origin_xyz, dtype=np.float32)
-    sh = np.asarray(volume.volume_hu.shape, dtype=np.int64)
-    idx = np.empty((len(pts), 3), dtype=np.int64)
-    idx[:, 0] = np.rint((pts[:, 2] - og[2]) / sp[0]).astype(np.int64)
-    idx[:, 1] = np.rint((pts[:, 1] - og[1]) / sp[1]).astype(np.int64)
-    idx[:, 2] = np.rint((pts[:, 0] - og[0]) / sp[2]).astype(np.int64)
-    valid = np.all((idx >= 0) & (idx < sh), axis=1)
-    if not np.any(valid):
-        info["error"] = "outside_volume"
-        return None, info
-    env = np.zeros(tuple(int(v) for v in sh), dtype=bool)
-    idx = idx[valid]
-    env[idx[:, 0], idx[:, 1], idx[:, 2]] = True
-    iters = max(1, int(round(radius_mm / float(np.min(sp)))))
-    env = ndi.binary_dilation(env, iterations=iters)
-    info.update({"enabled": True, "source": "pre.stl", "voxels": int(env.sum()), "dilation_iterations": iters})
-    return env, info
+    if not ref.exists():
+        return None
+    if padding_zyx is not None:
+        padding = padding_zyx
+    return _stl_bounds_as_normalized_crop(ref, volume, padding)
+
+
+def _reference_envelope_mask(case, volume, radius_mm=16.0):
+    info = {
+        "enabled": False,
+        "source": None,
+        "radius_mm": float(radius_mm),
+        "voxels": 0,
+        "debug_only": True,
+        "skipped_reason": "pre.stl_not_allowed_as_pretrain_prior",
+    }
+    return None, info
+
+
+def _reference_debug_summary(case, volume):
+    out = {
+        "policy": "pre.stl_and_vessel.stl_are_debug_only_not_pretrain_priors",
+        "pre_stl": None,
+        "vessel_stl": None,
+    }
+    for filename, key in (("pre.stl", "pre_stl"), ("vessel.stl", "vessel_stl")):
+        path = case.path / filename
+        item = {"exists": path.exists(), "path": str(path)}
+        if path.exists():
+            item["mtime"] = path.stat().st_mtime
+            item["bytes"] = int(path.stat().st_size)
+            crop = _stl_bounds_as_normalized_crop(path, volume, padding=(0.0, 0.0, 0.0))
+            item["normalized_bounds_zyx"] = crop
+            seed = _stl_center_seed(path, volume)
+            item["center_seed_zyx"] = list(seed) if seed is not None else None
+            item["inside_volume"] = seed is not None
+        out[key] = item
+    return out
 
 
 def _stl_center_seed(path, volume):
@@ -948,13 +1014,7 @@ def _stl_center_seed(path, volume):
 
 
 def _portal_seed_from_reference(case, volume):
-    for name, src in (("vessel.stl", "vessel.stl"), ("pre.stl", "pre.stl")):
-        p = case.path / name
-        if not p.exists():
-            continue
-        s = _stl_center_seed(p, volume)
-        if s is not None:
-            return s, src
+    """Debug-only compatibility hook. STL references are labels/examples, not priors."""
     return None, None
 
 
@@ -971,6 +1031,52 @@ def _portal_seed_from_plan(plan, volume):
         ), "model_portal_seed"
     except Exception:
         return None, None
+
+
+def _portal_seed_from_volume(volume, plan, spine_center_yx=None):
+    vol = volume.volume_hu
+    if vol.ndim != 3:
+        return None, None, {"enabled": False, "reason": "bad_volume"}
+    nz, ny, nx = vol.shape
+    cs = _crop_slices(vol.shape, plan["crop"])
+    z_slice, y_slice, x_slice = cs
+    roi = vol[cs]
+    vessel = (roi >= max(80.0, float(plan.get("hu_low", 80.0)))) & (roi <= min(380.0, float(plan.get("hu_high", 350.0))))
+    if spine_center_yx:
+        spine_y = int(round(float(spine_center_yx[0]) * ny))
+        y_global = np.arange(y_slice.start, y_slice.stop)
+        anterior = y_global < max(1, spine_y - int(round(5.0 / max(0.1, volume.spacing_zyx[1]))))
+        if anterior.any():
+            vessel = vessel & anterior[None, :, None]
+    info = {"enabled": True, "candidate_voxels": int(vessel.sum()), "source": "dicom_portal_hu_density"}
+    if int(vessel.sum()) < 16:
+        vessel = (roi >= 80.0) & (roi <= 350.0)
+        info["fallback_threshold"] = [80.0, 350.0]
+    if int(vessel.sum()) < 16:
+        info["reason"] = "too_few_candidate_voxels"
+        return None, None, info
+    if ndi is not None:
+        labels, n = ndi.label(vessel)
+        if n > 0:
+            counts = np.bincount(labels.ravel())
+            counts[0] = 0
+            chosen = int(counts.argmax())
+            if counts[chosen] >= 16:
+                vessel = labels == chosen
+                info["largest_component_voxels"] = int(counts[chosen])
+    coords = np.argwhere(vessel)
+    if len(coords) == 0:
+        info["reason"] = "empty_after_component_filter"
+        return None, None, info
+    weights = np.clip(roi[vessel].astype(np.float32) - 70.0, 1.0, 400.0)
+    center = np.average(coords.astype(np.float32), axis=0, weights=weights)
+    seed = (
+        float(center[0] + z_slice.start),
+        float(center[1] + y_slice.start),
+        float(center[2] + x_slice.start),
+    )
+    info["seed_zyx"] = [round(v, 2) for v in seed]
+    return seed, "dicom_portal_hu_density", info
 
 
 def _label_int32(mask: np.ndarray):
@@ -1090,6 +1196,22 @@ def _region_grow_from_seed(mask, seed_zyx, spacing_zyx=(1, 1, 1),
     return result, info
 
 
+def _build_pretrain_mask(
+    vol,
+    plan,
+    is_post_tips,
+    spine_mask,
+    seed_zyx,
+    spacing_zyx,
+    seed_source=None,
+):
+    mask = _segment_once(vol, plan, is_post_tips, spine_mask=spine_mask)
+    mask, grow_info = _region_grow_from_seed(
+        mask, seed_zyx, spacing_zyx, REGION_GROW_BRIDGE_MM, seed_source,
+    )
+    return mask, {"pipeline": "segment_morphology_components_seed_cleanup", "region_grow": grow_info}
+
+
 # =========================================================================
 # 分割核心
 # =========================================================================
@@ -1099,16 +1221,13 @@ def _segment_once(vol, plan, is_post_tips, spine_mask=None):
     if is_post_tips:
         pp = dict(plan)
         pp["hu_high"] = min(380.0, float(plan["hu_high"]))
-        pp["crop"] = _intersect_crop(plan["crop"],
-                                     {"z": [0.20, 0.90], "y": [0.18, 0.82], "x": [0.08, 0.92]})
         portal = _threshold_components(vol, pp, keep=8, max_voxels=target, spine_mask=spine_mask)
         if not bool(plan.get("include_tips", True)):
             return portal
         tp = {
             "hu_low": float(plan.get("tips_hu_low", 430)),
             "hu_high": float(plan.get("tips_hu_high", 3071)),
-            "crop": _intersect_crop(plan["crop"],
-                                    {"z": [0.20, 0.92], "y": [0.18, 0.78], "x": [0.15, 0.85]}),
+            "crop": plan["crop"],
         }
         tips = _threshold_components(vol, tp, keep=4, close_iterations=1,
                                      max_voxels=target // 2, spine_mask=spine_mask)
@@ -1165,17 +1284,17 @@ def _fill_small_holes(mask, max_vox=500):
 def _default_plan(is_post_tips):
     if is_post_tips:
         return {"hu_low": 90.0, "hu_high": 350.0,
-                "crop": {"z": [0.25, 0.88], "y": [0.22, 0.78], "x": [0.10, 0.90]},
+                "crop": {"z": [0.30, 0.88], "y": [0.22, 0.70], "x": [0.15, 0.85]},
                 "notes": "v4 wide capture"}
     return {"hu_low": 100.0, "hu_high": 350.0,
-            "crop": {"z": [0.30, 0.82], "y": [0.25, 0.75], "x": [0.15, 0.85]},
+            "crop": {"z": [0.30, 0.76], "y": [0.28, 0.68], "x": [0.17, 0.83]},
             "notes": "v4 wide capture fallback"}
 
 
 def _sanitize_plan(plan, is_post_tips):
     default = _default_plan(is_post_tips)
     out = dict(default)
-    hu_bounds = (50.0, 380.0) if is_post_tips else (60.0, 380.0)
+    hu_bounds = (80.0, 380.0)
     for key in ("hu_low", "hu_high"):
         try:
             out[key] = float(plan.get(key, default[key]))
@@ -1216,7 +1335,7 @@ def _sanitize_plan(plan, is_post_tips):
     crop["y"][1] = min(crop["y"][1], 0.82)
     out["crop"] = _limit_crop_span(
         crop,
-        {"z": 0.68, "y": 0.58, "x": 0.84} if is_post_tips else {"z": 0.55, "y": 0.52, "x": 0.74},
+        {"z": 0.579, "y": 0.48, "x": 0.70} if is_post_tips else {"z": 0.46, "y": 0.40, "x": 0.66},
     )
     out["notes"] = str(plan.get("notes", default["notes"]))
     return out
@@ -1324,6 +1443,78 @@ def _pretrain_quality_details(mask, stl_bytes, max_voxels=TARGET_VOXELS):
     return ("review" if issues else "ok", issues, stats)
 
 
+def _pretrain_quality(mask, stl_bytes, max_voxels=TARGET_VOXELS):
+    quality, issues, _ = _pretrain_quality_details(mask, stl_bytes, max_voxels)
+    legacy = ["stl_over_20000kb" if item == "stl_over_20mb" else item for item in issues]
+    return quality, legacy
+
+
+def ask_for_cleanup_plan(client, patient_name, is_post_tips, mask_stats, threshold_context, stl_views):
+    system = "You are doing final cleanup planning for a portal vein pretrain mask."
+    prompt = json.dumps({
+        "patient": patient_name,
+        "is_post_tips": is_post_tips,
+        "mask_stats": mask_stats,
+        "threshold_context": threshold_context,
+        "request": "Return JSON with optional portal vein cleanup_seed {z,y,x} normalized to 0-1. Preserve TIPS when present.",
+    })
+    return client.chat_json(system, prompt, stl_views)
+
+
+def _portal_seed_from_cleanup_plan(cleanup_plan, volume):
+    seed = cleanup_plan.get("cleanup_seed") if isinstance(cleanup_plan, dict) else None
+    if not isinstance(seed, dict):
+        return None, None
+    try:
+        sh = np.asarray(volume.volume_hu.shape, dtype=np.float32) - 1.0
+        return (
+            float(max(0, min(1, float(seed["z"]))) * sh[0]),
+            float(max(0, min(1, float(seed["y"]))) * sh[1]),
+            float(max(0, min(1, float(seed["x"]))) * sh[2]),
+        ), "model_cleanup_seed"
+    except Exception:
+        return None, None
+
+
+def _cleanup_mask_by_region_growth(mask, seed_zyx=None, seed_source="explicit"):
+    return _region_grow_from_seed(mask, seed_zyx, (1.0, 1.0, 1.0), 0.0, seed_source)
+
+
+def _should_run_region_growth(_reference_info=None):
+    return True
+
+
+def _filter_components_by_reference_bbox(mask, volume, reference_bounds, max_distance_mm=10.0, min_voxels=64):
+    # Compatibility helper kept for tests/debug; production pretrain no longer calls it.
+    if ndi is None:
+        return mask, {"kept_components": 0, "removed_components": 0, "debug_only": True}
+    labels, n = _label_int32(mask)
+    if n == 0:
+        del labels
+        return mask, {"kept_components": 0, "removed_components": 0, "debug_only": True}
+    bmin, bmax = reference_bounds
+    sp = np.asarray(volume.spacing_zyx, dtype=np.float32)
+    og = np.asarray(volume.origin_xyz, dtype=np.float32)
+    result = np.zeros_like(mask, dtype=bool)
+    kept = removed = 0
+    counts = _count_labels(labels, n)
+    for lb in range(1, n + 1):
+        if counts[lb] < min_voxels:
+            removed += 1
+            continue
+        coords = np.argwhere(labels == lb)
+        c = coords.mean(axis=0)
+        xyz = np.asarray([c[2] * sp[2] + og[0], c[1] * sp[1] + og[1], c[0] * sp[0] + og[2]])
+        delta = np.maximum(np.maximum(bmin - xyz, xyz - bmax), 0.0)
+        if float(np.linalg.norm(delta)) <= max_distance_mm:
+            result |= labels == lb
+            kept += 1
+        else:
+            removed += 1
+    del labels
+    return result, {"kept_components": kept, "removed_components": removed, "debug_only": True}
+
+
 def _evaluate_pretrain_against_label(case, grid_size=96):
     if not case.label_stl.exists() or not case.pretrain_stl.exists():
         return None
@@ -1370,6 +1561,14 @@ def _should_rebuild(case, meta_path, input_mtime):
     return False, "up_to_date"
 
 
+def _should_rebuild_pretrain(case, meta_path, input_mtime):
+    return _should_rebuild(case, meta_path, input_mtime)
+
+
+def _should_skip_existing_pretrain(case, skip_existing_pretrain=False):
+    return bool(skip_existing_pretrain and case.pretrain_stl.exists())
+
+
 # =========================================================================
 # 主流程
 # =========================================================================
@@ -1400,17 +1599,17 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     }
 
     # ================================================================
-    # Step 2: Z 轴标定（椎体逐节检测 + L3 定位）
+    # Step 2: Z 轴标定（横膈膜 + 髂骨）
     # ================================================================
     if standardize_z_range is not None:
         z_start, z_end, z_info = standardize_z_range(
-            vol, dcm.spacing_zyx, spine_mask=spine_mask, margin_mm=20.0,
+            vol, dcm.spacing_zyx, margin_mm=20.0,
         )
     else:
         # fallback
         nz = vol.shape[0]
         z_start, z_end = int(nz * 0.25), int(nz * 0.80)
-        z_info = {"z_start": z_start, "z_end": z_end, "method": "fallback", "vertebrae": []}
+        z_info = {"z_start": z_start, "z_end": z_end, "method": "fallback"}
 
     # ================================================================
     # Step 3: CT 预览图 + LLM 初始规划
@@ -1434,29 +1633,24 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
             client, case.name, case.is_post_tips, stats, previews, anatomy_context,
         )
 
-    # 参考 STL
-    ref_crop = _reference_crop_from_stl(case, dcm)
-    if ref_crop:
-        raw_plan = dict(raw_plan)
-        raw_plan["crop"] = ref_crop
-        raw_plan["notes"] = "pre.stl reference crop"
-
     plan = _sanitize_plan(raw_plan, case.is_post_tips)
-    plan = _apply_z_standardization(plan, z_start, z_end, vol.shape[0], has_ref_crop=bool(ref_crop))
+    plan = _apply_z_standardization(plan, z_start, z_end, vol.shape[0], has_ref_crop=False)
 
     # seed
-    seed_zyx, seed_src = _portal_seed_from_reference(case, dcm)
+    seed_zyx, seed_src = _portal_seed_from_plan(plan, dcm)
+    seed_info = {"source": seed_src, "seed_zyx": list(seed_zyx) if seed_zyx else None}
     if seed_zyx is None:
-        seed_zyx, seed_src = _portal_seed_from_plan(plan, dcm)
+        seed_zyx, seed_src, seed_info = _portal_seed_from_volume(dcm, plan, spine_center)
 
-    # envelope
+    # pre.stl/vessel.stl are debug references only. They must not constrain pretrain.
+    debug_references = _reference_debug_summary(case, dcm)
     envelope, envelope_info = _reference_envelope_mask(case, dcm)
 
     # ================================================================
     # Step 4: 阈值搜索
     # ================================================================
     if search_best_threshold is not None:
-        best_plan, threshold_info = search_best_threshold(
+        best_plan, threshold_info, best_mask = search_best_threshold(
             vol=vol,
             plan=plan,
             spine_mask=spine_mask,
@@ -1465,11 +1659,13 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
             is_post_tips=case.is_post_tips,
             segment_fn=_segment_once,
             region_grow_fn=lambda m, s, sp: _region_grow_from_seed(m, s, sp, REGION_GROW_BRIDGE_MM),
-            reference_envelope=envelope,
+            reference_envelope=None,
+            return_best_mask=True,
         )
         plan = best_plan
     else:
         threshold_info = {"status": "module_unavailable"}
+        best_mask = None
 
     (work_dir / "threshold_search.json").write_text(
         json.dumps(threshold_info, indent=2, default=str), encoding="utf-8",
@@ -1479,20 +1675,13 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     # ================================================================
     # Step 5: 分割 + 区域生长
     # ================================================================
-    mask = _segment_once(vol, plan, case.is_post_tips, spine_mask=spine_mask)
-
-    if envelope is not None:
-        em = mask & envelope
-        envelope_info["applied"] = int(em.sum()) > 0
-        if int(em.sum()) > 0:
-            mask = em
-
-    if not envelope_info.get("applied"):
-        mask, grow_info = _region_grow_from_seed(
-            mask, seed_zyx, dcm.spacing_zyx, REGION_GROW_BRIDGE_MM, seed_src,
-        )
+    if best_mask is not None:
+        mask = best_mask
+        grow_info = {"source": "threshold_search_best_mask", "pipeline": "segment_morphology_components_seed_cleanup"}
     else:
-        grow_info = {"skipped": "envelope_applied"}
+        mask, grow_info = _build_pretrain_mask(
+            vol, plan, case.is_post_tips, spine_mask, seed_zyx, dcm.spacing_zyx, seed_src,
+        )
 
     # ================================================================
     # Step 6: STL 渲染 → LLM 迭代精修
@@ -1526,11 +1715,9 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
 
         if refine_result.get("hu_adjustment", "ok") != "ok":
             current_plan = _adjust_threshold_from_llm(current_plan, refine_result)
-            mask = _segment_once(vol, current_plan, case.is_post_tips, spine_mask=spine_mask)
-            if not envelope_info.get("applied"):
-                mask, _ = _region_grow_from_seed(
-                    mask, seed_zyx, dcm.spacing_zyx, REGION_GROW_BRIDGE_MM, seed_src,
-                )
+            mask, _ = _build_pretrain_mask(
+                vol, current_plan, case.is_post_tips, spine_mask, seed_zyx, dcm.spacing_zyx, seed_src,
+            )
             refine_rounds[-1]["re_segmented"] = True
             refine_rounds[-1]["adjusted_plan"] = current_plan
 
@@ -1556,7 +1743,8 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
         "input_mtime": input_mtime,
         "is_post_tips": bool(case.is_post_tips),
         "pretrain_stl": str(out_path),
-        "reference_stl": str(case.path / "pre.stl") if ref_crop else None,
+        "reference_stl": None,
+        "debug_references": debug_references,
         "plan": current_plan,
         "anatomy_context": anatomy_context,
         "z_standardization": z_info,
@@ -1570,6 +1758,7 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
         },
         "spine_exclusion": spine_info,
         "reference_envelope": envelope_info,
+        "portal_seed": seed_info,
         "initial_region_grow": grow_info,
         "refine_rounds": refine_rounds,
         "pretrain_quality": quality,
@@ -1597,7 +1786,7 @@ def coarse_segment_patient(case, client=None, force=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="v4: anatomy-aware portal vein extraction with vertebra detection + threshold scoring.",
+        description="v4: anatomy-aware portal vein extraction with diaphragm/iliac Z-standardization + threshold scoring.",
     )
     parser.add_argument("--data_root", required=True)
     parser.add_argument("--api_key", default=None)

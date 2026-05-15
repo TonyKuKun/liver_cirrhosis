@@ -75,8 +75,8 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 ## Outputs per patient
 
 - `pretrain.stl`: coarse vessel candidate for visual inspection; empty masks and cases over 20,000KB are flagged for review.
-- `pre.stl`: optional manual coarse reference; when present, preprocessing uses its patient-space bounds to tighten the crop.
-- `vessel.stl`: manual vessel label used by VKAN training and overlap diagnostics.
+- `pre.stl`: optional correct-case example for debugging failed `pretrain.stl`; it is not used as a preprocessing prior.
+- `vessel.stl`: manual vessel label used by VKAN training and overlap diagnostics; it is never used to generate `pretrain.stl`.
 - `vkan_work/coarse_plan.json`: HU range and crop box used.
 - `vkan_work/pretrain_meta.json`: preprocessing version, DICOM input timestamp, QA status, overlap diagnostics, and output statistics.
 - `vkan_work/pretrain_mask.npy`: coarse mask for debugging.
@@ -87,7 +87,7 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 ## Notes
 
 - Coarse preprocessing now uses `patient/dcm/` directly and ignores any existing `.nii.gz` files in the patient folder. Cases marked `pretrain_quality=review` are skipped by training unless `--include_review` is passed.
-- If `pre.stl` is present, it is treated as a spatial hint only. The candidate mask is still extracted from DICOM intensities and written to `pretrain.stl`.
+- `pre.stl` and `vessel.stl` are debug/evaluation references only. Coarse preprocessing must extract `pretrain.stl` from `patient/dcm/` without using those STL files as crop, seed, envelope, or threshold priors.
 - Coarse preprocessing intentionally prioritizes recall. It keeps portal vein, splenic vein, short SMV, LPV/RPV, compensation veins when visible, and TIPS for post-TIPS folders.
 - The refinement model learns a full target occupancy, not a subtraction mask, so it can both delete false positives and fill small false negatives.
 - `grid_size=96` is a practical default. Increase to `128` if GPU memory allows.

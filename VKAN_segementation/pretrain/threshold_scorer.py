@@ -52,6 +52,12 @@ def _count_labels(labels: np.ndarray, n: int) -> np.ndarray:
 
 # 各分支存在性检测的最小体素数
 MIN_BRANCH_VOXELS = 30
+CORONAL_MIN_Z_EXTENT_MM = 35.0
+CORONAL_MIN_X_EXTENT_MM = 35.0
+CORONAL_MAX_TREE_FILL_RATIO = 0.45
+CORONAL_LOW_THRESHOLD_MAX_FILL_RATIO = 0.62
+CORONAL_LOW_THRESHOLD_MAX_MEDIAN_AREA_MM2 = 500.0
+CORONAL_LOW_THRESHOLD_SCORE_MARGIN = 18.0
 
 
 def score_threshold(
@@ -71,6 +77,9 @@ def score_threshold(
     if mask.sum() == 0:
         return 0.0, {**details, "reason": "empty"}
 
+    seed_reliable = seed_zyx is not None and ndi is not None
+    details["unreliable_score"] = not seed_reliable
+
     # === 1. 完整性评分 (0-35) ===
     completeness_score, completeness_info = _score_completeness(
         mask, seed_zyx, spacing_zyx, is_post_tips,
@@ -83,6 +92,12 @@ def score_threshold(
     )
     details["separability"] = separability_info
 
+    # Coronal MIP is usually the clearest view of the portal tree. Keep this
+    # separate from the axial score so threshold search can prefer tree-like
+    # masks instead of tiny, highly connected remnants.
+    coronal_score, coronal_info = _score_coronal_tree(mask, spacing_zyx)
+    details["coronal_tree"] = coronal_info
+
     # === 3. 连通性评分 (0-20) ===
     connectivity_score, connectivity_info = _score_connectivity(mask, seed_zyx)
     details["connectivity"] = connectivity_info
@@ -91,10 +106,15 @@ def score_threshold(
     size_score, size_info = _score_size(mask, target_voxels)
     details["size"] = size_info
 
+    if not seed_reliable:
+        connectivity_score = min(connectivity_score, 5.0)
+        size_score = min(size_score, 8.0)
+
     total = completeness_score + separability_score + connectivity_score + size_score
     details["scores"] = {
         "completeness": round(completeness_score, 2),
         "separability": round(separability_score, 2),
+        "coronal_tree": round(coronal_score, 2),
         "connectivity": round(connectivity_score, 2),
         "size": round(size_score, 2),
         "total": round(total, 2),
@@ -124,7 +144,7 @@ def _score_completeness(
     info: dict = {"branches": {}}
 
     if seed_zyx is None or ndi is None:
-        return 15.0, {**info, "method": "no_seed_default"}
+        return 0.0, {**info, "method": "no_seed_unreliable"}
 
     nz, ny, nx = mask.shape
     sz, sy, sx = int(round(seed_zyx[0])), int(round(seed_zyx[1])), int(round(seed_zyx[2]))
@@ -281,7 +301,7 @@ def _score_separability(
     max_score = 30.0
 
     if seed_zyx is None or ndi is None:
-        return 15.0, {"method": "no_seed_default"}
+        return 0.0, {"method": "no_seed_unreliable"}
 
     nz, ny, nx = mask.shape
     sz = int(round(seed_zyx[0]))
@@ -382,6 +402,70 @@ def _score_separability(
 
     info["score"] = round(base_score, 2)
     return base_score, info
+
+
+# =========================================================================
+# 2b. 冠状面树形：门静脉在冠状 MIP 上应为长而不实心的树状结构
+# =========================================================================
+
+def _score_coronal_tree(
+    mask: np.ndarray,
+    spacing_zyx: tuple[float, float, float],
+) -> tuple[float, dict]:
+    max_score = 20.0
+    info: dict = {}
+
+    if ndi is None:
+        return 0.0, {"method": "no_scipy"}
+
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return 0.0, {"error": "empty"}
+
+    coronal = np.any(mask, axis=1)  # z-x projection, matching coronal MIP logic.
+    labels, n = ndi.label(coronal)
+    if n == 0:
+        return 0.0, {"error": "empty_projection"}
+    counts = np.bincount(labels.ravel())
+    counts[0] = 0
+    main_label = int(counts.argmax())
+    main = labels == main_label
+    coords = np.argwhere(main)
+    if len(coords) == 0:
+        return 0.0, {"error": "empty_main_projection"}
+
+    z_min, x_min = coords.min(axis=0)
+    z_max, x_max = coords.max(axis=0)
+    z_extent_mm = float((z_max - z_min + 1) * spacing_zyx[0])
+    x_extent_mm = float((x_max - x_min + 1) * spacing_zyx[2])
+    bbox_area = max(1, int((z_max - z_min + 1) * (x_max - x_min + 1)))
+    proj_area = int(main.sum())
+    fill_ratio = float(proj_area / bbox_area)
+    main_fraction = float(proj_area / max(1, int(coronal.sum())))
+
+    info.update({
+        "projection_area_px": proj_area,
+        "z_extent_mm": round(z_extent_mm, 1),
+        "x_extent_mm": round(x_extent_mm, 1),
+        "fill_ratio": round(fill_ratio, 4),
+        "main_projection_fraction": round(main_fraction, 4),
+    })
+
+    z_score = min(1.0, z_extent_mm / CORONAL_MIN_Z_EXTENT_MM)
+    x_score = min(1.0, x_extent_mm / CORONAL_MIN_X_EXTENT_MM)
+    if fill_ratio <= 0.12:
+        fill_score = fill_ratio / 0.12
+    elif fill_ratio <= 0.32:
+        fill_score = 1.0
+    elif fill_ratio <= CORONAL_MAX_TREE_FILL_RATIO:
+        fill_score = 1.0 - 0.5 * (fill_ratio - 0.32) / (CORONAL_MAX_TREE_FILL_RATIO - 0.32)
+    else:
+        fill_score = max(0.0, 0.5 - (fill_ratio - CORONAL_MAX_TREE_FILL_RATIO) / 0.25)
+    component_score = min(1.0, main_fraction / 0.65)
+
+    score = max_score * (0.35 * z_score + 0.30 * x_score + 0.25 * fill_score + 0.10 * component_score)
+    info["score"] = round(float(score), 2)
+    return float(score), info
 
 
 # =========================================================================
@@ -510,7 +594,8 @@ def search_best_threshold(
     region_grow_fn=None,
     reference_envelope: np.ndarray | None = None,
     hu_low_candidates: list[float] | None = None,
-) -> tuple[dict, dict]:
+    return_best_mask: bool = False,
+):
     """搜索最佳 hu_low。
 
     参数：
@@ -526,10 +611,7 @@ def search_best_threshold(
     target = TARGET_VOXELS_TIPS if is_post_tips else TARGET_VOXELS
 
     if hu_low_candidates is None:
-        if is_post_tips:
-            hu_low_candidates = [60, 75, 90, 105, 120, 135, 150, 170, 190]
-        else:
-            hu_low_candidates = [75, 90, 105, 120, 135, 150, 165, 180, 195]
+        hu_low_candidates = [80, 90, 100, 110, 120, 135, 150, 170, 190]
         # 加入 plan 中 LLM 建议的值
         llm_low = plan.get("hu_low")
         if llm_low is not None:
@@ -537,6 +619,7 @@ def search_best_threshold(
         hu_low_candidates = sorted(set(float(v) for v in hu_low_candidates))
 
     candidates = []
+    best_mask = None
     for hu_low in hu_low_candidates:
         if hu_low >= float(plan.get("hu_high", 380)) - 20:
             continue
@@ -554,8 +637,9 @@ def search_best_threshold(
                 mask = overlap
 
         # 可选：区域生长
+        grow_info = None
         if region_grow_fn is not None and seed_zyx is not None:
-            mask, _ = region_grow_fn(mask, seed_zyx, spacing_zyx)
+            mask, grow_info = region_grow_fn(mask, seed_zyx, spacing_zyx)
 
         # 打分
         score, details = score_threshold(
@@ -569,27 +653,44 @@ def search_best_threshold(
             "voxels": int(mask.sum()),
             "completeness": details.get("scores", {}).get("completeness", 0),
             "separability": details.get("scores", {}).get("separability", 0),
+            "coronal_tree": details.get("scores", {}).get("coronal_tree", 0),
             "connectivity": details.get("scores", {}).get("connectivity", 0),
             "size": details.get("scores", {}).get("size", 0),
+            "unreliable_score": bool(details.get("unreliable_score", False)),
         }
+        if grow_info:
+            summary["seed_distance_mm"] = grow_info.get("nearest_seed_distance_mm")
+            summary["seed_grow_voxels"] = grow_info.get("output_voxels")
         # 可分离性关键指标
         sep = details.get("separability", {})
         if "max_area_median_mm2" in sep:
             summary["median_area_mm2"] = sep["max_area_median_mm2"]
+        cor = details.get("coronal_tree", {})
+        for k in ("z_extent_mm", "x_extent_mm", "fill_ratio", "projection_area_px", "main_projection_fraction"):
+            if k in cor:
+                summary[f"coronal_{k}"] = cor[k]
         # 连通性关键指标
         conn = details.get("connectivity", {})
         if "main_fraction" in conn:
             summary["main_fraction"] = conn["main_fraction"]
 
+        summary["selection_score"] = round(_threshold_selection_score(summary), 2)
+        summary["coronal_low_threshold_candidate"] = _is_coronal_low_threshold_candidate(summary)
+
         candidates.append(summary)
+        if best_mask is None or summary["selection_score"] > max(c["selection_score"] for c in candidates[:-1]):
+            best_mask = mask.copy()
         del mask, details
         gc.collect()
 
     if not candidates:
-        return plan, {"status": "no_candidates"}
+        result = (plan, {"status": "no_candidates"})
+        return (*result, None) if return_best_mask else result
 
-    # 选最高分
-    best = max(candidates, key=lambda c: c["score"])
+    # Prefer candidates that keep weak branches in coronal MIP without merging
+    # broad liver areas. This guards against high HU thresholds winning only
+    # because the remaining mask is small and connected.
+    best = _select_best_candidate(candidates)
 
     # 如果最高分仍然很低（< 30），说明可能所有阈值都不好
     # 此时保守选择得分最高的
@@ -600,11 +701,109 @@ def search_best_threshold(
         "status": "ok",
         "best_hu_low": best["hu_low"],
         "best_score": best["score"],
+        "best_selection_score": best["selection_score"],
         "best_voxels": best["voxels"],
         "n_candidates": len(candidates),
+        "selection_reason": _threshold_selection_reason(best),
         "candidates": candidates,
     }
+    if return_best_mask:
+        mask = segment_fn(vol, best_plan, is_post_tips, spine_mask)
+        if reference_envelope is not None:
+            overlap = mask & reference_envelope
+            if int(overlap.sum()) > 0:
+                mask = overlap
+        if region_grow_fn is not None and seed_zyx is not None:
+            mask, _ = region_grow_fn(mask, seed_zyx, spacing_zyx)
+        return best_plan, search_info, mask
     return best_plan, search_info
+
+
+def _threshold_selection_score(candidate: dict) -> float:
+    score = float(candidate.get("score", 0.0))
+    hu_low = float(candidate.get("hu_low", 0.0))
+    voxels = float(candidate.get("voxels", 0.0))
+    median_area = float(candidate.get("median_area_mm2", 0.0) or 0.0)
+    main_fraction = float(candidate.get("main_fraction", 0.0) or 0.0)
+    coronal_score = float(candidate.get("coronal_tree", 0.0) or 0.0)
+    coronal_fill = float(candidate.get("coronal_fill_ratio", 0.0) or 0.0)
+    coronal_z = float(candidate.get("coronal_z_extent_mm", 0.0) or 0.0)
+    coronal_x = float(candidate.get("coronal_x_extent_mm", 0.0) or 0.0)
+
+    selection = score + coronal_score * 1.35
+    if candidate.get("unreliable_score"):
+        selection -= 25.0
+    if median_area > 800:
+        selection -= min(25.0, (median_area - 800.0) / 60.0)
+    elif median_area > 450:
+        selection -= min(15.0, (median_area - 450.0) / 70.0)
+    if voxels < 20_000:
+        selection -= min(20.0, (20_000.0 - voxels) / 1000.0)
+    if hu_low > 150 and voxels < 120_000:
+        selection -= min(18.0, (hu_low - 150.0) / 3.0)
+    if coronal_fill > 0.50:
+        selection -= min(30.0, (coronal_fill - 0.50) * 80.0)
+    if coronal_z < CORONAL_MIN_Z_EXTENT_MM or coronal_x < CORONAL_MIN_X_EXTENT_MM:
+        selection -= 12.0
+    if 80 <= hu_low <= 120 and median_area <= 800 and main_fraction >= 0.45:
+        selection += 8.0
+    if 80 <= hu_low <= 135 and coronal_score >= 14.0 and coronal_fill <= CORONAL_MAX_TREE_FILL_RATIO:
+        selection += 10.0
+    return float(selection)
+
+
+def _is_coronal_low_threshold_candidate(candidate: dict) -> bool:
+    hu_low = float(candidate.get("hu_low", 0.0) or 0.0)
+    voxels = float(candidate.get("voxels", 0.0) or 0.0)
+    median_area = float(candidate.get("median_area_mm2", 0.0) or 0.0)
+    coronal_score = float(candidate.get("coronal_tree", 0.0) or 0.0)
+    coronal_fill = float(candidate.get("coronal_fill_ratio", 0.0) or 0.0)
+    coronal_z = float(candidate.get("coronal_z_extent_mm", 0.0) or 0.0)
+    coronal_x = float(candidate.get("coronal_x_extent_mm", 0.0) or 0.0)
+    main_fraction = float(candidate.get("main_fraction", 0.0) or 0.0)
+
+    return (
+        hu_low <= 150.0
+        and voxels >= 20_000.0
+        and median_area <= CORONAL_LOW_THRESHOLD_MAX_MEDIAN_AREA_MM2
+        and coronal_score >= 12.0
+        and 0.10 <= coronal_fill <= CORONAL_LOW_THRESHOLD_MAX_FILL_RATIO
+        and coronal_z >= CORONAL_MIN_Z_EXTENT_MM
+        and coronal_x >= CORONAL_MIN_X_EXTENT_MM
+        and main_fraction >= 0.45
+    )
+
+
+def _select_best_candidate(candidates: list[dict]) -> dict:
+    ranked_best = max(candidates, key=lambda c: (c["selection_score"], -c["hu_low"]))
+    coronal_viable = [c for c in candidates if c.get("coronal_low_threshold_candidate")]
+    if not coronal_viable:
+        return ranked_best
+
+    viable_best = max(coronal_viable, key=lambda c: (c["selection_score"], -c["hu_low"]))
+    if viable_best["selection_score"] < ranked_best["selection_score"] - CORONAL_LOW_THRESHOLD_SCORE_MARGIN:
+        return ranked_best
+
+    close_viable = [
+        c for c in coronal_viable
+        if c["selection_score"] >= viable_best["selection_score"] - 6.0
+    ]
+    return min(close_viable, key=lambda c: (c["hu_low"], -c["selection_score"]))
+
+
+def _threshold_selection_reason(best: dict) -> str:
+    if best.get("unreliable_score"):
+        return "selected_with_unreliable_seed_penalty"
+    if best.get("coronal_low_threshold_candidate") and float(best.get("hu_low", 0.0) or 0.0) <= 150.0:
+        return "coronal_mip_preserved_low_threshold_branches"
+    median_area = best.get("median_area_mm2")
+    if median_area is not None and float(median_area) > 450:
+        return "best_available_despite_possible_liver_merge"
+    if float(best.get("coronal_tree", 0.0) or 0.0) >= 14.0:
+        return "coronal_tree_mip_supported_threshold"
+    if float(best.get("hu_low", 0.0)) <= 120:
+        return "kept_low_threshold_for_weak_enhancement"
+    return "balanced_connectivity_and_separability"
 
 
 # 导出的 target 常量
