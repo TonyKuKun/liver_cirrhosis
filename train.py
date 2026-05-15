@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from sklearn.model_selection import GroupKFold, StratifiedGroupKFold, StratifiedKFold
+from sklearn.model_selection import KFold  # only used as fallback
 
 from dataset import PortalVeinDataset, collate_fn
 from diagnostics import (
@@ -79,106 +79,82 @@ def compute_metrics(preds, labels):
 
 
 # =====================================================================
-# PVP-STRATIFIED SPLITS (the key fix)
+# PVP-BALANCED SPLITS (greedy partition)
 # =====================================================================
-def _pvp_bin_for_subjects(data, n_bins=3):
-    """
-    Assign each SUBJECT a PVP severity bin based on their max PVP.
-
-    Why max? A subject with pre-TIPS PVP=38 and post-TIPS PVP=20 should
-    be in the "high" stratum — the model needs to see PVP=38 in training.
-
-    Returns:
-        subject_bin: dict  {subject_id: int}
-        bin_edges:   list  [lower, upper] cutoff values
-    """
-    # Collect per-subject max PVP
-    subject_max = {}
-    for d in data:
-        sid = subject_id_from_name(d['name'])
-        subject_max[sid] = max(subject_max.get(sid, -np.inf), float(d['label']))
-
-    # Percentile-based bins (equal-frequency)
-    vals = np.array(list(subject_max.values()))
-    pcts = np.linspace(0, 100, n_bins + 1)[1:-1]  # e.g. [33.3, 66.7] for n_bins=3
-    edges = list(np.percentile(vals, pcts))
-
-    def _bin(v):
-        for i, e in enumerate(edges):
-            if v < e:
-                return i
-        return len(edges)
-
-    subject_bin = {sid: _bin(v) for sid, v in subject_max.items()}
-    return subject_bin, edges
-
-
 def make_cv_splits(data, n_folds, seed, split_mode="subject"):
     """
-    PVP-stratified group K-fold.
+    Greedy balanced group K-fold by PVP value.
 
-    Stratification is by PVP severity bin (tertiles), NOT by is_post_tips.
-    This ensures each fold's training AND validation sets contain
-    patients from the full PVP range.
+    Algorithm (like dealing poker):
+      1. Group samples by subject (pre/post TIPS pairs stay together)
+      2. Sort subjects by max PVP, descending
+      3. Deal each subject to the fold with the currently lowest PVP sum
 
-    Subject grouping is preserved (pre/post TIPS pairs stay together).
+    This GUARANTEES each fold gets a mix of high/mid/low PVP subjects.
+    No bin discretization, no StratifiedGroupKFold approximation — just
+    direct numerical balancing.
     """
+    rng = np.random.RandomState(seed)
     indices = np.arange(len(data))
-    groups = np.array([subject_id_from_name(d['name']) for d in data])
 
-    # ── PVP-stratified labels ─────────────────────────────
-    subject_bin, bin_edges = _pvp_bin_for_subjects(data, n_bins=3)
-    strat_y = np.array([subject_bin[subject_id_from_name(d['name'])] for d in data])
+    # ── Group samples by subject ──────────────────────────
+    subject_samples = {}  # sid → [sample_indices]
+    subject_max_pvp = {}  # sid → max PVP
+    for i, d in enumerate(data):
+        sid = subject_id_from_name(d['name'])
+        subject_samples.setdefault(sid, []).append(i)
+        subject_max_pvp[sid] = max(subject_max_pvp.get(sid, -np.inf), float(d['label']))
 
-    n_unique_groups = len(set(groups))
-    min_class = min(np.bincount(strat_y))
+    subjects = sorted(subject_samples.keys())
+    n_subjects = len(subjects)
+    if n_subjects < n_folds:
+        raise RuntimeError(f"Need ≥{n_folds} subjects, have {n_subjects}")
 
-    if split_mode == "subject":
-        if n_unique_groups < n_folds:
-            raise RuntimeError(f"Need ≥{n_folds} subject groups, have {n_unique_groups}")
+    # ── Sort by max PVP descending, with tie-breaking shuffle ──
+    # Shuffle first so equal-PVP subjects get random order
+    rng.shuffle(subjects)
+    subjects.sort(key=lambda s: -subject_max_pvp[s])
 
-        if min_class >= n_folds:
-            splitter = StratifiedGroupKFold(
-                n_splits=n_folds, shuffle=True, random_state=seed)
-            split_iter = splitter.split(indices, strat_y, groups)
-            method = "StratifiedGroupKFold(PVP_tertile)"
-        else:
-            splitter = GroupKFold(n_splits=n_folds)
-            split_iter = splitter.split(indices, strat_y, groups)
-            method = "GroupKFold(fallback)"
+    # ── Greedy deal: assign each subject to the fold with lowest PVP sum ──
+    fold_pvp_sum = np.zeros(n_folds)
+    fold_assignment = {}  # sid → fold_idx
 
-        splits = list(split_iter)
-        return splits, {
-            "split_mode": split_mode,
-            "method": method,
-            "stratify_by": "PVP_tertile",
-            "bin_edges": [float(e) for e in bin_edges],
-            "n_subjects": int(n_unique_groups),
-            "post_tips": int(sum(1 for d in data if d['is_post_tips'])),
-            "pre_tips": int(sum(1 for d in data if not d['is_post_tips'])),
-        }
+    for sid in subjects:
+        # Pick the fold with the lowest total PVP so far
+        target_fold = int(np.argmin(fold_pvp_sum))
+        fold_assignment[sid] = target_fold
+        fold_pvp_sum[target_fold] += subject_max_pvp[sid]
 
-    if split_mode == "sample":
-        if min_class >= n_folds:
-            splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
-            split_iter = splitter.split(indices, strat_y)
-            method = "StratifiedKFold(PVP_tertile)"
-        else:
-            from sklearn.model_selection import KFold
-            splitter = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
-            split_iter = splitter.split(indices)
-            method = "KFold(fallback)"
-        splits = list(split_iter)
-        return splits, {
-            "split_mode": split_mode,
-            "method": method,
-            "stratify_by": "PVP_tertile",
-            "bin_edges": [float(e) for e in bin_edges],
-            "post_tips": int(sum(1 for d in data if d['is_post_tips'])),
-            "pre_tips": int(sum(1 for d in data if not d['is_post_tips'])),
-        }
+    # ── Build (train_idx, val_idx) pairs ──────────────────
+    splits = []
+    for fi in range(n_folds):
+        val_sids = {s for s, f in fold_assignment.items() if f == fi}
+        val_idx = np.array([i for i in indices
+                            if subject_id_from_name(data[i]['name']) in val_sids])
+        train_idx = np.array([i for i in indices if i not in set(val_idx)])
+        splits.append((train_idx, val_idx))
 
-    raise ValueError("--split_mode must be 'subject' or 'sample'")
+    # ── Summary info ──────────────────────────────────────
+    labels = np.array([float(d['label']) for d in data])
+    fold_stats = []
+    for fi, (tr, va) in enumerate(splits):
+        fold_stats.append({
+            'fold': fi,
+            'val_mean_pvp': float(labels[va].mean()),
+            'val_std_pvp':  float(labels[va].std()),
+            'val_min':      float(labels[va].min()),
+            'val_max':      float(labels[va].max()),
+        })
+
+    return splits, {
+        "split_mode": split_mode,
+        "method": "GreedyBalancedGroupKFold(PVP)",
+        "n_subjects": n_subjects,
+        "n_folds": n_folds,
+        "post_tips": int(sum(1 for d in data if d['is_post_tips'])),
+        "pre_tips":  int(sum(1 for d in data if not d['is_post_tips'])),
+        "fold_stats": fold_stats,
+    }
 
 
 def _print_fold_pvp_distribution(data, splits, label='PVP'):

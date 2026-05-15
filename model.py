@@ -818,7 +818,7 @@ class PhysicsInformedLoss(nn.Module):
         L_mono_s   = _safe(L_mono)
         L_residual_s = _safe(L_residual)
 
-        L_total = (5 * L_main_s
+        L_total = (10 * L_main_s
                    + self.lambda_murray * L_murray_s
                    + self.lambda_press  * L_press_s
                    + self.lambda_smooth * L_smooth_s
