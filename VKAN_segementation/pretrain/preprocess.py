@@ -31,7 +31,7 @@ except ImportError:
 
 try:
     from ..utils.common import DicomVolume, GemmaClient, discover_patients, mask_to_stl, stl_to_voxels
-except ImportError:
+except (ImportError, ValueError):
     try:
         from VKAN_segementation.utils.common import DicomVolume, GemmaClient, discover_patients, mask_to_stl, stl_to_voxels
     except ImportError:
@@ -91,6 +91,7 @@ EXCLUSION_NAMES = ("bone_all", "spleen", "kidney_left", "kidney_right", "inferio
 STRUCTURE_ALIASES = {
     "portal_vein": ("portal_vein", "portal_vein_and_splenic_vein"),
 }
+MaskCache = dict
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,283 @@ def _load_nifti_as_dicomvolume(path: Path) -> DicomVolume:
 
 
 # =========================================================================
+# Precomputed TotalSegmentator NIfTI helpers
+# =========================================================================
+
+def _pretrain_nii_path(case) -> Path:
+    return case.path / PRETRAIN_NII_NAME
+
+
+def _segmentation_nii_dirs(case) -> list[Path]:
+    seg_dir = case.path / "segmentation"
+    dirs = [seg_dir / "totalseg_output", seg_dir / "ts_raw", seg_dir]
+    unique: list[Path] = []
+    for path in dirs:
+        if path not in unique:
+            unique.append(path)
+    return unique
+
+
+def _resample_bool_mask(mask: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray | None:
+    if mask.shape == target_shape:
+        return mask.astype(bool, copy=False)
+    if ndi is None:
+        return None
+    zoom = np.asarray(target_shape, dtype=np.float64) / np.asarray(mask.shape, dtype=np.float64)
+    try:
+        return ndi.zoom(mask.astype(np.float32), zoom, order=0) > 0.5
+    except Exception:
+        return None
+
+
+def _load_mask_nii(
+    path: Path,
+    target_shape: tuple[int, int, int] | None = None,
+    cache: MaskCache | None = None,
+) -> np.ndarray | None:
+    cache_key = ("path", str(path), target_shape)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    try:
+        data, _, _, _ = _load_nifti(path)
+    except Exception:
+        if cache is not None:
+            cache[cache_key] = None
+        return None
+    mask = np.asarray(data) > 0
+    if target_shape is not None:
+        mask = _resample_bool_mask(mask, target_shape)
+    if cache is not None:
+        cache[cache_key] = mask
+    return mask
+
+
+def _structure_candidate_paths(case, name: str) -> list[Path]:
+    aliases = STRUCTURE_ALIASES.get(name, (name,))
+    paths: list[Path] = []
+    for directory in _segmentation_nii_dirs(case):
+        for alias in aliases:
+            paths.append(directory / f"{alias}.nii.gz")
+    return paths
+
+
+def _load_precomputed_structure_mask(
+    case,
+    name: str,
+    target_shape: tuple[int, int, int],
+    cache: MaskCache | None = None,
+) -> tuple[np.ndarray | None, dict]:
+    """Load a structure mask directly from precomputed .nii.gz files."""
+    info: dict = {"structure": name, "source": "precomputed_nii", "loaded": []}
+    cache_key = ("structure", f"{case.path}:{name}", target_shape)
+    if cache is not None and cache_key in cache:
+        cached = cache[cache_key]
+        status = "ok" if cached is not None else "missing"
+        voxels = int(cached.sum()) if cached is not None else 0
+        return cached, {"structure": name, "source": "cache", "status": status, "voxels": voxels, "loaded": []}
+
+    if name == "bone_all":
+        combined: np.ndarray | None = None
+        for directory in _segmentation_nii_dirs(case):
+            loaded_here = []
+            for bone_name in BONE_NAMES:
+                path = directory / f"{bone_name}.nii.gz"
+                if not path.exists():
+                    continue
+                part = _load_mask_nii(path, target_shape, cache)
+                if part is None:
+                    continue
+                combined = part.copy() if combined is None else (combined | part)
+                loaded_here.append(path.name)
+            if loaded_here:
+                info["loaded"].extend(str(directory / file_name) for file_name in loaded_here)
+                info["status"] = "ok"
+                info["voxels"] = int(combined.sum()) if combined is not None else 0
+                if cache is not None:
+                    cache[cache_key] = combined
+                return combined, info
+
+        for path in _structure_candidate_paths(case, "bone_all"):
+            if not path.exists():
+                continue
+            mask = _load_mask_nii(path, target_shape, cache)
+            if mask is not None:
+                info.update({"status": "ok", "loaded": [str(path)], "voxels": int(mask.sum())})
+                if cache is not None:
+                    cache[cache_key] = mask
+                return mask, info
+        if cache is not None:
+            cache[cache_key] = None
+        return None, {"status": "missing", "structure": name, "source": "precomputed_nii"}
+
+    for path in _structure_candidate_paths(case, name):
+        if not path.exists():
+            continue
+        mask = _load_mask_nii(path, target_shape, cache)
+        if mask is not None:
+            info.update({"status": "ok", "loaded": [str(path)], "voxels": int(mask.sum())})
+            if cache is not None:
+                cache[cache_key] = mask
+            return mask, info
+
+    if cache is not None:
+        cache[cache_key] = None
+    return None, {"status": "missing", "structure": name, "source": "precomputed_nii"}
+
+
+def _get_portal_vein_mask_fast(
+    case,
+    vol_shape: tuple[int, int, int],
+    cache: MaskCache | None = None,
+) -> tuple[np.ndarray | None, dict]:
+    return _load_precomputed_structure_mask(case, "portal_vein", vol_shape, cache)
+
+
+def _get_portal_seed_fast(
+    case,
+    vol_shape: tuple[int, int, int],
+    cache: MaskCache | None = None,
+) -> tuple[tuple[float, float, float] | None, dict]:
+    mask, info = _get_portal_vein_mask_fast(case, vol_shape, cache)
+    if mask is None or mask.sum() == 0:
+        return None, info
+    coords = np.argwhere(mask)
+    seed = tuple(float(v) for v in coords.mean(axis=0))
+    info = dict(info)
+    info.update({"status": "ok", "seed_zyx": [round(v, 1) for v in seed]})
+    return seed, info
+
+
+def _get_exclusion_mask_fast(
+    case,
+    vol_shape: tuple[int, int, int],
+    dilate_bone: int = 3,
+    dilate_organ: int = 2,
+    cache: MaskCache | None = None,
+) -> tuple[np.ndarray, dict]:
+    exclusion = np.zeros(vol_shape, dtype=bool)
+    info: dict = {"source": "precomputed_nii", "loaded": []}
+
+    for name in EXCLUSION_NAMES:
+        mask, mask_info = _load_precomputed_structure_mask(case, name, vol_shape, cache)
+        if mask is None:
+            continue
+        dilate = dilate_bone if name == "bone_all" else dilate_organ
+        if ndi is not None and dilate > 0:
+            mask = ndi.binary_dilation(mask, iterations=dilate)
+        exclusion |= mask
+        info["loaded"].append({"name": name, "files": mask_info.get("loaded", [])})
+
+    info["total_excluded_voxels"] = int(exclusion.sum())
+    info["status"] = "ok" if info["loaded"] else "empty"
+    return exclusion, info
+
+
+def _z_range_from_precomputed_bone_nii(
+    case,
+    vol_shape: tuple[int, int, int],
+    spacing_zyx: tuple[float, float, float],
+    margin_mm: float,
+    cache: MaskCache | None = None,
+) -> tuple[int | None, int | None, dict]:
+    """Use individual bone .nii.gz files to infer the z ROI without building STL."""
+    nz = vol_shape[0]
+    z_has = np.zeros(nz, dtype=bool)
+    x_min = np.full(nz, vol_shape[2], dtype=np.int32)
+    x_max = np.full(nz, -1, dtype=np.int32)
+    loaded: list[str] = []
+
+    for directory in _segmentation_nii_dirs(case):
+        loaded_before = len(loaded)
+        for bone_name in BONE_NAMES:
+            path = directory / f"{bone_name}.nii.gz"
+            if not path.exists():
+                continue
+            mask = _load_mask_nii(path, vol_shape, cache)
+            if mask is None or not mask.any():
+                continue
+            loaded.append(str(path))
+            z_has |= np.any(mask, axis=(1, 2))
+            zx = np.any(mask, axis=1)
+            z_idx, x_idx = np.where(zx)
+            if len(z_idx):
+                np.minimum.at(x_min, z_idx, x_idx)
+                np.maximum.at(x_max, z_idx, x_idx)
+        if len(loaded) > loaded_before:
+            break
+
+    if not loaded:
+        combined, combined_info = _load_precomputed_structure_mask(case, "bone_all", vol_shape, cache)
+        if combined is None or not combined.any():
+            return None, None, {"status": "no_precomputed_bone_nii", **combined_info}
+        loaded = list(combined_info.get("loaded", []))
+        z_has = np.any(combined, axis=(1, 2))
+        zx = np.any(combined, axis=1)
+        z_idx, x_idx = np.where(zx)
+        if len(z_idx):
+            np.minimum.at(x_min, z_idx, x_idx)
+            np.maximum.at(x_max, z_idx, x_idx)
+
+    if not z_has.any():
+        return None, None, {"status": "empty_bone", "loaded": loaded}
+
+    dz = float(spacing_zyx[0])
+    margin = max(1, int(round(margin_mm / max(0.1, dz))))
+    bone_z = np.where(z_has)[0]
+    z_start = max(0, int(bone_z.min()) - margin)
+    z_end = min(nz - 1, int(bone_z.max()) + margin)
+
+    for z in range(int(bone_z.max()), int(bone_z.min()), -1):
+        if x_max[z] < x_min[z]:
+            continue
+        width_mm = float((x_max[z] - x_min[z]) * spacing_zyx[2])
+        if width_mm > 90.0:
+            z_end = max(z_start + 1, z - margin)
+            break
+
+    return z_start, z_end, {
+        "status": "ok",
+        "source": "precomputed_bone_nii",
+        "loaded_count": len(loaded),
+        "loaded_examples": loaded[:5],
+        "z_start": z_start,
+        "z_end": z_end,
+        "z_range_mm": round(float((z_end - z_start) * dz), 1),
+    }
+
+
+def _precomputed_segmentation_mtime(case) -> float:
+    latest = 0.0
+    seg_dir = case.path / "segmentation"
+    paths = list(seg_dir.glob("*.nii.gz")) if seg_dir.exists() else []
+    for directory in (seg_dir / "totalseg_output", seg_dir / "ts_raw"):
+        if directory.exists():
+            paths.extend(directory.glob("*.nii.gz"))
+    for path in paths:
+        try:
+            latest = max(latest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return latest
+
+
+def _save_pretrain_nifti(mask: np.ndarray, reference_nii: Path, out_path: Path) -> Path:
+    import nibabel as nib
+
+    ref = nib.load(str(reference_nii))
+    data = mask.astype(np.uint8)
+    if data.shape != ref.shape and len(ref.shape) == 3:
+        zyx_shape = (ref.shape[2], ref.shape[1], ref.shape[0])
+        if data.shape == zyx_shape:
+            data = np.transpose(data, (2, 1, 0))
+    header = ref.header.copy()
+    header.set_data_dtype(np.uint8)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(nib.Nifti1Image(data, ref.affine, header), str(out_path))
+    return out_path
+
+
+# =========================================================================
 # Step 1: Z 轴标定（从 bone 分割）
 # =========================================================================
 
@@ -147,6 +425,7 @@ def _standardize_z_from_bone(
     vol_shape: tuple[int, int, int],
     spacing_zyx: tuple[float, float, float],
     margin_mm: float = 20.0,
+    cache: MaskCache | None = None,
 ) -> tuple[int, int, dict]:
     """用 TotalSegmentator 的 bone 分割做 Z 轴标定。
 
@@ -155,6 +434,10 @@ def _standardize_z_from_bone(
 
     如果 bone 分割不可用，退化为 volume 的 20%-82%。
     """
+    z_start, z_end, info = _z_range_from_precomputed_bone_nii(case, vol_shape, spacing_zyx, margin_mm, cache)
+    if z_start is not None and z_end is not None:
+        return z_start, z_end, info
+
     if get_z_range_from_bone is not None:
         z_start, z_end, info = get_z_range_from_bone(case, vol_shape, spacing_zyx, margin_mm)
         if z_start is not None and z_end is not None:
@@ -176,6 +459,7 @@ def _sample_hu_from_portal_vein(
     case,
     vol_shape: tuple[int, int, int],
     hu_margin: float = HU_MARGIN,
+    cache: MaskCache | None = None,
 ) -> tuple[float, float, dict]:
     """从 TotalSegmentator 的门静脉 mask 中采样 HU 值。
 
@@ -190,10 +474,14 @@ def _sample_hu_from_portal_vein(
     """
     info: dict = {}
 
-    if get_portal_vein_mask is None:
-        return 100.0, 350.0, {"status": "module_unavailable"}
+    pv_mask, pv_info = _get_portal_vein_mask_fast(case, vol_shape, cache)
+    info.update(pv_info)
+    if (pv_mask is None or pv_mask.sum() == 0) and get_portal_vein_mask is not None:
+        pv_mask = get_portal_vein_mask(case, vol_shape)
+        info["source"] = "totalseg_module"
+    elif pv_mask is not None:
+        info["source"] = "precomputed_nii"
 
-    pv_mask = get_portal_vein_mask(case, vol_shape)
     if pv_mask is None or pv_mask.sum() == 0:
         info["status"] = "no_portal_vein_mask"
         return 100.0, 350.0, info
@@ -260,16 +548,24 @@ def _subtract_organs(
     vol_shape: tuple[int, int, int],
     dilate_bone: int = 3,
     dilate_organ: int = 2,
+    cache: MaskCache | None = None,
 ) -> tuple[np.ndarray, dict]:
     """减去 bone/spleen/liver/kidney/IVC/aorta 的区域。"""
-    if get_exclusion_mask is None:
-        return mask, {"status": "module_unavailable"}
-
-    exclusion, excl_info = get_exclusion_mask(
+    exclusion, excl_info = _get_exclusion_mask_fast(
         case, vol_shape,
         dilate_bone=dilate_bone,
         dilate_organ=dilate_organ,
+        cache=cache,
     )
+    if not excl_info.get("loaded") and get_exclusion_mask is not None:
+        exclusion, excl_info = get_exclusion_mask(
+            case, vol_shape,
+            dilate_bone=dilate_bone,
+            dilate_organ=dilate_organ,
+        )
+        excl_info["source"] = "totalseg_module"
+    elif not excl_info.get("loaded"):
+        return mask, {"status": "module_unavailable"}
 
     before = int(mask.sum())
     mask = mask & ~exclusion
@@ -296,14 +592,10 @@ def _morphological_cleanup(mask: np.ndarray) -> np.ndarray:
     if holes.sum() > 0:
         hl = np.empty(holes.shape, dtype=np.int32)
         nh = ndi.label(holes, output=hl)
-        # 逐层 bincount
-        counts = np.zeros(nh + 1, dtype=np.int64)
-        for z in range(hl.shape[0]):
-            c = np.bincount(hl[z].ravel(), minlength=nh + 1)
-            counts[:len(c)] += c
-        for i in range(1, nh + 1):
-            if counts[i] <= 500:
-                mask = mask | (hl == i)
+        counts = np.bincount(hl.ravel(), minlength=nh + 1)
+        fill_labels = np.flatnonzero((counts <= 500) & (np.arange(nh + 1) > 0))
+        if len(fill_labels):
+            mask = mask | np.isin(hl, fill_labels)
         del hl
     del holes
     return mask
@@ -352,26 +644,14 @@ def _region_grow_from_seed(
     bv = max(1, int(round(bridge_mm / float(np.min(sp)))))
     bz = ndi.binary_dilation(mc, iterations=bv)
 
-    # 逐层 bincount
-    counts = np.zeros(n + 1, dtype=np.int64)
-    for zz in range(labels.shape[0]):
-        c = np.bincount(labels[zz].ravel(), minlength=n + 1)
-        counts[:len(c)] += c
+    counts = np.bincount(labels.ravel(), minlength=n + 1)
 
-    bridged = {ml}
-    for lb in range(1, n + 1):
-        if lb == ml or counts[lb] < 32:
-            continue
-        # 逐层检查重叠
-        for zz in range(labels.shape[0]):
-            if np.any((labels[zz] == lb) & bz[zz]):
-                bridged.add(lb)
-                break
+    bridge_labels = np.unique(labels[bz])
+    bridged = set(int(lb) for lb in bridge_labels if lb > 0 and counts[int(lb)] >= 32)
+    bridged.add(ml)
     del bz
 
-    result = np.zeros(mask.shape, dtype=bool)
-    for lb in bridged:
-        result |= (labels == lb)
+    result = np.isin(labels, list(bridged))
     del labels
 
     info.update({
@@ -407,52 +687,34 @@ def _region_grow_from_portal_mask(
         info.update({"output_voxels": int(mask.sum()), "components": n})
         return mask, info
 
-    # 找与 portal_mask 重叠的所有 label
-    portal_labels_hit = set()
-    for z in range(labels.shape[0]):
-        if not portal_mask[z].any():
-            continue
-        overlap = labels[z][portal_mask[z]]
-        portal_labels_hit.update(int(v) for v in overlap if v > 0)
+    portal_labels = np.unique(labels[portal_mask])
+    portal_labels_hit = set(int(v) for v in portal_labels if v > 0)
 
+    counts = np.bincount(labels.ravel(), minlength=n + 1)
     if not portal_labels_hit:
         # portal_mask 没有和任何前景重叠 → 退化为保留最大连通域
-        counts = np.zeros(n + 1, dtype=np.int64)
-        for z in range(labels.shape[0]):
-            c = np.bincount(labels[z].ravel(), minlength=n + 1)
-            counts[:len(c)] += c
         counts[0] = 0
         portal_labels_hit = {int(np.argmax(counts))}
         info["fallback"] = "largest_component"
 
     # 合并所有命中的 label 为主区域
-    main_region = np.zeros(mask.shape, dtype=bool)
-    for lb in portal_labels_hit:
-        main_region |= (labels == lb)
+    main_region = np.isin(labels, list(portal_labels_hit))
 
     # 桥接：膨胀主区域，检查哪些其他连通域能桥接到
     sp = np.asarray(spacing_zyx, dtype=np.float32)
     bv = max(1, int(round(bridge_mm / float(np.min(sp)))))
     bridge_zone = ndi.binary_dilation(main_region, iterations=bv)
 
-    counts = np.zeros(n + 1, dtype=np.int64)
-    for z in range(labels.shape[0]):
-        c = np.bincount(labels[z].ravel(), minlength=n + 1)
-        counts[:len(c)] += c
-
-    all_keep = set(portal_labels_hit)
-    for lb in range(1, n + 1):
-        if lb in all_keep or counts[lb] < 32:
-            continue
-        for zz in range(labels.shape[0]):
-            if np.any((labels[zz] == lb) & bridge_zone[zz]):
-                all_keep.add(lb)
-                break
+    bridge_labels = np.unique(labels[bridge_zone])
+    all_keep = {
+        int(lb)
+        for lb in bridge_labels
+        if lb > 0 and (int(lb) in portal_labels_hit or counts[int(lb)] >= 32)
+    }
+    all_keep.update(portal_labels_hit)
     del bridge_zone
 
-    result = np.zeros(mask.shape, dtype=bool)
-    for lb in all_keep:
-        result |= (labels == lb)
+    result = np.isin(labels, list(all_keep))
     del labels
 
     info.update({
@@ -495,10 +757,7 @@ def _add_tips_stent(
         lb = np.empty(tips_mask.shape, dtype=np.int32)
         n = ndi.label(tips_mask, output=lb)
         if n > 0:
-            counts = np.zeros(n + 1, dtype=np.int64)
-            for z in range(lb.shape[0]):
-                c = np.bincount(lb[z].ravel(), minlength=n + 1)
-                counts[:len(c)] += c
+            counts = np.bincount(lb.ravel(), minlength=n + 1)
             counts[0] = 0
             keep = [i for i in np.argsort(counts)[::-1][:4] if counts[i] >= 32]
             tips_clean = np.zeros(tips_mask.shape, dtype=bool)
@@ -535,10 +794,7 @@ def _pretrain_quality(mask: np.ndarray, stl_bytes: int, max_voxels: int) -> tupl
     if ndi is not None and voxels > 0:
         lb = np.empty(mask.shape, dtype=np.int32)
         n = ndi.label(mask, output=lb)
-        counts = np.zeros(n + 1, dtype=np.int64)
-        for z in range(lb.shape[0]):
-            c = np.bincount(lb[z].ravel(), minlength=n + 1)
-            counts[:len(c)] += c
+        counts = np.bincount(lb.ravel(), minlength=n + 1)
         cc = int(np.count_nonzero(counts[1:] >= 64))
         stats["components"] = cc
         if cc > 16:
@@ -594,6 +850,8 @@ def _tree_mtime(p):
 
 def _should_rebuild(case, meta_path, input_mtime):
     meta_path = Path(meta_path)
+    if not _pretrain_nii_path(case).exists():
+        return True, "missing_nii"
     if not case.pretrain_stl.exists():
         return True, "missing_stl"
     if not meta_path.exists():
@@ -623,7 +881,7 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     if not orig_path.exists():
         raise FileNotFoundError(f"orig.nii.gz not found: {orig_path}")
 
-    input_mtime = orig_path.stat().st_mtime
+    input_mtime = max(orig_path.stat().st_mtime, _precomputed_segmentation_mtime(case))
     if not force:
         ok, reason = _should_rebuild(case, meta_path, input_mtime)
         if not ok:
@@ -635,19 +893,20 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     vol = dcm.volume_hu
     vol_shape = vol.shape
     nz = vol_shape[0]
+    mask_cache: MaskCache = {}
 
     print(f"    volume: {vol_shape}, spacing: {[round(s,2) for s in dcm.spacing_zyx]}mm")
 
     # ==============================================================
     # Step 1: Z 轴标定（从 bone）
     # ==============================================================
-    z_start, z_end, z_info = _standardize_z_from_bone(case, vol_shape, dcm.spacing_zyx)
+    z_start, z_end, z_info = _standardize_z_from_bone(case, vol_shape, dcm.spacing_zyx, cache=mask_cache)
     print(f"    Z range: [{z_start}, {z_end}] ({z_info.get('z_range_mm', '?')}mm)")
 
     # ==============================================================
     # Step 2: 从门静脉分割采样 HU
     # ==============================================================
-    hu_low, hu_high, hu_info = _sample_hu_from_portal_vein(vol, case, vol_shape)
+    hu_low, hu_high, hu_info = _sample_hu_from_portal_vein(vol, case, vol_shape, cache=mask_cache)
     print(f"    HU from portal vein: [{hu_low:.1f}, {hu_high:.1f}] (p50={hu_info.get('p50', '?')})")
 
     # ==============================================================
@@ -659,7 +918,7 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     # ==============================================================
     # Step 4: 减去 bone/spleen/liver/kidney/IVC/aorta
     # ==============================================================
-    mask, excl_info = _subtract_organs(mask, case, vol_shape)
+    mask, excl_info = _subtract_organs(mask, case, vol_shape, cache=mask_cache)
     print(f"    after organ subtraction: {int(mask.sum())} voxels "
           f"(removed {excl_info.get('voxels_removed', 0)})")
 
@@ -675,19 +934,25 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     tips_info: dict = {"is_post_tips": bool(case.is_post_tips)}
     if case.is_post_tips:
         # 加载排除 mask 用于 TIPS（避免骨骼被当成支架）
-        if get_exclusion_mask is not None:
-            excl_mask, _ = get_exclusion_mask(case, vol_shape, dilate_bone=2, dilate_organ=0)
-        else:
-            excl_mask = None
+        excl_mask, tips_excl_info = _get_exclusion_mask_fast(
+            case, vol_shape, dilate_bone=2, dilate_organ=0, cache=mask_cache
+        )
+        if not tips_excl_info.get("loaded") and get_exclusion_mask is not None:
+            excl_mask, tips_excl_info = get_exclusion_mask(case, vol_shape, dilate_bone=2, dilate_organ=0)
+            tips_excl_info["source"] = "totalseg_module"
         mask, tips_info = _add_tips_stent(mask, vol, z_start, z_end,
                                            exclusion_mask=excl_mask)
+        tips_info["exclusion"] = tips_excl_info
         del excl_mask
         print(f"    after TIPS: {int(mask.sum())} voxels (tips={tips_info.get('tips_voxels', 0)})")
 
     # ==============================================================
     # Step 7: 区域生长（从门静脉 mask 或 seed 点）
     # ==============================================================
-    portal_mask = get_portal_vein_mask(case, vol_shape) if get_portal_vein_mask else None
+    portal_mask, portal_mask_info = _get_portal_vein_mask_fast(case, vol_shape, mask_cache)
+    if (portal_mask is None or portal_mask.sum() == 0) and get_portal_vein_mask:
+        portal_mask = get_portal_vein_mask(case, vol_shape)
+        portal_mask_info = {"source": "totalseg_module"}
 
     if portal_mask is not None and portal_mask.sum() > 0:
         # 优先用门静脉 mask 做区域生长（比单点更稳健）
@@ -695,15 +960,17 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
             mask, portal_mask, dcm.spacing_zyx, REGION_GROW_BRIDGE_MM,
         )
         grow_info["method"] = "portal_mask"
+        grow_info["portal_mask"] = portal_mask_info
         del portal_mask
     else:
         # 退化为单点 seed
-        seed_zyx = None
-        if get_portal_seed is not None:
+        seed_zyx, seed_info = _get_portal_seed_fast(case, vol_shape, mask_cache)
+        if seed_zyx is None and get_portal_seed is not None:
             seed_zyx, seed_info = get_portal_seed(case, dcm.spacing_zyx, dcm.origin_xyz)
         if seed_zyx is not None:
             mask, grow_info = _region_grow_from_seed(mask, seed_zyx, dcm.spacing_zyx)
             grow_info["method"] = "portal_seed"
+            grow_info["seed"] = seed_info
         else:
             grow_info = {"method": "none", "reason": "no_portal_reference"}
 
@@ -714,6 +981,7 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     # Step 8: 输出
     # ==============================================================
     np.save(work_dir / "pretrain_mask.npy", mask.astype(np.uint8))
+    nii_path = _save_pretrain_nifti(mask, orig_path, _pretrain_nii_path(case))
     out_path = mask_to_stl(mask, dcm.spacing_zyx, case.pretrain_stl, origin_xyz=dcm.origin_xyz)
     stl_bytes = int(out_path.stat().st_size)
     target = TARGET_VOXELS_TIPS if case.is_post_tips else TARGET_VOXELS
@@ -726,6 +994,7 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
         "input": str(orig_path),
         "input_mtime": input_mtime,
         "is_post_tips": bool(case.is_post_tips),
+        "pretrain_nii": str(nii_path),
         "pretrain_stl": str(out_path),
         "z_standardization": z_info,
         "hu_sampling": hu_info,
@@ -762,21 +1031,28 @@ def coarse_segment_patient(case, client=None, force=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="v5: TotalSegmentator-driven portal vein extraction.",
+        description="v6: precomputed NIfTI-driven portal vein extraction.",
     )
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
     parser.add_argument("--patient", default=None)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--skip_existing_pretrain", action="store_true")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--api_key", default=None)
+    parser.add_argument("--api_base_url", default=None)
     args = parser.parse_args()
 
     cases = discover_patients(args.data_root)
     if args.patient:
         cases = [c for c in cases if c.name == args.patient]
-    print(f"[v5] {len(cases)} patients")
+    print(f"[v6] {len(cases)} patients")
     for case in cases:
-        print(f"[v5] {case.name}:")
+        print(f"[v6] {case.name}:")
         try:
-            r = pretrain_patient(case, force=args.force)
+            if args.skip_existing_pretrain and case.pretrain_stl.exists() and _pretrain_nii_path(case).exists():
+                print("  result: skipped_existing")
+                continue
+            r = pretrain_patient(case, force=args.force and not args.skip_existing_pretrain)
             print(f"  result: {r.status}")
         except Exception as e:
             print(f"  FAILED: {e}")
