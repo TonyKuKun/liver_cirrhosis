@@ -1,18 +1,49 @@
 """
-Physics-Informed Geometric Deep Learning for Portal Vein Pressure — v4
+Physics-Informed Geometric Deep Learning for Portal Vein Pressure — v5
 =======================================================================
-Shape-aware, PVT-robust, Poiseuille-grounded.
+Bugfixes over v4 (see model.py review):
 
-Key changes from v3:
-  1.  11 pointwise channels (was 4): adds hydraulic_diameter, perimeter,
-      torsion, solidity, r_insc_to_r_eq_ratio, dA_ds_norm, circularity,
-      n_components.
-  2.  Physics layer uses hydraulic_diameter (D_h = 4A/P) instead of
-      eq_diameter for Poiseuille — correct for non-circular cross-sections.
-  3.  Shape-aware resistance: interpolates between D_h/2 and inscribed_radius
-      based on solidity, so PVT crescent lumens use the bottleneck radius.
-  4.  26 aux scalars (was 11): adds clinical markers, PVT severity,
-      tortuosity indices, TIPS stent params, area conservation, etc.
+  1.  GeometryEncoder: BatchNorm1d → GroupNorm. BatchNorm computes
+      statistics across the padded batch, polluted by zero-padding when
+      segments have variable valid lengths. GroupNorm normalizes per-
+      sample per-channel and is unaffected by other samples / padding.
+
+  2.  PortalPressureNet: explicit physics baseline anchor. Final
+      prediction is now:
+
+          pvp_pred = baseline_norm + predictor_residual + residual_net
+
+      where baseline_norm is the normalized Poiseuille pressure drop
+      from the hepatic sinusoids back to the PVP measurement point
+      (dP_mpv + dP_liver). The MLP only learns the *correction*. Anchors
+      the prediction to the physics instead of letting MLP ignore the
+      8-dim log1p(dP) features inside a 300-dim input.
+
+  3.  PoiseuilleHydrodynamics: r_eff extracted as a static method
+      `compute_r_eff` so the smoothness loss and resistance prior use
+      EXACTLY the same effective radius as the forward physics. v4 had
+      smoothness loss on hdiam/2 while forward used shape-aware r_eff.
+
+  4.  PhysicsInformedLoss: TIPS patients now have bifurcation Murray
+      loss FULLY disabled (was 0.35×). TIPS is an artificial stent with
+      a clinically chosen diameter; it does not obey Murray's biological
+      optimization law.
+
+  5.  PoiseuilleHydrodynamics: clamp instead of nan_to_num(posinf=0)
+      for resistance and pressure-drop. Setting r→0 cases to "zero
+      resistance" was *inverting* the correct physics.
+
+  6.  SplenicFlowEstimator: input features now standardized. Raw
+      log(spleen) ≈ 5–8 was dominating the first hidden layer despite
+      the zero-init final layer.
+
+  7.  VesselGraphNet: removed (sv, smv) and (lpv, rpv) edges. These
+      pairs are *siblings* sharing a common parent (MPV), not directly
+      connected anatomically. The 2-layer GNN can still relate them via
+      MPV in one extra hop.
+
+  8.  Default dropout 0.30 → 0.15. The high rate + (Batch)Norm combo
+      was a known stability hazard.
 """
 
 import math
@@ -40,6 +71,20 @@ WSS_PHYSIO_LO_PA   = 0.05
 WSS_PHYSIO_HI_PA   = 5.0
 RE_PHYSIO_HI       = 1500.0
 
+# Defaults for PVP normalization (override at model init from your dataset
+# statistics: clinically, PVP ~ 5–25 mmHg = ~666–3333 Pa).
+# These are used to put the physics baseline on the same scale as the
+# normalized label space.
+PVP_MEAN_PA_DEFAULT = 1600.0   # ≈ 12 mmHg
+PVP_STD_PA_DEFAULT  = 800.0    # ≈ 6 mmHg
+
+# Defaults for log-organ-volume standardization in SplenicFlowEstimator.
+# Override at model init from your training-set statistics.
+# log(spleen ml) for normal ≈ log(200) ≈ 5.3; cirrhotic ≈ log(800) ≈ 6.7.
+# log(liver  ml) ≈ log(1500) ≈ 7.3.
+LOG_VOL_MEAN_DEFAULT = 6.5
+LOG_VOL_STD_DEFAULT  = 0.7
+
 
 # =====================================================================
 # Module 0 — Splenic Flow Estimator (patient-specific Q)
@@ -48,29 +93,27 @@ class SplenicFlowEstimator(nn.Module):
     """
     Converts organ volumes → patient-specific portal flow scale factor.
 
-    Physics: ΔP = Q × R. The model computes R from geometry, but Q was
-    a constant (800 mL/min). In reality Q varies 700–1800 mL/min between
-    patients. Spleen volume is a measurable proxy for splanchnic blood
-    flow because splenomegaly = splanchnic hyperemia = higher Q.
-
-    Output: q_scale (B,) — multiplier on Q_REF.
-        q_scale ≈ 1.0 for normal spleen (~200 mL)
-        q_scale > 1.0 for splenomegaly (larger spleen → more flow)
-
-    Initialized to output 1.0 for all inputs → starts from constant-Q.
+    v5: inputs are standardized (z-scored log volumes) so no single
+    feature dominates the first hidden layer's gradient.
     """
 
-    def __init__(self, d_hidden: int = 8):
+    def __init__(self, d_hidden: int = 8,
+                 log_vol_mean: float = LOG_VOL_MEAN_DEFAULT,
+                 log_vol_std:  float = LOG_VOL_STD_DEFAULT):
         super().__init__()
-        # Input: [log(spleen_vol), log(liver_vol), spleen/liver_ratio, organ_valid_mask]
+        # Input: [spleen_log_z, liver_log_z, ratio_centered, n_valid_centered]
         self.net = nn.Sequential(
             nn.Linear(4, d_hidden),
             nn.GELU(),
             nn.Linear(d_hidden, 1),
         )
-        # Init to output 0 → exp(0) = 1.0 → q_scale starts at 1.0
+        # Init final layer to 0 so q_scale starts at exp(0) = 1.0.
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
+
+        # Standardization constants (registered so they save with state_dict).
+        self.register_buffer('log_vol_mean', torch.tensor(float(log_vol_mean)))
+        self.register_buffer('log_vol_std',  torch.tensor(float(log_vol_std)))
 
     def forward(self, organ_volumes, organ_valid):
         """
@@ -80,16 +123,27 @@ class SplenicFlowEstimator(nn.Module):
         """
         spleen = organ_volumes[:, 0].clamp(min=1.0)
         liver  = organ_volumes[:, 1].clamp(min=1.0)
-        ratio  = spleen / liver.clamp(min=1.0)
-        feats = torch.stack([
-            torch.log(spleen) * organ_valid[:, 0],
-            torch.log(liver)  * organ_valid[:, 1],
-            ratio * (organ_valid[:, 0] * organ_valid[:, 1]),
-            organ_valid.sum(dim=-1),  # how many organs we have data for
-        ], dim=-1)
 
-        log_scale = self.net(feats).squeeze(-1)  # (B,)
-        # Clamp to prevent extreme scaling: q_scale ∈ [0.3, 3.0]
+        # z-scored log volumes (only when valid, else 0)
+        spleen_z = ((torch.log(spleen) - self.log_vol_mean) / self.log_vol_std
+                    ) * organ_valid[:, 0]
+        liver_z  = ((torch.log(liver)  - self.log_vol_mean) / self.log_vol_std
+                    ) * organ_valid[:, 1]
+
+        # spleen/liver ratio centered around 1 (normal ≈ 0.13–0.2; cirrhotic ↑)
+        # Use log-ratio so it's symmetric around 0.
+        ratio_log = (torch.log(spleen) - torch.log(liver)
+                     ) * (organ_valid[:, 0] * organ_valid[:, 1])
+        # Center: log(0.15) ≈ -1.9 for normal, so subtract that.
+        ratio_z = (ratio_log + 1.9) * (organ_valid[:, 0] * organ_valid[:, 1])
+
+        # How many organs are observed, centered around 1 (out of max 2).
+        n_valid_centered = organ_valid.sum(dim=-1) - 1.0
+
+        feats = torch.stack([spleen_z, liver_z, ratio_z, n_valid_centered], dim=-1)
+
+        log_scale = self.net(feats).squeeze(-1)
+        # Clamp so q_scale ∈ [exp(-1.2), exp(1.1)] ≈ [0.30, 3.0]
         q_scale = torch.exp(log_scale.clamp(-1.2, 1.1))
         return q_scale
 
@@ -102,10 +156,16 @@ class PoiseuilleHydrodynamics(nn.Module):
     Given per-point geometry (11 channels) + Q_rel:
       → velocity, WSS, Re, R', cumR, ΔP, Dean, area_gradient
 
-    Key improvement: uses **hydraulic_diameter** for r in Poiseuille,
-    with **shape-aware** blending toward inscribed_radius when solidity
-    is low (= non-circular PVT crescent lumen).
+    v5: r_eff extracted as static method so loss + resistance prior +
+    forward path all use the SAME effective radius. Also: clamps replace
+    nan_to_num(posinf=0) for physically meaningful inf-handling.
     """
+
+    # Physical caps to keep numerics stable without inverting physics.
+    # 1e15 Pa·s/m^4 is well above any anatomical resistance.
+    LOCAL_R_CAP = 1.0e15
+    CUM_R_CAP   = 1.0e16
+    DP_CAP_PA   = 1.0e7    # 10 MPa is absurd; just guards against r→0 blowups
 
     def __init__(self, mu=BLOOD_VISCOSITY_PA_S, rho=BLOOD_DENSITY_KG_M3,
                  q_ref=Q_REF_M3_PER_S):
@@ -115,6 +175,28 @@ class PoiseuilleHydrodynamics(nn.Module):
         self.nu = mu / rho
         self.q_ref = q_ref
 
+    # ------------------------------------------------------------------
+    @staticmethod
+    def compute_r_eff_mm(profiles_slice, eps: float = 1e-9):
+        """
+        Shape-aware effective hydraulic radius (mm).
+
+        Works on any leading batch shape; last dim must be N_PROFILE_FEAT.
+        Used by:
+          • this module's forward (Poiseuille)
+          • _branch_resistance_prior (flow allocation)
+          • PhysicsInformedLoss.smoothness  (regularization)
+        Keeping them in sync avoids the v4 inconsistency where the loss
+        smoothed hdiam/2 but the forward physics used r_eff.
+        """
+        hdiam_mm = profiles_slice[..., P_HDIAM].clamp(min=eps)
+        insc_mm  = profiles_slice[..., P_INSC].clamp(min=eps)
+        solid    = profiles_slice[..., P_SOLID].clamp(min=0.01, max=1.0)
+        alpha    = (1.0 - solid).clamp(min=0.0, max=1.0)
+        r_eff_mm = (1.0 - alpha) * (0.5 * hdiam_mm) + alpha * insc_mm
+        return r_eff_mm, alpha
+
+    # ------------------------------------------------------------------
     @staticmethod
     def _safe_seg_lengths(arc, valid, eps=1e-6):
         ds = torch.zeros_like(arc)
@@ -123,6 +205,7 @@ class PoiseuilleHydrodynamics(nn.Module):
         ds = ds.clamp(min=eps) * (valid > 0).float()
         return ds
 
+    # ------------------------------------------------------------------
     def forward(self, profiles, arc, valid, Q_rel):
         """
         profiles: (B, N, 11)  arc: (B, N)  valid: (B, N)  Q_rel: (B,)
@@ -133,16 +216,8 @@ class PoiseuilleHydrodynamics(nn.Module):
         area_mm2    = profiles[..., P_AREA].clamp(min=eps)
         hdiam_mm    = profiles[..., P_HDIAM].clamp(min=eps)
         curv_inv_mm = profiles[..., P_CURV].abs()
-        insc_mm     = profiles[..., P_INSC].clamp(min=eps)
-        solidity    = profiles[..., P_SOLID].clamp(min=0.01, max=1.0)
 
-        # Shape-aware effective radius:
-        #   When solidity ≈ 1 (circular): use D_h/2 (= standard hydraulic radius)
-        #   When solidity << 1 (crescent/PVT): blend toward inscribed_radius
-        #   alpha = 0 for circle, ~0.5 for moderate PVT, ~1 for severe
-        alpha = (1.0 - solidity).clamp(min=0.0, max=1.0)
-        r_hdiam_mm  = 0.5 * hdiam_mm
-        r_eff_mm    = (1.0 - alpha) * r_hdiam_mm + alpha * insc_mm
+        r_eff_mm, alpha = self.compute_r_eff_mm(profiles, eps=eps)
 
         # Convert to SI
         area_m2  = area_mm2  * 1e-6
@@ -162,15 +237,16 @@ class PoiseuilleHydrodynamics(nn.Module):
         # 3. Reynolds
         reynolds = velocity * diam_m / (self.nu + eps)
 
-        # 4. Local resistance per unit length
+        # 4. Local resistance per unit length — CLAMP, do not zero out
         local_R = (8.0 * self.mu) / (math.pi * r_eff_m.pow(4) + eps)
+        local_R = local_R.clamp(max=self.LOCAL_R_CAP)
 
         # 5. Cumulative resistance
         ds_m = self._safe_seg_lengths(arc, valid) * 1e-3
-        cum_R = torch.cumsum(local_R * ds_m, dim=-1)
+        cum_R = torch.cumsum(local_R * ds_m, dim=-1).clamp(max=self.CUM_R_CAP)
 
-        # 6. Pressure drop
-        pressure_drop = Q_abs * cum_R
+        # 6. Pressure drop — clamp instead of nan→0
+        pressure_drop = (Q_abs * cum_R).clamp(max=self.DP_CAP_PA)
 
         # 7. Dean number
         dean = reynolds * torch.sqrt(diam_m * curv_1_m + eps)
@@ -193,13 +269,18 @@ class PoiseuilleHydrodynamics(nn.Module):
             'pressure_drop_pa':     pressure_drop * v,
             'dean':                 dean * v,
             'area_gradient':        area_grad * v,
-            'shape_alpha':          alpha * v,  # for interpretability
+            'shape_alpha':          alpha * v,
             'cum_R_total':          (cum_R * v).max(dim=-1).values,
             'pressure_drop_total':  (pressure_drop * v).max(dim=-1).values,
             'valid_count':          v.sum(dim=-1),
         }
+        # Only NaN-protect (inf is already clamped). This way an
+        # impossibly large pressure stays large, not silently zeroed.
         for k in out:
-            out[k] = torch.nan_to_num(out[k], nan=0.0, posinf=0.0, neginf=0.0)
+            out[k] = torch.nan_to_num(
+                out[k], nan=0.0,
+                posinf=self.DP_CAP_PA, neginf=-self.DP_CAP_PA,
+            )
         return out
 
 
@@ -207,19 +288,29 @@ class PoiseuilleHydrodynamics(nn.Module):
 # Module 2 — Geometry Encoder (shared across branches)
 # =====================================================================
 class GeometryEncoder(nn.Module):
+    """
+    v5: BatchNorm1d → GroupNorm. BN's running stats are corrupted when
+    different samples have different valid lengths (the padding zeros
+    skew the per-channel mean/variance). GroupNorm is computed per-
+    sample, per-group, and is mask-agnostic.
+    """
 
     def __init__(self, d_in: int = N_PROFILE_FEAT, d_hidden: int = 32,
-                 n_blocks: int = 3, dropout: float = 0.1):
+                 n_blocks: int = 3, dropout: float = 0.1,
+                 gn_groups: int = 8):
         super().__init__()
         chans = [d_in] + [d_hidden] * n_blocks
         ks = [7, 5, 3]
         layers = []
         for i in range(n_blocks):
+            out_c = chans[i + 1]
+            # GroupNorm group count must divide channels
+            groups = math.gcd(gn_groups, out_c) if out_c >= gn_groups else 1
             layers += [
-                nn.Conv1d(chans[i], chans[i + 1],
+                nn.Conv1d(chans[i], out_c,
                           kernel_size=ks[i % len(ks)],
                           padding=ks[i % len(ks)] // 2),
-                nn.BatchNorm1d(chans[i + 1]),
+                nn.GroupNorm(num_groups=max(1, groups), num_channels=out_c),
                 nn.GELU(),
                 nn.Dropout(dropout),
             ]
@@ -257,24 +348,33 @@ class AttentionPool(nn.Module):
 
 
 # =====================================================================
-# Module 3.5 — Vessel Topology GNN (dense attention, 8-node graph)
+# Module 3.5 — Vessel Topology GNN (corrected anatomy)
 # =====================================================================
 class VesselGraphNet(nn.Module):
     """
-    Graph Attention on the 8-node vessel topology.
+    v5: edge list cleaned up. SV-SMV and LPV-RPV pairs are *siblings*
+    sharing a common parent (MPV) — they are not directly connected
+    anatomically. The 2-layer GNN can still relate them in 2 hops
+    through MPV.
 
-    AttentionPool compresses each branch independently — it doesn't know
-    that SV dilation + MPV narrowing *together* mean high confluence pressure.
-    GNN lets cross-branch reasoning happen BEFORE the predictor sees them.
-
-    Dense masked self-attention (8 nodes is tiny; no need for sparse ops).
+    Remaining edges (each direction):
+      SV  → MPV       (splenic into confluence)
+      SMV → MPV       (mesenteric into confluence)
+      MPV → LPV       (portal bifurcation, left)
+      MPV → RPV       (portal bifurcation, right)
+      MPV → TIPS      (shunt off the trunk)
+      LGV → MPV       (collateral, gastric)
+      PGV → MPV       (collateral, gastric)
     """
 
     _EDGE_PAIRS = [
-        ('sv',  'mpv'), ('smv', 'mpv'),
-        ('mpv', 'lpv'), ('mpv', 'rpv'), ('mpv', 'tips'),
-        ('lgv', 'mpv'), ('pgv', 'mpv'),
-        ('sv',  'smv'), ('lpv', 'rpv'),
+        ('sv',  'mpv'),
+        ('smv', 'mpv'),
+        ('mpv', 'lpv'),
+        ('mpv', 'rpv'),
+        ('mpv', 'tips'),
+        ('lgv', 'mpv'),
+        ('pgv', 'mpv'),
     ]
 
     def __init__(self, d_hidden: int, n_layers: int = 2, dropout: float = 0.1):
@@ -334,8 +434,8 @@ class PhysicsResidualNet(nn.Module):
     Parallel learnable path that captures what Poiseuille cannot:
     turbulence, entrance effects, vortices in PVT lumens.
 
-    Initialized to output **zero** → at epoch 0 prediction equals pure
-    physics path. Residual gradually learns corrections during training.
+    Initialized to output **zero** → at epoch 0 the prediction equals
+    the physics path. Residual gradually learns corrections.
     """
 
     def __init__(self, d_in: int, d_hidden: int = 32):
@@ -361,7 +461,6 @@ class PhysicsResidualNet(nn.Module):
         min_solidity, mean_solidity, max|dA/ds|.
         Returns (B, S * 5 = 40).
         """
-        B = segment_mask.size(0)
         feats = []
         for si in range(N_SEGMENTS):
             h = hemo_per_seg[si]
@@ -374,7 +473,6 @@ class PhysicsResidualNet(nn.Module):
             wss_v = torch.where(v > 0.5, h['wss_pa'],    big_neg)
             sol   = profiles[:, si, :, P_SOLID]
             sol_mn = torch.where(v > 0.5, sol, big_pos)
-            sol_mx = torch.where(v > 0.5, sol, big_neg)
             dads  = torch.where(v > 0.5, profiles[:, si, :, P_DADS].abs(), big_neg)
 
             max_re   = re_v.max(-1).values  * alive.squeeze(-1)
@@ -582,8 +680,12 @@ class JunctionPhysics(nn.Module):
 # =====================================================================
 class PortalPressureNet(nn.Module):
 
-    def __init__(self, d_hidden: int = 32, dropout: float = 0.3,
-                 gnn_layers: int = 2, use_residual: bool = True):
+    def __init__(self, d_hidden: int = 32, dropout: float = 0.15,
+                 gnn_layers: int = 2, use_residual: bool = True,
+                 pvp_mean_pa: float = PVP_MEAN_PA_DEFAULT,
+                 pvp_std_pa:  float = PVP_STD_PA_DEFAULT,
+                 log_vol_mean: float = LOG_VOL_MEAN_DEFAULT,
+                 log_vol_std:  float = LOG_VOL_STD_DEFAULT):
         super().__init__()
         self.d_hidden = d_hidden
         self.use_residual = use_residual
@@ -595,7 +697,6 @@ class PortalPressureNet(nn.Module):
         )
         self.branch_pool = AttentionPool(d_hidden, d_attn=16)
 
-        # ── NEW: Graph message passing on vessel topology ────
         self.vessel_gnn = VesselGraphNet(
             d_hidden=d_hidden, n_layers=gnn_layers, dropout=dropout * 0.3,
         )
@@ -606,16 +707,17 @@ class PortalPressureNet(nn.Module):
         self.hydro = PoiseuilleHydrodynamics()
         self.junction_phys = JunctionPhysics()
 
-        # ── NEW: Patient-specific Q from organ volumes ───────
-        # Replaces constant Q_REF with spleen-volume-modulated flow
-        self.q_estimator = SplenicFlowEstimator(d_hidden=8)
+        self.q_estimator = SplenicFlowEstimator(
+            d_hidden=8, log_vol_mean=log_vol_mean, log_vol_std=log_vol_std,
+        )
 
-        # ── Physics-based predictor (main path) ──────────────
+        # ── Physics-based predictor (residual on top of baseline) ─
         d_branches = N_SEGMENTS * d_hidden
         d_q        = N_SEGMENTS
         d_junction = 15
-        d_qscale   = 1                          # q_scale feature
-        d_fused = d_branches + d_q + d_junction + d_qscale + N_AUX
+        d_qscale   = 1
+        d_baseline = 1                          # ← NEW: pass baseline as a feature too
+        d_fused = d_branches + d_q + d_junction + d_qscale + d_baseline + N_AUX
 
         self.predictor = nn.Sequential(
             nn.Linear(d_fused, d_hidden * 2),
@@ -628,23 +730,50 @@ class PortalPressureNet(nn.Module):
             nn.Linear(d_hidden, 1),
         )
 
-        # ── NEW: Residual correction path ────────────────────
-        # Captures non-Poiseuille effects (turbulence, vortices, entrance
-        # effects) that the deterministic physics layer cannot model.
-        # Initialized to output 0 → starts from pure physics prediction.
-        d_residual_feats = N_SEGMENTS * 5   # 40 (from extract_features)
+        # Residual correction path
+        d_residual_feats = N_SEGMENTS * 5
         self.residual_net = PhysicsResidualNet(
             d_in=d_fused + d_residual_feats, d_hidden=d_hidden,
         ) if use_residual else None
 
+        # PVP normalization constants for the physics baseline.
+        # These should be set to the training-set PVP mean and std (Pa).
+        self.register_buffer('pvp_mean_pa', torch.tensor(float(pvp_mean_pa)))
+        self.register_buffer('pvp_std_pa',  torch.tensor(float(pvp_std_pa)))
+
         self._init_weights()
-        # Re-apply zero-init for modules that must start at identity/zero
-        # (_init_weights uses kaiming for ALL Linear layers, overriding zeros)
+
+        # ── Re-apply special inits AFTER _init_weights (which uses kaiming) ──
+
+        # q_estimator: TRUE zero → starts at exp(0) = 1.0 (identity on Q).
+        # Safe to fully zero: q_scale=1 is a perfectly valid runtime state
+        # and gradient still flows because the input feature 'q_scale' enters
+        # the predictor via a non-zero-init path.
         self.q_estimator.net[-1].weight.data.zero_()
         self.q_estimator.net[-1].bias.data.zero_()
+
+        # Predictor final layer: SMALL init, not zero. We want the physics
+        # baseline to dominate at start (so the model is sensible from
+        # epoch 0) but we MUST keep gradients flowing into geom_encoder,
+        # vessel_gnn, and branch_pool. A fully-zero last layer cuts the
+        # backward path through `fused`, leaving the encoders untrained
+        # until the predictor itself drifts off zero.
+        self.predictor[-1].weight.data.mul_(0.01)
+        self.predictor[-1].bias.data.zero_()
+
+        # residual_net: TRUE zero → its job is purely corrective, no need
+        # for it to inject random noise initially.
         if self.residual_net is not None:
             self.residual_net.net[-1].weight.data.zero_()
             self.residual_net.net[-1].bias.data.zero_()
+
+        # flow_est: zero deltas → fall back to pure Murray prior at start.
+        # Same reasoning as predictor would apply, EXCEPT that gradients
+        # from `Q → hydro → baseline_pa → loss` flow directly through the
+        # final layer's weights (via the input GELU activations), so the
+        # head itself receives a useful signal. The first-layer encoders
+        # get their signal through the `branch_embed → predictor` path
+        # which we now keep open.
         for head in [self.flow_est.inflow_head[-1],
                      self.flow_est.conf_outflow_head[-1],
                      self.flow_est.bif_outflow_head[-1]]:
@@ -662,15 +791,15 @@ class PortalPressureNet(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
+    # ------------------------------------------------------------------
     @staticmethod
     def _branch_resistance_prior(profiles, arc_lengths, point_valid, segment_mask):
-        """Geometry-only resistance proxy using shape-aware effective radius."""
+        """
+        Geometry-only resistance proxy. v5 uses the SAME compute_r_eff_mm
+        helper as the forward Poiseuille path.
+        """
         eps = 1e-6
-        hdiam_mm = profiles[..., P_HDIAM].clamp(min=eps)
-        insc_mm  = profiles[..., P_INSC].clamp(min=eps)
-        solid    = profiles[..., P_SOLID].clamp(min=0.01, max=1.0)
-        alpha    = (1.0 - solid).clamp(0, 1)
-        r_mm = (1.0 - alpha) * (0.5 * hdiam_mm) + alpha * insc_mm
+        r_mm, _ = PoiseuilleHydrodynamics.compute_r_eff_mm(profiles, eps=eps)
         r_mm = r_mm.clamp(min=eps)
 
         ds = torch.zeros_like(arc_lengths)
@@ -684,6 +813,36 @@ class PortalPressureNet(nn.Module):
         resistance = torch.where(valid > 0.5, resistance.clamp(min=eps), high)
         return torch.nan_to_num(resistance, nan=1e6, posinf=1e6, neginf=1e6)
 
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _physics_baseline_pa(hemo_per_seg, segment_mask):
+        """
+        Cumulative ΔP from the hepatic sinusoids back to the PVP probe.
+
+        Path traversed by blood in reverse (probe ← liver):
+            probe-in-MPV ← MPV trunk ← bifurcation ← LPV/RPV ← sinusoids
+        So baseline_pa = ΔP_mpv  +  mean(ΔP_lpv, ΔP_rpv).
+
+        This represents what Poiseuille alone predicts for PVP minus the
+        (essentially constant) hepatic-vein pressure, which is absorbed
+        into the normalization mean.
+        """
+        ix = SEG_INDEX
+
+        dP_mpv = hemo_per_seg[ix['mpv']]['pressure_drop_total']
+        m_mpv  = segment_mask[:, ix['mpv']]
+
+        dP_lpv = hemo_per_seg[ix['lpv']]['pressure_drop_total']
+        dP_rpv = hemo_per_seg[ix['rpv']]['pressure_drop_total']
+        m_lpv  = segment_mask[:, ix['lpv']]
+        m_rpv  = segment_mask[:, ix['rpv']]
+
+        n_liver  = (m_lpv + m_rpv).clamp(min=1.0)
+        dP_liver = (dP_lpv * m_lpv + dP_rpv * m_rpv) / n_liver
+
+        return dP_mpv * m_mpv + dP_liver  # (B,) Pa
+
+    # ------------------------------------------------------------------
     def forward(self, batch):
         profiles      = batch['profiles']
         profiles_norm = batch['profiles_norm']
@@ -700,8 +859,6 @@ class PortalPressureNet(nn.Module):
         B, S, N, _ = profiles.shape
 
         # ── Patient-specific Q scale from organ volumes ──────
-        # q_scale > 1 for splenomegaly (more splanchnic flow)
-        # q_scale ≈ 1 when volumes unavailable (falls back to Q_REF)
         q_scale = self.q_estimator(organ_volumes, organ_valid)  # (B,)
 
         # ── Per-branch encoding ──────────────────────────────
@@ -728,9 +885,6 @@ class PortalPressureNet(nn.Module):
         Q = flow_out['Q']  # (B, S) relative fractions
 
         # ── Per-branch Poiseuille with patient-specific Q ────
-        # Q_abs = Q_rel × Q_REF × q_scale (patient-specific)
-        # The Poiseuille layer already multiplies Q_rel by Q_REF internally,
-        # so we pass Q_rel × q_scale to get patient-specific absolute flow.
         Q_scaled = Q * q_scale.unsqueeze(-1)  # (B, S)
         hemo_per_seg = []
         for si in range(S):
@@ -741,32 +895,45 @@ class PortalPressureNet(nn.Module):
         # Junction physics
         jp = self.junction_phys(hemo_per_seg, flow_out, segment_mask, has_tips)
 
-        # ── Physics-based prediction ─────────────────────────
+        # ── Physics baseline (v5) ────────────────────────────
+        # Cumulative ΔP along the portal system → normalize to label space.
+        baseline_pa   = self._physics_baseline_pa(hemo_per_seg, segment_mask)
+        baseline_norm = ((baseline_pa - self.pvp_mean_pa) / self.pvp_std_pa
+                         ).clamp(min=-5.0, max=5.0)
+
+        # ── Predictor sees baseline as a feature too ─────────
         branch_flat = branch_embed.reshape(B, -1)
         fused = torch.cat([
             branch_flat, Q, jp['features'],
-            q_scale.unsqueeze(-1),  # explicit Q scale as feature
+            q_scale.unsqueeze(-1),
+            baseline_norm.unsqueeze(-1),
             aux_norm,
         ], dim=-1)
-        fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
-        pvp_physics = self.predictor(fused)
+        fused = torch.nan_to_num(fused, nan=0.0, posinf=1e3, neginf=-1e3)
+
+        # Predictor's final layer is zero-init → at start, predictor outputs 0.
+        # So initial prediction = baseline_norm (pure physics).
+        pvp_correction = self.predictor(fused).squeeze(-1)
 
         # Residual correction
-        pvp_residual = torch.zeros_like(pvp_physics)
+        pvp_residual = torch.zeros_like(pvp_correction)
         if self.use_residual and self.residual_net is not None:
             resid_feats = PhysicsResidualNet.extract_features(
                 hemo_per_seg, profiles, point_valid, segment_mask)
             resid_feats = torch.nan_to_num(resid_feats, nan=0.0, posinf=0.0, neginf=0.0)
             resid_input = torch.cat([fused, resid_feats], dim=-1)
-            pvp_residual = self.residual_net(resid_input)
+            pvp_residual = self.residual_net(resid_input).squeeze(-1)
 
-        pvp_pred = pvp_physics + pvp_residual
+        pvp_pred = (baseline_norm + pvp_correction + pvp_residual).unsqueeze(-1)
 
         return {
             'pvp_pred': pvp_pred, 'Q': Q, 'flow_out': flow_out,
-            'pvp_physics': pvp_physics,
-            'pvp_residual': pvp_residual,
-            'q_scale': q_scale,              # for interpretability
+            # The "physics" path includes the explicit baseline + MLP correction.
+            'pvp_physics': (baseline_norm + pvp_correction).unsqueeze(-1),
+            'pvp_residual': pvp_residual.unsqueeze(-1),
+            'pvp_baseline_norm': baseline_norm.unsqueeze(-1),  # ← interpretability
+            'pvp_baseline_pa':   baseline_pa.unsqueeze(-1),
+            'q_scale': q_scale,
             'attn_weights': attn_weights, 'hemo_per_seg': hemo_per_seg,
             'junction': jp, 'branch_embed': branch_embed,
             'endpoint_dP': torch.stack(
@@ -809,30 +976,16 @@ class PhysicsInformedLoss(nn.Module):
     def forward(self, model_out, label_norm, batch):
         pvp_pred = model_out['pvp_pred'].squeeze(-1)
 
-        # ══════════════════════════════════════════════════════
-        # FIX 1: Bidirectional extremity weighting
-        # ══════════════════════════════════════════════════════
-        # Problem: MSE-optimal prediction has lower variance than labels.
-        # Solution: give extreme samples (BOTH high AND low) more weight.
-        #
-        # weight_i = 1 + α · |label_norm_i|²
-        #   → sample at the mean (label_norm=0): weight = 1
-        #   → sample 1σ from mean: weight = 1 + α
-        #   → sample 2σ from mean: weight = 1 + 4α (quadratic boost)
-        #
-        # This forces the model to "care more" about getting extremes right,
-        # at the cost of slightly higher error near the mean.
+        # ── Extremity-weighted Huber + asym ──────────────────
         extremity = label_norm.abs()
         extremity_weight = 1.0 + self.extremity_alpha * extremity.pow(2)
 
-        # Asymmetric: underpredicting high PVP is clinically worse
         err = pvp_pred - label_norm
         asym = torch.where(
             (err < 0) & (label_norm > 0.5),
             torch.full_like(err, 1.5),
             torch.ones_like(err),
         )
-
         abs_err = err.abs()
         huber_elem = torch.where(
             abs_err <= self.huber_delta,
@@ -841,17 +994,7 @@ class PhysicsInformedLoss(nn.Module):
         )
         L_main = (huber_elem * extremity_weight * asym).mean()
 
-        # ══════════════════════════════════════════════════════
-        # FIX 2: Anti-shrinkage variance matching loss
-        # ══════════════════════════════════════════════════════
-        # Directly penalizes when prediction variance is lower than
-        # label variance within the batch. This is the key anti-
-        # compression signal.
-        #
-        # L_spread = max(0, 1 - Var(pred) / Var(label))²
-        #   → pred variance matches label: L_spread = 0
-        #   → pred variance too low:       L_spread > 0 (penalty)
-        #   → pred variance too high:      L_spread = 0 (no penalty)
+        # ── Anti-shrinkage spread loss ───────────────────────
         if pvp_pred.numel() >= 4:
             pred_var = pvp_pred.var()
             label_var = label_norm.var().clamp(min=1e-3)
@@ -859,12 +1002,12 @@ class PhysicsInformedLoss(nn.Module):
         else:
             L_spread = torch.tensor(0.0, device=pvp_pred.device)
 
-        # L_residual: keep residual path small
+        # ── Residual size regularizer ────────────────────────
         pvp_residual = model_out.get('pvp_residual', torch.zeros_like(pvp_pred))
         L_residual = pvp_residual.squeeze(-1).pow(2).mean()
 
         flow = model_out['flow_out']
-        jp = model_out['junction']
+        jp   = model_out['junction']
         m_in = jp['inflow_active']
         m_co = jp['confluence_outflow_active']
         m_bo = jp['bifurcation_active']
@@ -876,16 +1019,21 @@ class PhysicsInformedLoss(nn.Module):
         L_murr_in = (d_in.pow(2).sum(-1) * m_in).sum() / m_in.sum().clamp(1)
         L_murr_co = (d_co.pow(2).sum(-1) * m_co).sum() / m_co.sum().clamp(1)
 
+        # ── v5: TIPS patients fully disable bifurcation Murray loss ──
+        # Murray's law describes biological vessel optimization; it does
+        # NOT apply to a man-made stent whose diameter was chosen by the
+        # interventionist.
         has_tips = batch.get('is_post_tips', batch['segment_mask'][:, SEG_INDEX['tips']])
-        tips_relax = torch.where(has_tips > 0.5,
-                                 torch.full_like(m_bo, 0.35), torch.ones_like(m_bo))
-        m_bo_w = m_bo * tips_relax
+        tips_mask_out = torch.where(has_tips > 0.5,
+                                    torch.zeros_like(m_bo),
+                                    torch.ones_like(m_bo))
+        m_bo_w = m_bo * tips_mask_out
         L_murr_bo = (d_bo.pow(2).sum(-1) * m_bo_w).sum() / m_bo_w.sum().clamp(1)
         L_murray = L_murr_in + L_murr_co + L_murr_bo
 
         L_press = jp['press_resid_bifurc'].sum() / m_bo.sum().clamp(1)
 
-        # Smoothness on hydraulic_diameter profile (was eq_diameter)
+        # ── v5: smoothness on the SAME r_eff used by forward physics ──
         profiles    = batch['profiles']
         point_valid = batch['point_valid']
         seg_mask    = batch['segment_mask']
@@ -895,16 +1043,18 @@ class PhysicsInformedLoss(nn.Module):
             alive = seg_mask[:, si] > 0
             if alive.sum() == 0:
                 continue
-            r = profiles[alive, si, :, P_HDIAM] * 0.5
+            # Same effective radius the Poiseuille layer actually uses.
+            r_mm, _ = PoiseuilleHydrodynamics.compute_r_eff_mm(
+                profiles[alive, si])  # (B', N)
             v = point_valid[alive, si]
-            d2r = r[:, 2:] - 2.0 * r[:, 1:-1] + r[:, :-2]
+            d2r = r_mm[:, 2:] - 2.0 * r_mm[:, 1:-1] + r_mm[:, :-2]
             mw = v[:, 2:] * v[:, 1:-1] * v[:, :-2]
             L_smooth = L_smooth + (d2r.pow(2) * mw).sum() / mw.sum().clamp(1)
             n_seg += 1
         if n_seg > 0:
             L_smooth = L_smooth / n_seg
 
-        # Physio hinge on WSS and Re
+        # ── Physio hinge on WSS and Re ───────────────────────
         L_physio = torch.tensor(0.0, device=pvp_pred.device)
         n_seg = 0
         for si in range(N_SEGMENTS):
@@ -921,7 +1071,7 @@ class PhysicsInformedLoss(nn.Module):
         if n_seg > 0:
             L_physio = L_physio / n_seg
 
-        # Monotonicity of ΔP
+        # ── Monotonicity of ΔP ───────────────────────────────
         L_mono = torch.tensor(0.0, device=pvp_pred.device)
         n_seg = 0
         for si in range(N_SEGMENTS):
