@@ -516,9 +516,9 @@ def junction_diagnostic_table(patient_results):
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument('--checkpoint_dir', type=str, required=True,
+    ap.add_argument('--checkpoint_dir', type=str, default=r'E:\pycharm_code\liver_cirrhosis\PVP_predictor\runs\v5.1\fold_2\best.pt',required=True,
                     help='Directory containing fold_*/best.pt and normalization.pt')
-    ap.add_argument('--data_root', type=str, required=True)
+    ap.add_argument('--data_root', type=str, default=r"F:\PCG data\dataset\test4all_sample",required=True)
     ap.add_argument('--out_dir',   type=str, default='./inference_out')
     ap.add_argument('--patient',   type=str, default=None,
                     help='Single patient name; default = all.')
