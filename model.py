@@ -682,6 +682,11 @@ class PortalPressureNet(nn.Module):
 
     def __init__(self, d_hidden: int = 32, dropout: float = 0.15,
                  gnn_layers: int = 2, use_residual: bool = True,
+                 use_q_scale: bool = True,
+                 use_physics_baseline: bool = True,
+                 use_aux: bool = True,
+                 use_flow_features: bool = True,
+                 use_branch_embed: bool = True,
                  pvp_mean_pa: float = PVP_MEAN_PA_DEFAULT,
                  pvp_std_pa:  float = PVP_STD_PA_DEFAULT,
                  log_vol_mean: float = LOG_VOL_MEAN_DEFAULT,
@@ -689,6 +694,11 @@ class PortalPressureNet(nn.Module):
         super().__init__()
         self.d_hidden = d_hidden
         self.use_residual = use_residual
+        self.use_q_scale = use_q_scale
+        self.use_physics_baseline = use_physics_baseline
+        self.use_aux = use_aux
+        self.use_flow_features = use_flow_features
+        self.use_branch_embed = use_branch_embed
 
         # ── Existing modules ─────────────────────────────────
         self.geom_encoder = GeometryEncoder(
@@ -860,6 +870,8 @@ class PortalPressureNet(nn.Module):
 
         # ── Patient-specific Q scale from organ volumes ──────
         q_scale = self.q_estimator(organ_volumes, organ_valid)  # (B,)
+        if not self.use_q_scale:
+            q_scale = torch.ones_like(q_scale)
 
         # ── Per-branch encoding ──────────────────────────────
         branch_embed  = torch.zeros(B, S, self.d_hidden, device=profiles.device)
@@ -880,8 +892,9 @@ class PortalPressureNet(nn.Module):
         # Flow estimation (relative Q: fractions summing to 1)
         branch_resistance = self._branch_resistance_prior(
             profiles, arc_lengths, point_valid, segment_mask)
+        aux_for_flow = aux_norm if self.use_aux else torch.zeros_like(aux_norm)
         flow_out = self.flow_est(
-            branch_embed, aux_norm, segment_mask, junction_diam, branch_resistance)
+            branch_embed, aux_for_flow, segment_mask, junction_diam, branch_resistance)
         Q = flow_out['Q']  # (B, S) relative fractions
 
         # ── Per-branch Poiseuille with patient-specific Q ────
@@ -900,14 +913,20 @@ class PortalPressureNet(nn.Module):
         baseline_pa   = self._physics_baseline_pa(hemo_per_seg, segment_mask)
         baseline_norm = ((baseline_pa - self.pvp_mean_pa) / self.pvp_std_pa
                          ).clamp(min=-5.0, max=5.0)
+        if not self.use_physics_baseline:
+            baseline_norm = torch.zeros_like(baseline_norm)
 
         # ── Predictor sees baseline as a feature too ─────────
-        branch_flat = branch_embed.reshape(B, -1)
+        branch_for_fused = branch_embed if self.use_branch_embed else torch.zeros_like(branch_embed)
+        q_for_fused = Q if self.use_flow_features else torch.zeros_like(Q)
+        junction_for_fused = jp['features'] if self.use_flow_features else torch.zeros_like(jp['features'])
+        aux_for_fused = aux_norm if self.use_aux else torch.zeros_like(aux_norm)
+        branch_flat = branch_for_fused.reshape(B, -1)
         fused = torch.cat([
-            branch_flat, Q, jp['features'],
+            branch_flat, q_for_fused, junction_for_fused,
             q_scale.unsqueeze(-1),
             baseline_norm.unsqueeze(-1),
-            aux_norm,
+            aux_for_fused,
         ], dim=-1)
         fused = torch.nan_to_num(fused, nan=0.0, posinf=1e3, neginf=-1e3)
 

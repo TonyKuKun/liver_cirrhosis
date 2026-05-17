@@ -54,6 +54,44 @@ def _safe_aux(aux, key, threshold=0.5):
         return 0
 
 
+def torch_load_compat(path, *args, **kwargs):
+    """Load torch files saved with newer NumPy from older NumPy environments."""
+    if not hasattr(np, "_core") and hasattr(np, "core"):
+        import sys
+        sys.modules.setdefault("numpy._core", np.core)
+        sys.modules.setdefault("numpy._core.multiarray", np.core.multiarray)
+        sys.modules.setdefault("numpy._core.numeric", np.core.numeric)
+    return torch.load(path, *args, **kwargs)
+
+
+def load_model_state_compat(model, state_dict):
+    """
+    Load a checkpoint state dict across small wrapper/version differences.
+
+    Handles DataParallel's ``module.`` prefix and skips tensors whose shapes no
+    longer match the current model, then delegates missing/unexpected reporting
+    to PyTorch's IncompatibleKeys return value.
+    """
+    if not isinstance(state_dict, dict):
+        raise TypeError("state_dict must be a dict-like mapping of parameter names to tensors")
+
+    current_state = model.state_dict()
+    compatible_state = {}
+    skipped = []
+    for key, value in state_dict.items():
+        clean_key = key[7:] if key.startswith("module.") else key
+        if clean_key in current_state and hasattr(value, "shape"):
+            if tuple(value.shape) != tuple(current_state[clean_key].shape):
+                skipped.append(clean_key)
+                continue
+        compatible_state[clean_key] = value
+
+    result = model.load_state_dict(compatible_state, strict=False)
+    if skipped:
+        print(f"[Checkpoint] Skipped {len(skipped)} shape-mismatched tensors: {skipped[:8]}")
+    return result
+
+
 def prediction_rows_from_batch(out, batch, fold, label_mean, label_std):
     pvp_norm = out["pvp_pred"].detach().squeeze(-1).cpu().numpy()
     preds = pvp_norm * label_std + label_mean
@@ -174,8 +212,8 @@ def write_group_summary(rows, path):
 
 def load_trained_dataset(checkpoint_dir, data_root, n_points=100, verbose=False):
     ds = PortalVeinDataset(data_root, n_points=n_points, verbose=verbose)
-    norm = torch.load(os.path.join(checkpoint_dir, "normalization.pt"),
-                      map_location="cpu", weights_only=False)
+    norm = torch_load_compat(os.path.join(checkpoint_dir, "normalization.pt"),
+                             map_location="cpu", weights_only=False)
     ds.profile_mean = norm["profile_mean"]
     ds.profile_std = norm["profile_std"]
     ds.aux_mean = norm["aux_mean"]
@@ -195,14 +233,21 @@ def collect_oof_predictions(checkpoint_dir, data_root, n_points=100, batch_size=
     for fold in splits:
         fold_idx = int(fold["fold"])
         val_idx = [name_to_idx[n] for n in fold["val_names"] if n in name_to_idx]
-        ckpt = torch.load(os.path.join(checkpoint_dir, f"fold_{fold_idx}", "best.pt"),
-                          map_location=device, weights_only=False)
+        ckpt = torch_load_compat(os.path.join(checkpoint_dir, f"fold_{fold_idx}", "best.pt"),
+                                 map_location=device, weights_only=False)
         args = ckpt.get("args", {})
         model = PortalPressureNet(
             d_hidden=args.get("d_hidden", 32),
             dropout=args.get("dropout", 0.3),
+            gnn_layers=args.get("gnn_layers", 2),
+            use_residual=args.get("use_residual", True),
+            use_q_scale=args.get("use_q_scale", True),
+            use_physics_baseline=args.get("use_physics_baseline", True),
+            use_aux=args.get("use_aux", True),
+            use_flow_features=args.get("use_flow_features", True),
+            use_branch_embed=args.get("use_branch_embed", True),
         ).to(device)
-        model.load_state_dict(ckpt["model_state_dict"])
+        load_model_state_compat(model, ckpt["model_state_dict"])
         loader = DataLoader(Subset(ds, val_idx), batch_size=batch_size, shuffle=False,
                             collate_fn=collate_fn, num_workers=0, drop_last=False)
         all_rows.extend(collect_prediction_rows(

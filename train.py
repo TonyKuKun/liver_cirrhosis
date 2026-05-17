@@ -273,6 +273,11 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
     model = PortalPressureNet(
         d_hidden=args.d_hidden, dropout=args.dropout,
         gnn_layers=args.gnn_layers, use_residual=args.use_residual,
+        use_q_scale=args.use_q_scale,
+        use_physics_baseline=args.use_physics_baseline,
+        use_aux=args.use_aux,
+        use_flow_features=args.use_flow_features,
+        use_branch_embed=args.use_branch_embed,
     ).to(device)
     if fold_idx == 0:
         total, train = count_params(model)
@@ -390,6 +395,16 @@ def main():
     ap.add_argument('--gnn_layers',   type=int,   default=2)
     ap.add_argument('--use_residual', action='store_true', default=True)
     ap.add_argument('--no_residual',  dest='use_residual', action='store_false')
+    ap.add_argument('--use_q_scale', action='store_true', default=True)
+    ap.add_argument('--no_q_scale',  dest='use_q_scale', action='store_false')
+    ap.add_argument('--use_physics_baseline', action='store_true', default=True)
+    ap.add_argument('--no_physics_baseline',  dest='use_physics_baseline', action='store_false')
+    ap.add_argument('--use_aux', action='store_true', default=True)
+    ap.add_argument('--no_aux',  dest='use_aux', action='store_false')
+    ap.add_argument('--use_flow_features', action='store_true', default=True)
+    ap.add_argument('--no_flow_features',  dest='use_flow_features', action='store_false')
+    ap.add_argument('--use_branch_embed', action='store_true', default=True)
+    ap.add_argument('--no_branch_embed',  dest='use_branch_embed', action='store_false')
     # Loss weights
     ap.add_argument('--huber_delta',      type=float, default=1.0)
     ap.add_argument('--lambda_murray',    type=float, default=0.10)

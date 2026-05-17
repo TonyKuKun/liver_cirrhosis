@@ -38,19 +38,58 @@ import numpy as np
 import torch
 
 from dataset import PortalVeinDataset, collate_fn, SEGMENTS, SEG_INDEX, N_SEGMENTS
-from diagnostics import load_model_state_compat
+from diagnostics import load_model_state_compat, torch_load_compat
 from model import PortalPressureNet, BLOOD_VISCOSITY_PA_S, Q_REF_M3_PER_S
 
 
 # =====================================================================
 # Inference for one patient (or batch)
 # =====================================================================
+def _resolve_checkpoint_paths(checkpoint_path, fold=0):
+    """
+    Accept either a run directory, a fold directory, or a direct best.pt path.
+
+    Examples:
+      runs/v5.1
+      runs/v5.1/fold_2
+      runs/v5.1/fold_2/best.pt
+    """
+    checkpoint_path = os.fspath(checkpoint_path)
+
+    if os.path.isfile(checkpoint_path) or checkpoint_path.lower().endswith(".pt"):
+        fold_path = checkpoint_path
+        fold_dir = os.path.dirname(fold_path)
+        run_dir = (os.path.dirname(fold_dir)
+                   if os.path.basename(fold_dir).startswith("fold_")
+                   else fold_dir)
+    elif os.path.isdir(checkpoint_path) and os.path.isfile(os.path.join(checkpoint_path, "best.pt")):
+        fold_path = os.path.join(checkpoint_path, "best.pt")
+        run_dir = (os.path.dirname(checkpoint_path)
+                   if os.path.basename(checkpoint_path).startswith("fold_")
+                   else checkpoint_path)
+    else:
+        run_dir = checkpoint_path
+        fold_path = os.path.join(run_dir, f"fold_{fold}", "best.pt")
+
+    norm_path = os.path.join(run_dir, "normalization.pt")
+    if not os.path.isfile(fold_path):
+        raise FileNotFoundError(
+            f"Checkpoint file not found: {fold_path}. "
+            "Pass either the run directory or a fold_*/best.pt file."
+        )
+    if not os.path.isfile(norm_path):
+        raise FileNotFoundError(
+            f"Normalization file not found: {norm_path}. "
+            "It should be next to splits.json/summary.json in the run directory."
+        )
+    return norm_path, fold_path
+
+
 def load_checkpoint(checkpoint_dir, fold=0, device='cpu'):
     """Loads a fold's best.pt + dataset normalization."""
-    norm_path = os.path.join(checkpoint_dir, 'normalization.pt')
-    norm = torch.load(norm_path, map_location='cpu', weights_only=False)
-    fold_path = os.path.join(checkpoint_dir, f'fold_{fold}', 'best.pt')
-    ckpt = torch.load(fold_path, map_location=device, weights_only=False)
+    norm_path, fold_path = _resolve_checkpoint_paths(checkpoint_dir, fold=fold)
+    norm = torch_load_compat(norm_path, map_location='cpu', weights_only=False)
+    ckpt = torch_load_compat(fold_path, map_location=device, weights_only=False)
     args = ckpt.get('args', {})
     model = PortalPressureNet(
         d_hidden=args.get('d_hidden', 32),
@@ -516,9 +555,9 @@ def junction_diagnostic_table(patient_results):
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument('--checkpoint_dir', type=str, required=True,
-                    help='Directory containing fold_*/best.pt and normalization.pt')
-    ap.add_argument('--data_root', type=str, required=True)
+    ap.add_argument('--checkpoint_dir', type=str, default=r'E:\pycharm_code\liver_cirrhosis\PVP_predictor\runs\v5.1\fold_2\best.pt',
+                    help='Run directory, fold directory, or direct fold_*/best.pt checkpoint path')
+    ap.add_argument('--data_root', type=str, default=r"F:\PCG data\dataset\test4all_sample")
     ap.add_argument('--out_dir',   type=str, default='./inference_out')
     ap.add_argument('--patient',   type=str, default=None,
                     help='Single patient name; default = all.')

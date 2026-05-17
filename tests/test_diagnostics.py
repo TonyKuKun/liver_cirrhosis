@@ -4,9 +4,11 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from diagnostics import (
     PREDICTION_COLUMNS,
+    load_model_state_compat,
     subject_id_from_name,
     summarize_prediction_rows,
     write_prediction_csv,
@@ -91,6 +93,18 @@ class DiagnosticsTest(unittest.TestCase):
             summary["groups"]["post_tips=1"]["circuit_means"]["g_tips"],
             0.4,
         )
+
+    def test_load_model_state_compat_strips_module_prefix(self):
+        model = torch.nn.Linear(2, 1)
+        state = {f"module.{k}": v.clone() for k, v in model.state_dict().items()}
+
+        loaded = torch.nn.Linear(2, 1)
+        result = load_model_state_compat(loaded, state)
+
+        self.assertEqual(result.missing_keys, [])
+        self.assertEqual(result.unexpected_keys, [])
+        for key, value in model.state_dict().items():
+            self.assertTrue(torch.equal(loaded.state_dict()[key], value))
 
 
 if __name__ == "__main__":
