@@ -65,7 +65,7 @@ except ImportError:
             get_z_range_from_bone = None  # type: ignore
 
 
-PRETRAIN_ALGORITHM_VERSION = "2026-05-15-v6-precomputed-nii"
+PRETRAIN_ALGORITHM_VERSION = "2026-05-16-v6e-tips-high-hu"
 PRETRAIN_META_NAME = "pretrain_meta.json"
 PRETRAIN_NII_NAME = "pretrain.nii.gz"
 MAX_STL_BYTES = 20_000 * 1024
@@ -74,6 +74,9 @@ TARGET_VOXELS_TIPS = 330_000
 REGION_GROW_BRIDGE_MM = 8.0
 REGION_GROW_MAX_SEED_SNAP_MM = 30.0
 HU_MARGIN = 5.0  # 门静脉 HU 采样后上下各扩展的边距
+HU_LOW_FLOOR = 75.0
+DEFAULT_HU_HIGH_CAP = 600.0
+TIPS_HU_HIGH_CAP = 3071.0
 
 DEFAULT_BONE_NAMES = [
     "vertebrae_L5", "vertebrae_L4", "vertebrae_L3", "vertebrae_L2", "vertebrae_L1",
@@ -112,19 +115,11 @@ def _load_nifti(path: Path):
     affine = img.affine.copy()
     # 从 affine 提取 spacing 和 origin
     spacing = np.sqrt((affine[:3, :3] ** 2).sum(axis=0))
-    # NIfTI 的轴序是 (i,j,k) 对应 (x,y,z) 或有方向矩阵
-    # 这里简化：假设 data shape = (nz, ny, nx)，spacing 对应
-    # nibabel 加载的 shape 可能是 (nx, ny, nz)，需要转置
-    # 常见情况：nibabel shape = (nx, ny, nz), 需要转为 (nz, ny, nx)
+    # NIfTI arrays from nibabel are indexed as (x, y, z). The pipeline works in
+    # DICOM-style (z, y, x), so transpose both images and masks consistently.
     if len(data.shape) == 3:
-        # 检查是否需要转置：如果第一个维度远大于第三个，可能已经是 (nz, ny, nx)
-        # 否则转置
-        if data.shape[2] > data.shape[0]:
-            # (nx, ny, nz) → (nz, ny, nx)
-            data = np.transpose(data, (2, 1, 0))
-            spacing_zyx = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
-        else:
-            spacing_zyx = (float(spacing[0]), float(spacing[1]), float(spacing[2]))
+        data = np.transpose(data, (2, 1, 0))
+        spacing_zyx = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
     else:
         spacing_zyx = tuple(float(s) for s in spacing[:3])
 
@@ -385,6 +380,48 @@ def _z_range_from_precomputed_bone_nii(
     }
 
 
+def _z_range_from_portal_nii(
+    case,
+    vol_shape: tuple[int, int, int],
+    spacing_zyx: tuple[float, float, float],
+    margin_mm: float,
+    cache: MaskCache | None = None,
+) -> tuple[int | None, int | None, dict]:
+    """Infer the z ROI from the portal/splenic vein mask before falling back to bone."""
+    portal_mask, portal_info = _get_portal_vein_mask_fast(case, vol_shape, cache)
+    info = dict(portal_info)
+    info["source"] = "precomputed_portal_vein_nii"
+    if portal_mask is None or not portal_mask.any():
+        info["status"] = "no_portal_mask_for_z"
+        return None, None, info
+
+    z_values = np.flatnonzero(np.any(portal_mask, axis=(1, 2)))
+    if len(z_values) == 0:
+        info["status"] = "empty_portal_z"
+        return None, None, info
+
+    nz = vol_shape[0]
+    dz = max(float(spacing_zyx[0]), 1e-3)
+    margin_slices = int(np.ceil(margin_mm / dz))
+    raw_start = int(z_values[0])
+    raw_end = int(z_values[-1])
+    z_start = max(0, raw_start - margin_slices)
+    z_end = min(nz - 1, raw_end + margin_slices)
+    info.update({
+        "status": "ok",
+        "z_start": z_start,
+        "z_end": z_end,
+        "z_range_mm": round(float((z_end - z_start) * dz), 1),
+        "raw_portal_z_start": raw_start,
+        "raw_portal_z_end": raw_end,
+        "margin_mm": margin_mm,
+        "margin_slices": margin_slices,
+        "portal_z_slices": int(len(z_values)),
+        "portal_voxels": int(portal_mask.sum()),
+    })
+    return z_start, z_end, info
+
+
 def _precomputed_segmentation_mtime(case) -> float:
     latest = 0.0
     seg_dir = case.path / "segmentation"
@@ -434,6 +471,11 @@ def _standardize_z_from_bone(
 
     如果 bone 分割不可用，退化为 volume 的 20%-82%。
     """
+    portal_margin_mm = max(margin_mm, 45.0 if getattr(case, "is_post_tips", False) else 35.0)
+    z_start, z_end, info = _z_range_from_portal_nii(case, vol_shape, spacing_zyx, portal_margin_mm, cache)
+    if z_start is not None and z_end is not None:
+        return z_start, z_end, info
+
     z_start, z_end, info = _z_range_from_precomputed_bone_nii(case, vol_shape, spacing_zyx, margin_mm, cache)
     if z_start is not None and z_end is not None:
         return z_start, z_end, info
@@ -484,7 +526,9 @@ def _sample_hu_from_portal_vein(
 
     if pv_mask is None or pv_mask.sum() == 0:
         info["status"] = "no_portal_vein_mask"
-        return 100.0, 350.0, info
+        hu_high = TIPS_HU_HIGH_CAP if getattr(case, "is_post_tips", False) else 350.0
+        info["hu_high_source"] = "tips_high_cap" if getattr(case, "is_post_tips", False) else "fallback"
+        return 100.0, hu_high, info
 
     # 在门静脉 mask 内采样 HU
     pv_hu = vol[pv_mask]
@@ -492,32 +536,49 @@ def _sample_hu_from_portal_vein(
 
     if len(pv_hu) < 50:
         info["status"] = "too_few_samples"
-        return 100.0, 350.0, info
+        hu_high = TIPS_HU_HIGH_CAP if getattr(case, "is_post_tips", False) else 350.0
+        info["hu_high_source"] = "tips_high_cap" if getattr(case, "is_post_tips", False) else "fallback"
+        return 100.0, hu_high, info
 
     p2 = float(np.percentile(pv_hu, 2))
     p10 = float(np.percentile(pv_hu, 10))
+    p20 = float(np.percentile(pv_hu, 20))
+    p25 = float(np.percentile(pv_hu, 25))
     p50 = float(np.percentile(pv_hu, 50))
     p90 = float(np.percentile(pv_hu, 90))
     p98 = float(np.percentile(pv_hu, 98))
 
-    hu_low = p2 - hu_margin
+    hu_low = max(p20 - hu_margin, p50 - 25.0)
     hu_high = p98 + hu_margin
 
-    # 安全下限：不低于 40（避免捞到脂肪/水）
-    hu_low = max(40.0, hu_low)
-    # 安全上限：不高于 600（避免捞到骨骼/金属，但 TIPS 支架单独处理）
-    hu_high = min(600.0, hu_high)
+    # p2/p10 are too permissive for partial-volume edge voxels and weakly
+    # enhanced liver tissue. Tie the lower bound to the portal-vein body.
+    hu_low = max(HU_LOW_FLOOR, hu_low)
+    if getattr(case, "is_post_tips", False):
+        hu_high = max(hu_high, TIPS_HU_HIGH_CAP)
+        hu_high_source = "tips_high_cap"
+    else:
+        # Non-TIPS cases should not pull in bone/metal-like high HU structures.
+        hu_high = min(DEFAULT_HU_HIGH_CAP, hu_high)
+        hu_high_source = "portal_p98_plus_margin"
 
     info.update({
         "status": "ok",
         "p2": round(p2, 1),
         "p10": round(p10, 1),
+        "p20": round(p20, 1),
+        "p25": round(p25, 1),
         "p50": round(p50, 1),
         "p90": round(p90, 1),
         "p98": round(p98, 1),
         "hu_low": round(hu_low, 1),
         "hu_high": round(hu_high, 1),
         "hu_margin": hu_margin,
+        "hu_low_source": "max(HU_LOW_FLOOR, p20 - hu_margin, p50 - 25)",
+        "hu_low_floor": HU_LOW_FLOOR,
+        "hu_high_source": hu_high_source,
+        "default_hu_high_cap": DEFAULT_HU_HIGH_CAP,
+        "tips_hu_high_cap": TIPS_HU_HIGH_CAP,
     })
     return hu_low, hu_high, info
 
@@ -737,7 +798,7 @@ def _add_tips_stent(
     z_start: int,
     z_end: int,
     tips_hu_low: float = 430.0,
-    tips_hu_high: float = 3071.0,
+    tips_hu_high: float = TIPS_HU_HIGH_CAP,
     exclusion_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict]:
     """单独处理 TIPS 支架（高 HU 通道）。"""

@@ -165,6 +165,24 @@ def mask_to_stl(
     return write_binary_stl(out_path, verts_xyz, faces)
 
 
+def nifti_mask_to_stl(mask_xyz: np.ndarray, affine: np.ndarray, out_path: str | Path) -> Path:
+    """Convert a binary NIfTI-order x-y-z mask to STL using the NIfTI affine."""
+    try:
+        from nibabel.affines import apply_affine
+        from skimage import measure
+    except ImportError as exc:
+        raise ImportError("nibabel and scikit-image are required for NIfTI STL export.") from exc
+
+    out_path = Path(out_path)
+    mask = np.asarray(mask_xyz, dtype=np.uint8)
+    if mask.sum() == 0:
+        return write_binary_stl(out_path, np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.int64))
+    verts_ijk, faces, _, _ = measure.marching_cubes(np.pad(mask, 1), level=0.5)
+    verts_ijk -= 1.0
+    verts_xyz = apply_affine(np.asarray(affine, dtype=np.float64), verts_ijk)
+    return write_binary_stl(out_path, np.asarray(verts_xyz, dtype=np.float32), faces, "prediction")
+
+
 def write_binary_stl(out_path: str | Path, vertices_xyz: np.ndarray, faces: np.ndarray, name: str = "vessel") -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

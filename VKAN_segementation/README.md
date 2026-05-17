@@ -6,7 +6,7 @@ This folder implements the workflow:
 2. Use Gemma/OpenAI-compatible API when configured to choose a high-recall HU window and crop box.
 3. Fall back to portal-venous heuristics when the API is unavailable.
 4. Save coarse `patient/pretrain.stl` for training and visual review.
-5. Train a VKAN-style 3D refinement network from `pretrain.stl` and `vessel.stl`, then save `patient/predict.stl` and `patient/predict_smooth.stl`.
+5. Train a VKAN-style 3D refinement network from cropped `pretrain.nii.gz` and label NIfTI masks, then save `patient/predict_mask.nii.gz`, `patient/predict.stl`, and `patient/predict_smooth.stl`.
 
 Patient naming:
 
@@ -51,8 +51,29 @@ when you want to skip patients that already have `pretrain.stl`.
 Train:
 
 ```powershell
-py VKAN_segementation\refinement\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\vkan --grid_size 96 --epochs 120 --batch_size 1
+py VKAN_segementation\refinement\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\vkan --dataset nii --grid_size 96 --epochs 120 --batch_size 1
 ```
+
+Training writes `best.pt` when validation dice improves and overwrites `last.pt`
+after every epoch. If training is interrupted, continue from `last.pt` with:
+
+```powershell
+py VKAN_segementation\refinement\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\vkan --dataset nii --resume
+```
+
+NIfTI training uses `pretrain.nii.gz` as input and `mask.nii.gz` as the default target.
+Use `--label_name auto` to pick `mask_label.nii.gz` or `mask_smooth.nii.gz` instead.
+
+If your current `mask.nii.gz` is an overlay volume containing `orig.nii.gz + mask`,
+first derive a clean binary mask:
+
+```powershell
+py VKAN_segementation\pretrain\derive_mask_from_overlay.py --data_root D:\your_patient_root
+```
+
+The script renames the overlay to `origm.nii.gz`, then writes a new binary
+`mask.nii.gz` from `origm.nii.gz - orig.nii.gz`. Use `--force` to rebuild an
+existing `mask.nii.gz`.
 
 Predict:
 
@@ -76,7 +97,8 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 
 - `pretrain.stl`: coarse vessel candidate for visual inspection; empty masks and cases over 20,000KB are flagged for review.
 - `pre.stl`: optional correct-case example for debugging failed `pretrain.stl`; it is not used as a preprocessing prior.
-- `vessel.stl`: manual vessel label used by VKAN training and overlap diagnostics; it is never used to generate `pretrain.stl`.
+- `mask_label.nii.gz` / `mask_smooth.nii.gz`: binary manual vessel label used by VKAN training.
+- `vessel.stl`: optional manual vessel label kept for STL debugging and overlap diagnostics; it is not used by default NIfTI training.
 - `vkan_work/coarse_plan.json`: HU range and crop box used.
 - `vkan_work/pretrain_meta.json`: preprocessing version, DICOM input timestamp, QA status, overlap diagnostics, and output statistics.
 - `vkan_work/pretrain_mask.npy`: coarse mask for debugging.
@@ -90,7 +112,7 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 - `pre.stl` and `vessel.stl` are debug/evaluation references only. Coarse preprocessing must extract `pretrain.stl` from `patient/dcm/` without using those STL files as crop, seed, envelope, or threshold priors.
 - Coarse preprocessing intentionally prioritizes recall. It keeps portal vein, splenic vein, short SMV, LPV/RPV, compensation veins when visible, and TIPS for post-TIPS folders.
 - The refinement model learns a full target occupancy, not a subtraction mask, so it can both delete false positives and fill small false negatives.
-- `grid_size=96` is a practical default. Increase to `128` if GPU memory allows.
+- NIfTI refinement crops each case around the `pretrain.nii.gz` foreground before resizing to `grid_size`, which keeps more detail than compressing the full 512x512xZ scan into the training grid. The default `grid_size=160` and `base_channels=24` are intended for a 12GB GPU; reduce to `128`/`24` or `96`/`16` if memory is tight.
 
 ## Code layout
 
