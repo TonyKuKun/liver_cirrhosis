@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -52,6 +53,8 @@ BONE_LABELS = {
     "vertebrae_T12": 6, "vertebrae_T11": 7, "vertebrae_T10": 8, "vertebrae_T9": 9, "vertebrae_T8": 10,
     "vertebrae_T7": 11, "vertebrae_T6": 12, "vertebrae_T5": 13, "vertebrae_T4": 14, "vertebrae_T3": 15,
     "vertebrae_T2": 16, "vertebrae_T1": 17,
+    "vertebrae_C7": None, "vertebrae_C6": None, "vertebrae_C5": None, "vertebrae_C4": None,
+    "vertebrae_C3": None, "vertebrae_C2": None, "vertebrae_C1": None,
     "rib_left_1": 18, "rib_left_2": 19, "rib_left_3": 20, "rib_left_4": 21, "rib_left_5": 22,
     "rib_left_6": 23, "rib_left_7": 24, "rib_left_8": 25, "rib_left_9": 26, "rib_left_10": 27,
     "rib_left_11": 28, "rib_left_12": 29,
@@ -59,6 +62,11 @@ BONE_LABELS = {
     "rib_right_6": 35, "rib_right_7": 36, "rib_right_8": 37, "rib_right_9": 38, "rib_right_10": 39,
     "rib_right_11": 40, "rib_right_12": 41,
     "hip_left": 42, "hip_right": 43, "sacrum": 44,
+    "femur_left": None, "femur_right": None,
+    "scapula_left": None, "scapula_right": None,
+    "clavicula_left": None, "clavicula_right": None,
+    "humerus_left": None, "humerus_right": None,
+    "sternum": None,
 }
 
 ORGAN_LABELS = {
@@ -140,7 +148,7 @@ def run_segmentation(
     if not force:
         needed = []
         for name in structures:
-            if _structure_stl_done(seg_dir, name):
+            if _structure_done(seg_dir, name):
                 continue  # 跳过
             needed.append(name)
     else:
@@ -200,7 +208,7 @@ def run_segmentation(
         stl_out = seg_dir / f"{name}.stl"
 
         # 跳过已存在的
-        if not force and _structure_stl_done(seg_dir, name):
+        if not force and _structure_done(seg_dir, name):
             previous = structure_info.get(name, {})
             structure_info[name] = {"status": "existed", **previous}
             structure_info[name]["status"] = "existed"
@@ -230,6 +238,8 @@ def run_segmentation(
                 "stl": str(stl_out),
                 "stl_bytes": stl_size,
             }
+            if name == "bone_all":
+                structure_info[name]["source_bones"] = list(BONE_LABELS)
             print(f"    {name}: {int(mask.sum())} voxels, stl {stl_size // 1024}KB")
 
         except Exception as e:
@@ -259,6 +269,37 @@ def _load_existing_meta(meta_path: Path) -> dict:
 def _structure_stl_done(seg_dir: Path, name: str) -> bool:
     stl = seg_dir / f"{name}.stl"
     return stl.exists() and stl.stat().st_size > 0
+
+
+def _structure_nii_done(seg_dir: Path, name: str) -> bool:
+    nii = seg_dir / f"{name}.nii.gz"
+    return nii.exists() and nii.stat().st_size > 0
+
+
+def _structure_done(seg_dir: Path, name: str) -> bool:
+    if not (_structure_nii_done(seg_dir, name) and _structure_stl_done(seg_dir, name)):
+        return False
+    if name == "bone_all":
+        return _bone_source_files_done(seg_dir) and _bone_meta_done(seg_dir)
+    return True
+
+
+def _bone_meta_done(seg_dir: Path) -> bool:
+    meta = _load_existing_meta(seg_dir / "segmentation_meta.json")
+    info = meta.get("structures", {}).get("bone_all", {})
+    source_bones = info.get("source_bones", [])
+    return set(source_bones) >= set(BONE_LABELS)
+
+
+def _bone_source_files_done(seg_dir: Path) -> bool:
+    for ts_output in (seg_dir / "totalseg_output", seg_dir / "ts_raw"):
+        if all(
+            (ts_output / f"{bone_name}.nii.gz").exists()
+            and (ts_output / f"{bone_name}.nii.gz").stat().st_size > 0
+            for bone_name in BONE_LABELS
+        ):
+            return True
+    return False
 
 
 def _find_totalseg_output(ts_output: Path) -> Path | None:
@@ -389,7 +430,8 @@ def _extract_structure(
             data, affine, _ = _load_nifti(individual)
             part = data > 0
             mask = part if mask is None else (mask | part)
-        return mask, affine
+        if mask is not None:
+            return mask, affine
 
     if name in {"liver_left", "liver_right"}:
         individual = ts_output / "liver.nii.gz"
@@ -408,6 +450,8 @@ def _extract_structure(
     if name == "bone_all":
         mask = np.zeros(combined_data.shape, dtype=bool)
         for label_id in BONE_LABELS.values():
+            if label_id is None:
+                continue
             mask |= (combined_data == label_id)
         return mask, combined_affine
 
@@ -722,6 +766,22 @@ def _progress_line(done: int, total: int, start_time: float) -> str:
     )
 
 
+def discover_orig_patients(root: str | Path) -> list[SimpleNamespace]:
+    """Find every patient folder with orig.nii.gz."""
+    root = Path(root)
+    if not root.exists():
+        return []
+    if (root / "orig.nii.gz").is_file():
+        patient_dirs = [root]
+    else:
+        patient_dirs = sorted(p for p in root.iterdir() if p.is_dir())
+    return [
+        SimpleNamespace(name=path.name, path=path)
+        for path in patient_dirs
+        if (path / "orig.nii.gz").is_file()
+    ]
+
+
 # =========================================================================
 # CLI
 # =========================================================================
@@ -751,7 +811,7 @@ def main():
         help="Overwrite and re-extract structures even if STL files already exist",
     )
     parser.add_argument("--device", default="gpu", choices=["gpu", "cpu"])
-    parser.add_argument("--fast", action="store_true", default=True,
+    parser.add_argument("--fast", action="store_true", default=False,
                         help="TotalSegmentator fast mode (3mm resolution)")
     parser.add_argument("--no-fast", dest="fast", action="store_false")
     parser.add_argument(
@@ -765,17 +825,7 @@ def main():
                         help="STL smoothing relaxation factor (default: 0.3)")
     args = parser.parse_args()
 
-    try:
-        from utils.common import discover_patients
-    except ImportError:
-        sys.path.insert(0, str(Path(args.data_root).resolve().parent))
-        try:
-            from utils.common import discover_patients
-        except ImportError:
-            print("Cannot import discover_patients")
-            sys.exit(1)
-
-    cases = discover_patients(args.data_root)
+    cases = discover_orig_patients(args.data_root)
     if args.patient:
         cases = [c for c in cases if c.name == args.patient]
 

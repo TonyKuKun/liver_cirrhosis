@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+MODEL_NAMES = ("vkan", "nnvnet")
+
 
 class KANGate3D(nn.Module):
     """Lightweight spline-like channel gate used in refinement blocks."""
@@ -96,4 +98,20 @@ def dice_score(logits: torch.Tensor, target: torch.Tensor, threshold: float = 0.
     inter = (pred * target).sum().item()
     denom = pred.sum().item() + target.sum().item()
     return float((2.0 * inter + 1.0) / (denom + 1.0))
+
+
+def create_refinement_model(model_name: str = "vkan", base_channels: int = 16) -> nn.Module:
+    name = model_name.lower().replace("-", "").replace("_", "")
+    if name in {"vkan", "vesselvkan"}:
+        return VesselVKAN(base_channels=base_channels)
+    if name in {"nnvnet", "nnvnet3d"}:
+        try:
+            from .nnvnet import NNVNet
+        except ImportError:
+            try:
+                from VKAN_segementation.refinement.nnvnet import NNVNet
+            except ImportError:
+                from refinement.nnvnet import NNVNet
+        return NNVNet(base_channels=base_channels)
+    raise ValueError(f"Unknown refinement model '{model_name}'. Available: {', '.join(MODEL_NAMES)}")
 

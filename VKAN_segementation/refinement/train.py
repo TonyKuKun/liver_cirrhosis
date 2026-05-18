@@ -12,15 +12,15 @@ from torch.utils.data import DataLoader, random_split
 
 try:
     from .dataset import VesselNiiDataset, VesselSTLDataset, collate_fn
-    from .model import DiceBCELoss, VesselVKAN, dice_score
+    from .model import MODEL_NAMES, DiceBCELoss, create_refinement_model, dice_score
 except ImportError:
     try:
         from VKAN_segementation.refinement.dataset import VesselNiiDataset, VesselSTLDataset, collate_fn
-        from VKAN_segementation.refinement.model import DiceBCELoss, VesselVKAN, dice_score
+        from VKAN_segementation.refinement.model import MODEL_NAMES, DiceBCELoss, create_refinement_model, dice_score
     except ImportError:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from refinement.dataset import VesselNiiDataset, VesselSTLDataset, collate_fn
-        from refinement.model import DiceBCELoss, VesselVKAN, dice_score
+        from refinement.model import MODEL_NAMES, DiceBCELoss, create_refinement_model, dice_score
 
 
 def set_seed(seed: int) -> None:
@@ -61,6 +61,7 @@ def _checkpoint_payload(model, optimizer, args, epoch: int, best_dice: float, hi
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
         "args": vars(args),
+        "model_name": args.model,
         "grid_size": args.grid_size,
         "base_channels": args.base_channels,
         "best_dice": best_dice,
@@ -73,6 +74,7 @@ def main() -> None:
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
     parser.add_argument("--out_dir", default="VKAN_segementation/runs/vkan2")
     parser.add_argument("--dataset", choices=("nii", "stl"), default="nii")
+    parser.add_argument("--model", choices=MODEL_NAMES, default="vkan", help="Refinement model architecture.")
     parser.add_argument("--pretrain_name", default="pretrain.nii.gz")
     parser.add_argument("--label_name", default="mask.nii.gz", help="Label NIfTI name, or auto for mask_label/mask_smooth.")
     parser.add_argument("--label_threshold", type=float, default=0.5)
@@ -123,18 +125,23 @@ def main() -> None:
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
     val_loader = None if val_ds is None else DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate_fn, num_workers=0)
 
-    model = VesselVKAN(base_channels=args.base_channels).to(device)
-    criterion = DiceBCELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     best_dice = -1.0
     history = []
     start_epoch = 1
     resume_path = None
+    checkpoint = None
     if args.resume is not None:
         resume_path = out_dir / "last.pt" if args.resume == "auto" else Path(args.resume)
         if not resume_path.exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
         checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        ckpt_args = checkpoint.get("args", {})
+        args.model = checkpoint.get("model_name", ckpt_args.get("model", args.model))
+
+    model = create_refinement_model(args.model, base_channels=args.base_channels).to(device)
+    criterion = DiceBCELoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    if checkpoint is not None:
         model.load_state_dict(checkpoint["model_state_dict"])
         if "optimizer_state_dict" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -147,6 +154,7 @@ def main() -> None:
             {
                 "cases": [case.name for case in ds.cases],
                 "dataset": args.dataset,
+                "model": args.model,
                 "label_name": args.label_name,
                 "pretrain_name": args.pretrain_name,
                 "grid_size": args.grid_size,

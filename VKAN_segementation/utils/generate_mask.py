@@ -15,6 +15,9 @@ After processing:
         origm.nii.gz
         mask.nii.gz
         origm/       (renamed from mask/, original DICOM backup)
+
+force=False (default): incremental mode, skip steps if outputs exist.
+force=True: redo everything (overwrite).
 """
 
 import argparse
@@ -40,23 +43,7 @@ def dicom_to_nifti(dicom_dir: Path, output_nifti: Path) -> bool:
         )
 
     try:
-        # Convert the whole directory (assumes single series)
-        dicom2nifti.convert_directory(str(dicom_dir), str(output_nifti.parent))
-        # The above function writes a file named after the directory; we need to rename.
-        # More reliable: use dicom2nifti.dicom_series_to_nifti
-        # Let's use the single-series function:
-        # dicom2nifti.dicom_series_to_nifti(str(dicom_dir), str(output_nifti))
-        # However, convert_directory is simpler. We'll implement a robust version:
-    except Exception:
-        # Fallback: use pydicom + nibabel if dicom2nifti fails
-        return _dicom_to_nifti_fallback(dicom_dir, output_nifti)
-
-    # If convert_directory worked, we need to find the generated file
-    # It usually creates a file named after the first DICOM or the folder.
-    # Better to use the specific function:
-    try:
-        # Force using the explicit function
-        import dicom2nifti
+        # Use explicit single-series conversion
         dicom2nifti.dicom_series_to_nifti(str(dicom_dir), str(output_nifti))
         return True
     except Exception as e:
@@ -80,7 +67,6 @@ def _dicom_to_nifti_fallback(dicom_dir: Path, output_nifti: Path) -> bool:
     if not dcm_files:
         return False
 
-    # Read the first file to get dimensions and sorting key
     slices = []
     for f in dcm_files:
         try:
@@ -96,16 +82,13 @@ def _dicom_to_nifti_fallback(dicom_dir: Path, output_nifti: Path) -> bool:
     # Sort by ImagePositionPatient (z-coordinate)
     slices.sort(key=lambda x: float(x[0].ImagePositionPatient[2]) if hasattr(x[0], 'ImagePositionPatient') else 0)
 
-    # Build 3D volume
     first = slices[0][0]
     shape = (len(slices), int(first.Rows), int(first.Columns))
     data = np.zeros(shape, dtype=np.float32)
     for i, (ds, _) in enumerate(slices):
         data[i, :, :] = ds.pixel_array * ds.RescaleSlope + ds.RescaleIntercept if hasattr(ds, 'RescaleSlope') else ds.pixel_array
 
-    # Get affine from DICOM
-    # For simplicity, create a simple affine (assuming isotropic spacing)
-    # In practice you should compute proper affine.
+    # Simple affine (assume isotropic spacing)
     spacing = (float(first.PixelSpacing[0]), float(first.PixelSpacing[1]), 1.0)
     if len(slices) > 1:
         spacing = (spacing[0], spacing[1], abs(float(slices[1][0].ImagePositionPatient[2]) - float(slices[0][0].ImagePositionPatient[2])))
@@ -181,10 +164,10 @@ def process_patient(
 ) -> dict:
     """
     Process a single patient:
-        - Convert DICOM series in dcm/ -> orig.nii.gz
-        - Convert DICOM series in mask/ -> origm.nii.gz
-        - Rename mask/ -> origm/
-        - Compute mask.nii.gz from the two NIfTI files.
+        - Convert DICOM series in dcm/ -> orig.nii.gz (skip if exists and not force)
+        - Convert DICOM series to origm.nii.gz: prefer origm/ folder, else rename mask/ -> origm/
+        - Rename mask/ -> origm/ only if origm/ does not exist or force=True
+        - Compute mask.nii.gz from the two NIfTI files (skip if exists and not force)
     Returns a dict with status and info.
     """
     result = {
@@ -204,6 +187,8 @@ def process_patient(
     # Locate folders (case-insensitive)
     dcm_folder = None
     mask_folder = None
+    origm_folder = patient_dir / "origm"   # target folder name after renaming
+
     for child in patient_dir.iterdir():
         if child.is_dir():
             if child.name.lower() == dcm_name.lower():
@@ -215,9 +200,16 @@ def process_patient(
         result["status"] = "skipped"
         result["message"] = f"missing {dcm_name}/ folder"
         return result
-    if not mask_folder:
+
+    # For origm source: either existing origm/ or mask/ (if origm/ missing)
+    origm_source = None
+    if origm_folder.exists():
+        origm_source = origm_folder
+    elif mask_folder:
+        origm_source = mask_folder
+    else:
         result["status"] = "skipped"
-        result["message"] = f"missing {mask_name}/ folder"
+        result["message"] = f"neither {mask_name}/ nor origm/ folder found"
         return result
 
     # Define output paths
@@ -226,51 +218,82 @@ def process_patient(
     mask_nii = patient_dir / "mask.nii.gz"
 
     # Step 1: convert dcm -> orig.nii.gz
-    if not dry_run:
-        try:
-            if not dicom_to_nifti(dcm_folder, orig_nii):
+    if orig_nii.exists() and not force:
+        result["steps"].append(f"orig.nii.gz exists, skipping (use --force to redo)")
+    else:
+        if dry_run:
+            result["steps"].append("would convert dcm -> orig.nii.gz")
+        else:
+            try:
+                if not dicom_to_nifti(dcm_folder, orig_nii):
+                    result["status"] = "error"
+                    result["message"] = "DICOM to NIfTI conversion failed for dcm"
+                    return result
+                result["steps"].append("converted dcm -> orig.nii.gz")
+            except Exception as e:
                 result["status"] = "error"
-                result["message"] = "DICOM to NIfTI conversion failed for dcm"
+                result["message"] = f"dcm conversion error: {e}"
                 return result
-        except Exception as e:
-            result["status"] = "error"
-            result["message"] = f"dcm conversion error: {e}"
-            return result
-    else:
-        result["steps"].append("would convert dcm -> orig.nii.gz")
 
-    # Step 2: convert mask -> origm.nii.gz
-    if not dry_run:
-        try:
-            if not dicom_to_nifti(mask_folder, origm_nii):
+    # Step 2: ensure origm/ folder exists (rename mask/ if needed) and convert to origm.nii.gz
+    # First, handle folder existence/renaming
+    if origm_folder.exists():
+        if not force:
+            result["steps"].append(f"origm/ already exists, using it as source")
+        else:
+            # force=True: if origm/ exists but we may want to re-copy from mask/? Let's define:
+            # With force=True, we still use origm/ as source (no deletion), but we will re-convert
+            # the NIfTI from it. Or we could delete origm/ and re-rename? For safety, we keep folder.
+            result["steps"].append(f"origm/ already exists, will re-convert origm.nii.gz (force=True)")
+    else:
+        # origm/ does not exist; need to create it from mask_folder (if available)
+        if mask_folder is None:
+            result["status"] = "error"
+            result["message"] = f"cannot create origm/: no mask/ folder and origm/ missing"
+            return result
+        if dry_run:
+            result["steps"].append(f"would rename {mask_folder.name} -> origm/")
+        else:
+            # If force=False (normal case) and origm/ missing, we rename mask/ -> origm/
+            # If force=True, also rename (overwrite any existing? but we already checked not exists)
+            shutil.move(str(mask_folder), str(origm_folder))
+            result["steps"].append(f"renamed {mask_folder.name} -> origm/")
+            # Update origm_source after rename
+            origm_source = origm_folder
+
+    # Now convert origm.nii.gz from the source folder (origm/ or mask/ if not yet renamed)
+    # Determine actual source folder (might be origm/ after potential rename)
+    if origm_folder.exists():
+        source_for_conversion = origm_folder
+    elif mask_folder and not origm_folder.exists():
+        # fallback: if we haven't renamed due to dry_run, use mask_folder
+        source_for_conversion = mask_folder
+    else:
+        source_for_conversion = None
+
+    if source_for_conversion is None:
+        result["status"] = "error"
+        result["message"] = "no source folder for origm conversion"
+        return result
+
+    if origm_nii.exists() and not force:
+        result["steps"].append(f"origm.nii.gz exists, skipping (use --force to redo)")
+    else:
+        if dry_run:
+            result["steps"].append("would convert source -> origm.nii.gz")
+        else:
+            try:
+                if not dicom_to_nifti(source_for_conversion, origm_nii):
+                    result["status"] = "error"
+                    result["message"] = "DICOM to NIfTI conversion failed for origm"
+                    return result
+                result["steps"].append(f"converted {source_for_conversion.name} -> origm.nii.gz")
+            except Exception as e:
                 result["status"] = "error"
-                result["message"] = "DICOM to NIfTI conversion failed for mask"
+                result["message"] = f"origm conversion error: {e}"
                 return result
-        except Exception as e:
-            result["status"] = "error"
-            result["message"] = f"mask conversion error: {e}"
-            return result
-    else:
-        result["steps"].append("would convert mask -> origm.nii.gz")
 
-    # Step 3: rename mask folder to origm (backup)
-    origm_folder = patient_dir / "origm"
-    if not dry_run:
-        if origm_folder.exists():
-            # avoid overwriting by appending .bak
-            bak = patient_dir / "origm.bak"
-            idx = 1
-            while bak.exists():
-                bak = patient_dir / f"origm.bak{idx}"
-                idx += 1
-            shutil.move(str(origm_folder), str(bak))
-            result["steps"].append(f"existing origm/ moved to {bak.name}")
-        shutil.move(str(mask_folder), str(origm_folder))
-        result["steps"].append(f"renamed {mask_folder.name} -> origm/")
-    else:
-        result["steps"].append(f"would rename {mask_folder.name} -> origm/")
-
-    # Step 4: compute mask from orig.nii.gz and origm.nii.gz
+    # Step 3: compute mask from orig.nii.gz and origm.nii.gz
     status, voxels, msg = compute_mask_from_nifti(
         orig_nii, origm_nii, mask_nii,
         threshold=threshold,
@@ -305,11 +328,11 @@ def main():
                         help="Threshold for binary mask (default 0.5)")
     parser.add_argument("--absolute_diff", action="store_true",
                         help="Use absolute difference instead of positive difference")
-    parser.add_argument("--force", action="store_true",
-                        help="Overwrite existing mask.nii.gz")
+    parser.add_argument("--force", action="store_true",default=False,
+                        help="Force redo all steps (overwrite existing files and folders)")
     parser.add_argument("--dry_run", action="store_true",
                         help="Simulate without writing files")
-    parser.add_argument("--skip_invalid", default=False,
+    parser.add_argument("--skip_invalid", action="store_true", default=False,
                         help="Skip folders containing @, !, &")
     args = parser.parse_args()
 
@@ -317,7 +340,6 @@ def main():
     if args.patient:
         patient_dirs = [root / args.patient]
     else:
-        # Gather all subdirectories (skip files)
         patient_dirs = [p for p in root.iterdir() if p.is_dir()]
 
     if not patient_dirs:
@@ -338,7 +360,7 @@ def main():
         summary[res["status"]] = summary.get(res["status"], 0) + 1
         suffix = f" voxels={res['mask_voxels']}" if res["mask_voxels"] else ""
         print(f"[generate-mask] {res['patient']}: {res['status']}{suffix} ({res['message']})")
-        if res["steps"] and not args.dry_run:
+        if res["steps"]:
             for step in res["steps"]:
                 print(f"    -> {step}")
 

@@ -28,21 +28,22 @@ except (ImportError, ValueError):
 def predict_case(case, checkpoint: dict, threshold: float = 0.5, out_path: Path | None = None) -> Path:
     import torch
     try:
-        from .model import VesselVKAN
+        from .model import create_refinement_model
     except ImportError:
         try:
-            from VKAN_segementation.refinement.model import VesselVKAN
+            from VKAN_segementation.refinement.model import create_refinement_model
         except ImportError:
-            from refinement.model import VesselVKAN
+            from refinement.model import create_refinement_model
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args = checkpoint.get("args", {})
+    model_name = checkpoint.get("model_name", args.get("model", "vkan"))
     grid_size = int(checkpoint.get("grid_size", checkpoint.get("args", {}).get("grid_size", 96)))
     base_channels = int(checkpoint.get("base_channels", checkpoint.get("args", {}).get("base_channels", 16)))
-    model = VesselVKAN(base_channels=base_channels).to(device)
+    model = create_refinement_model(model_name, base_channels=base_channels).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    args = checkpoint.get("args", {})
     if args.get("dataset", "stl") == "nii":
         return predict_case_nii(case.path, checkpoint, threshold=threshold, out_path=out_path)
 
@@ -62,14 +63,15 @@ def predict_case_nii(patient_dir: Path, checkpoint: dict, threshold: float = 0.5
     import nibabel as nib
     import torch
     try:
-        from .model import VesselVKAN
+        from .model import create_refinement_model
     except ImportError:
         try:
-            from VKAN_segementation.refinement.model import VesselVKAN
+            from VKAN_segementation.refinement.model import create_refinement_model
         except ImportError:
-            from refinement.model import VesselVKAN
+            from refinement.model import create_refinement_model
 
     args = checkpoint.get("args", {})
+    model_name = checkpoint.get("model_name", args.get("model", "vkan"))
     grid_size = int(checkpoint.get("grid_size", args.get("grid_size", 96)))
     base_channels = int(checkpoint.get("base_channels", args.get("base_channels", 16)))
     pretrain_name = args.get("pretrain_name", "pretrain.nii.gz")
@@ -80,7 +82,7 @@ def predict_case_nii(patient_dir: Path, checkpoint: dict, threshold: float = 0.5
         raise FileNotFoundError(pretrain_path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = VesselVKAN(base_channels=base_channels).to(device)
+    model = create_refinement_model(model_name, base_channels=base_channels).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
