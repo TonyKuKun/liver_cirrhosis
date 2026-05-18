@@ -70,6 +70,8 @@ def _common_train_args(args, out_dir: Path) -> List[str]:
         "--lambda_mono", str(args.lambda_mono),
         "--lambda_spread", str(args.lambda_spread),
         "--extremity_alpha", str(args.extremity_alpha),
+        "--post_tips_high_alpha", str(args.post_tips_high_alpha),
+        "--post_tips_high_threshold", str(args.post_tips_high_threshold),
         "--lambda_residual", str(args.lambda_residual),
         "--sample_power", str(args.sample_power),
     ]
@@ -238,7 +240,7 @@ def run(args) -> List[dict]:
 def parse_args(argv: Sequence[str] | None = None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data_root", type=str, default=r"F:\PCG data\dataset\test4all_sample")
-    ap.add_argument("--out_root", type=str, default=os.path.join("runs", "ablations_v1"))
+    ap.add_argument("--out_root", type=str, default=os.path.join("runs", "ablations_v2"))
     ap.add_argument("--train_script", type=str, default="train.py")
     ap.add_argument("--python", type=str, default=sys.executable)
     ap.add_argument("--variants", nargs="*", default=None)
@@ -261,14 +263,16 @@ def parse_args(argv: Sequence[str] | None = None):
     ap.add_argument("--gnn_layers", type=int, default=2)
 
     ap.add_argument("--huber_delta", type=float, default=1.0)
-    ap.add_argument("--lambda_murray", type=float, default=0.10)
-    ap.add_argument("--lambda_press", type=float, default=0.05)
-    ap.add_argument("--lambda_smooth", type=float, default=0.01)
-    ap.add_argument("--lambda_physio", type=float, default=0.01)
-    ap.add_argument("--lambda_mono", type=float, default=0.05)
-    ap.add_argument("--lambda_spread", type=float, default=0.20)
+    ap.add_argument("--lambda_murray", type=float, default=0.0)
+    ap.add_argument("--lambda_press", type=float, default=0.0)
+    ap.add_argument("--lambda_smooth", type=float, default=0.0)
+    ap.add_argument("--lambda_physio", type=float, default=0.0)
+    ap.add_argument("--lambda_mono", type=float, default=0.0)
+    ap.add_argument("--lambda_spread", type=float, default=0.0)
     ap.add_argument("--extremity_alpha", type=float, default=1.0)
-    ap.add_argument("--lambda_residual", type=float, default=0.05)
+    ap.add_argument("--post_tips_high_alpha", type=float, default=0.0)
+    ap.add_argument("--post_tips_high_threshold", type=float, default=0.5)
+    ap.add_argument("--lambda_residual", type=float, default=0.0)
     ap.add_argument("--sample_power", type=float, default=1.5)
     return ap.parse_args(argv)
 

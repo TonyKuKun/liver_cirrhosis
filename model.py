@@ -350,6 +350,55 @@ class AttentionPool(nn.Module):
 # =====================================================================
 # Module 3.5 — Vessel Topology GNN (corrected anatomy)
 # =====================================================================
+class ProfileTransformerEncoder(nn.Module):
+    """
+    Lightweight token encoder for each vessel profile.
+
+    The architecture benchmark showed numeric Transformer tokens were the
+    strongest simple baseline. This module brings that inductive bias into the
+    main model while keeping the existing CNN/GNN path.
+    """
+
+    def __init__(self, d_in: int = N_PROFILE_FEAT, d_hidden: int = 32,
+                 n_layers: int = 2, n_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        n_heads = max(1, math.gcd(n_heads, d_hidden))
+        self.in_proj = nn.Linear(d_in, d_hidden)
+        self.branch_embed = nn.Embedding(N_SEGMENTS, d_hidden)
+        self.pos_mlp = nn.Sequential(
+            nn.Linear(1, d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, d_hidden),
+        )
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_hidden,
+            nhead=n_heads,
+            dim_feedforward=d_hidden * 4,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers)
+        self.norm = nn.LayerNorm(d_hidden)
+
+    def forward(self, profiles_norm, valid_mask, branch_idx: int):
+        B, N, _ = profiles_norm.shape
+        device = profiles_norm.device
+        pos = torch.linspace(0.0, 1.0, N, device=device).view(1, N, 1).expand(B, -1, -1)
+        branch_ids = torch.full((B,), int(branch_idx), dtype=torch.long, device=device)
+        h = self.in_proj(profiles_norm)
+        h = h + self.pos_mlp(pos) + self.branch_embed(branch_ids).unsqueeze(1)
+        key_padding_mask = valid_mask < 0.5
+        all_masked = key_padding_mask.all(dim=1)
+        if all_masked.any():
+            key_padding_mask = key_padding_mask.clone()
+            key_padding_mask[all_masked, 0] = False
+        h = self.encoder(h, src_key_padding_mask=key_padding_mask)
+        h = self.norm(h)
+        return h * valid_mask.unsqueeze(-1)
+
+
 class VesselGraphNet(nn.Module):
     """
     v5: edge list cleaned up. SV-SMV and LPV-RPV pairs are *siblings*
@@ -687,6 +736,9 @@ class PortalPressureNet(nn.Module):
                  use_aux: bool = True,
                  use_flow_features: bool = True,
                  use_branch_embed: bool = True,
+                 use_profile_transformer: bool = True,
+                 use_tips_head: bool = True,
+                 use_aux_mask: bool = True,
                  pvp_mean_pa: float = PVP_MEAN_PA_DEFAULT,
                  pvp_std_pa:  float = PVP_STD_PA_DEFAULT,
                  log_vol_mean: float = LOG_VOL_MEAN_DEFAULT,
@@ -699,11 +751,24 @@ class PortalPressureNet(nn.Module):
         self.use_aux = use_aux
         self.use_flow_features = use_flow_features
         self.use_branch_embed = use_branch_embed
+        self.use_profile_transformer = use_profile_transformer
+        self.use_tips_head = use_tips_head
+        self.use_aux_mask = use_aux_mask
 
         # ── Existing modules ─────────────────────────────────
         self.geom_encoder = GeometryEncoder(
             d_in=N_PROFILE_FEAT, d_hidden=d_hidden,
             n_blocks=3, dropout=dropout * 0.3,
+        )
+        self.profile_transformer = ProfileTransformerEncoder(
+            d_in=N_PROFILE_FEAT, d_hidden=d_hidden,
+            n_layers=2, n_heads=4, dropout=dropout * 0.3,
+        )
+        self.profile_fuse = nn.Sequential(
+            nn.Linear(d_hidden * 2, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.3),
         )
         self.branch_pool = AttentionPool(d_hidden, d_attn=16)
 
@@ -727,18 +792,12 @@ class PortalPressureNet(nn.Module):
         d_junction = 15
         d_qscale   = 1
         d_baseline = 1                          # ← NEW: pass baseline as a feature too
-        d_fused = d_branches + d_q + d_junction + d_qscale + d_baseline + N_AUX
+        d_aux_fused = N_AUX * (2 if use_aux_mask else 1)
+        d_fused = d_branches + d_q + d_junction + d_qscale + d_baseline + d_aux_fused
 
-        self.predictor = nn.Sequential(
-            nn.Linear(d_fused, d_hidden * 2),
-            nn.LayerNorm(d_hidden * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_hidden * 2, d_hidden),
-            nn.GELU(),
-            nn.Dropout(dropout * 0.5),
-            nn.Linear(d_hidden, 1),
-        )
+        self.predictor = self._make_predictor(d_fused, d_hidden, dropout)
+        self.predictor_pre = self._make_predictor(d_fused, d_hidden, dropout)
+        self.predictor_post = self._make_predictor(d_fused, d_hidden, dropout)
 
         # Residual correction path
         d_residual_feats = N_SEGMENTS * 5
@@ -762,14 +821,11 @@ class PortalPressureNet(nn.Module):
         self.q_estimator.net[-1].weight.data.zero_()
         self.q_estimator.net[-1].bias.data.zero_()
 
-        # Predictor final layer: SMALL init, not zero. We want the physics
-        # baseline to dominate at start (so the model is sensible from
-        # epoch 0) but we MUST keep gradients flowing into geom_encoder,
-        # vessel_gnn, and branch_pool. A fully-zero last layer cuts the
-        # backward path through `fused`, leaving the encoders untrained
-        # until the predictor itself drifts off zero.
-        self.predictor[-1].weight.data.mul_(0.01)
-        self.predictor[-1].bias.data.zero_()
+        # Predictor final layers: small init, not zero, so gradients flow
+        # into the encoders from the first step.
+        for head in [self.predictor, self.predictor_pre, self.predictor_post]:
+            head[-1].weight.data.mul_(0.01)
+            head[-1].bias.data.zero_()
 
         # residual_net: TRUE zero → its job is purely corrective, no need
         # for it to inject random noise initially.
@@ -789,6 +845,19 @@ class PortalPressureNet(nn.Module):
                      self.flow_est.bif_outflow_head[-1]]:
             head.weight.data.zero_()
             head.bias.data.zero_()
+
+    @staticmethod
+    def _make_predictor(d_fused: int, d_hidden: int, dropout: float):
+        return nn.Sequential(
+            nn.Linear(d_fused, d_hidden * 2),
+            nn.LayerNorm(d_hidden * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_hidden * 2, d_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(d_hidden, 1),
+        )
 
     def _init_weights(self):
         for m in self.modules():
@@ -860,6 +929,7 @@ class PortalPressureNet(nn.Module):
         point_valid   = batch['point_valid']
         segment_mask  = batch['segment_mask']
         aux_norm      = batch['aux_norm']
+        aux_mask      = batch.get('aux_mask', torch.ones_like(aux_norm))
         organ_volumes = batch.get('organ_volumes',
                                   torch.zeros(profiles.size(0), 2, device=profiles.device))
         organ_valid   = batch.get('organ_valid',
@@ -878,6 +948,9 @@ class PortalPressureNet(nn.Module):
         attn_weights  = torch.zeros(B, S, N, device=profiles.device)
         for si in range(S):
             h_si = self.geom_encoder(profiles_norm[:, si])
+            if self.use_profile_transformer:
+                h_tx = self.profile_transformer(profiles_norm[:, si], point_valid[:, si], si)
+                h_si = self.profile_fuse(torch.cat([h_si, h_tx], dim=-1))
             pooled, aw = self.branch_pool(h_si, point_valid[:, si])
             seg_alive = segment_mask[:, si].unsqueeze(-1)
             branch_embed[:, si] = pooled * seg_alive
@@ -921,18 +994,30 @@ class PortalPressureNet(nn.Module):
         q_for_fused = Q if self.use_flow_features else torch.zeros_like(Q)
         junction_for_fused = jp['features'] if self.use_flow_features else torch.zeros_like(jp['features'])
         aux_for_fused = aux_norm if self.use_aux else torch.zeros_like(aux_norm)
+        aux_mask_for_fused = aux_mask if (self.use_aux and self.use_aux_mask) else torch.zeros_like(aux_mask)
+        if self.use_aux_mask:
+            aux_fused = torch.cat([aux_for_fused, aux_mask_for_fused], dim=-1)
+        else:
+            aux_fused = aux_for_fused
         branch_flat = branch_for_fused.reshape(B, -1)
         fused = torch.cat([
             branch_flat, q_for_fused, junction_for_fused,
             q_scale.unsqueeze(-1),
             baseline_norm.unsqueeze(-1),
-            aux_for_fused,
+            aux_fused,
         ], dim=-1)
         fused = torch.nan_to_num(fused, nan=0.0, posinf=1e3, neginf=-1e3)
 
         # Predictor's final layer is zero-init → at start, predictor outputs 0.
         # So initial prediction = baseline_norm (pure physics).
-        pvp_correction = self.predictor(fused).squeeze(-1)
+        if self.use_tips_head:
+            pvp_pre = self.predictor_pre(fused).squeeze(-1)
+            pvp_post = self.predictor_post(fused).squeeze(-1)
+            pvp_correction = torch.where(has_tips.float() > 0.5, pvp_post, pvp_pre)
+        else:
+            pvp_correction = self.predictor(fused).squeeze(-1)
+            pvp_pre = pvp_correction
+            pvp_post = pvp_correction
 
         # Residual correction
         pvp_residual = torch.zeros_like(pvp_correction)
@@ -949,6 +1034,8 @@ class PortalPressureNet(nn.Module):
             'pvp_pred': pvp_pred, 'Q': Q, 'flow_out': flow_out,
             # The "physics" path includes the explicit baseline + MLP correction.
             'pvp_physics': (baseline_norm + pvp_correction).unsqueeze(-1),
+            'pvp_pre_head': (baseline_norm + pvp_pre).unsqueeze(-1),
+            'pvp_post_head': (baseline_norm + pvp_post).unsqueeze(-1),
             'pvp_residual': pvp_residual.unsqueeze(-1),
             'pvp_baseline_norm': baseline_norm.unsqueeze(-1),  # ← interpretability
             'pvp_baseline_pa':   baseline_pa.unsqueeze(-1),
@@ -971,6 +1058,8 @@ class PhysicsInformedLoss(nn.Module):
                  lambda_smooth=0.01, lambda_physio=0.01,
                  lambda_mono=0.05, lambda_residual=0.05,
                  lambda_spread=0.50, extremity_alpha=1.5,
+                 post_tips_high_alpha=0.0,
+                 post_tips_high_threshold=0.5,
                  huber_delta=1.0):
         super().__init__()
         self.lambda_murray   = lambda_murray
@@ -981,6 +1070,8 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_residual = lambda_residual
         self.lambda_spread   = lambda_spread
         self.extremity_alpha = extremity_alpha
+        self.post_tips_high_alpha = post_tips_high_alpha
+        self.post_tips_high_threshold = post_tips_high_threshold
         self.huber_delta     = huber_delta
 
     @staticmethod
@@ -998,6 +1089,9 @@ class PhysicsInformedLoss(nn.Module):
         # ── Extremity-weighted Huber + asym ──────────────────
         extremity = label_norm.abs()
         extremity_weight = 1.0 + self.extremity_alpha * extremity.pow(2)
+        has_tips = batch.get('is_post_tips', batch['segment_mask'][:, SEG_INDEX['tips']]).float()
+        post_high = has_tips * (label_norm > self.post_tips_high_threshold).float()
+        tail_weight = 1.0 + self.post_tips_high_alpha * post_high
 
         err = pvp_pred - label_norm
         asym = torch.where(
@@ -1011,7 +1105,7 @@ class PhysicsInformedLoss(nn.Module):
             0.5 * err.pow(2),
             self.huber_delta * (abs_err - 0.5 * self.huber_delta),
         )
-        L_main = (huber_elem * extremity_weight * asym).mean()
+        L_main = (huber_elem * extremity_weight * asym * tail_weight).mean()
 
         # ── Anti-shrinkage spread loss ───────────────────────
         if pvp_pred.numel() >= 4:
@@ -1042,7 +1136,6 @@ class PhysicsInformedLoss(nn.Module):
         # Murray's law describes biological vessel optimization; it does
         # NOT apply to a man-made stent whose diameter was chosen by the
         # interventionist.
-        has_tips = batch.get('is_post_tips', batch['segment_mask'][:, SEG_INDEX['tips']])
         tips_mask_out = torch.where(has_tips > 0.5,
                                     torch.zeros_like(m_bo),
                                     torch.ones_like(m_bo))

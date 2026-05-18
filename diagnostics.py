@@ -246,6 +246,9 @@ def collect_oof_predictions(checkpoint_dir, data_root, n_points=100, batch_size=
             use_aux=args.get("use_aux", True),
             use_flow_features=args.get("use_flow_features", True),
             use_branch_embed=args.get("use_branch_embed", True),
+            use_profile_transformer=args.get("use_profile_transformer", False),
+            use_tips_head=args.get("use_tips_head", False),
+            use_aux_mask=args.get("use_aux_mask", False),
         ).to(device)
         load_model_state_compat(model, ckpt["model_state_dict"])
         loader = DataLoader(Subset(ds, val_idx), batch_size=batch_size, shuffle=False,

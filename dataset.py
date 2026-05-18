@@ -645,6 +645,9 @@ class PortalVeinDataset(Dataset):
 
         aux = d['aux_scalars'].copy()
         aux_norm = (aux - self.aux_mean) / self.aux_std
+        # Missing scalar features should mean "unknown", not a z-scored
+        # artificial zero. Masks/organ_valid carry the missingness signal.
+        aux_norm = aux_norm * d['aux_mask']
         label_norm = (float(d['label']) - self.label_mean) / self.label_std
 
         return {

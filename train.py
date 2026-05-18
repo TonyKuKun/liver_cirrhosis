@@ -278,6 +278,9 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
         use_aux=args.use_aux,
         use_flow_features=args.use_flow_features,
         use_branch_embed=args.use_branch_embed,
+        use_profile_transformer=args.use_profile_transformer,
+        use_tips_head=args.use_tips_head,
+        use_aux_mask=args.use_aux_mask,
     ).to(device)
     if fold_idx == 0:
         total, train = count_params(model)
@@ -293,8 +296,10 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
         lambda_smooth=args.lambda_smooth,
         lambda_physio=args.lambda_physio,
         lambda_mono=args.lambda_mono,
-        # lambda_spread=args.lambda_spread,
-        # extremity_alpha=args.extremity_alpha,
+        lambda_spread=args.lambda_spread,
+        extremity_alpha=args.extremity_alpha,
+        post_tips_high_alpha=args.post_tips_high_alpha,
+        post_tips_high_threshold=args.post_tips_high_threshold,
         lambda_residual=args.lambda_residual,
         huber_delta=args.huber_delta,
     ).to(device)
@@ -377,10 +382,10 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data_root', type=str, default=r"F:\PCG data\dataset\test4all_sample")
-    ap.add_argument('--out_dir',   type=str, default='./runs/v5.1')
+    ap.add_argument('--out_dir',   type=str, default='./runs/v5.2')
     ap.add_argument('--n_points',  type=int, default=200)
     ap.add_argument('--n_folds',   type=int, default=5)
-    ap.add_argument('--seed',      type=int, default=42)
+    ap.add_argument('--seed',      type=int, default=40)
     ap.add_argument('--split_mode', choices=['subject', 'sample'], default='subject')
     # Optimization
     ap.add_argument('--epochs',       type=int,   default=300)
@@ -397,24 +402,32 @@ def main():
     ap.add_argument('--no_residual',  dest='use_residual', action='store_false')
     ap.add_argument('--use_q_scale', action='store_true', default=True)
     ap.add_argument('--no_q_scale',  dest='use_q_scale', action='store_false')
-    ap.add_argument('--use_physics_baseline', action='store_true', default=True)
+    ap.add_argument('--use_physics_baseline', action='store_true', default=False)
     ap.add_argument('--no_physics_baseline',  dest='use_physics_baseline', action='store_false')
     ap.add_argument('--use_aux', action='store_true', default=True)
     ap.add_argument('--no_aux',  dest='use_aux', action='store_false')
-    ap.add_argument('--use_flow_features', action='store_true', default=True)
+    ap.add_argument('--use_flow_features', action='store_true', default=False)
     ap.add_argument('--no_flow_features',  dest='use_flow_features', action='store_false')
     ap.add_argument('--use_branch_embed', action='store_true', default=True)
     ap.add_argument('--no_branch_embed',  dest='use_branch_embed', action='store_false')
+    ap.add_argument('--use_profile_transformer', action='store_true', default=True)
+    ap.add_argument('--no_profile_transformer',  dest='use_profile_transformer', action='store_false')
+    ap.add_argument('--use_tips_head', action='store_true', default=True)
+    ap.add_argument('--no_tips_head',  dest='use_tips_head', action='store_false')
+    ap.add_argument('--use_aux_mask', action='store_true', default=True)
+    ap.add_argument('--no_aux_mask',  dest='use_aux_mask', action='store_false')
     # Loss weights
     ap.add_argument('--huber_delta',      type=float, default=1.0)
-    ap.add_argument('--lambda_murray',    type=float, default=0.10)
-    ap.add_argument('--lambda_press',     type=float, default=0.05)
-    ap.add_argument('--lambda_smooth',    type=float, default=0.01)
-    ap.add_argument('--lambda_physio',    type=float, default=0.01)
-    ap.add_argument('--lambda_mono',      type=float, default=0.05)
-    ap.add_argument('--lambda_spread',    type=float, default=0.20)
+    ap.add_argument('--lambda_murray',    type=float, default=0.0)
+    ap.add_argument('--lambda_press',     type=float, default=0.0)
+    ap.add_argument('--lambda_smooth',    type=float, default=0.0)
+    ap.add_argument('--lambda_physio',    type=float, default=0.0)
+    ap.add_argument('--lambda_mono',      type=float, default=0.0)
+    ap.add_argument('--lambda_spread',    type=float, default=0.0)
     ap.add_argument('--extremity_alpha',  type=float, default=1.0)
-    ap.add_argument('--lambda_residual',  type=float, default=0.05)
+    ap.add_argument('--post_tips_high_alpha', type=float, default=0.0)
+    ap.add_argument('--post_tips_high_threshold', type=float, default=0.5)
+    ap.add_argument('--lambda_residual',  type=float, default=0.0)
     # Sampling
     ap.add_argument('--sample_power',     type=float, default=1.5,
                     help='Extreme-value oversampling power (0=disabled)')

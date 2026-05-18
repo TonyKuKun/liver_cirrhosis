@@ -78,6 +78,34 @@ DEFAULT_VARIANTS: List[AblationVariant] = [
         args=["--no_branch_embed"],
     ),
     AblationVariant(
+        name="module_no_profile_transformer",
+        category="module",
+        changed_component="ProfileTransformerEncoder",
+        hypothesis="Tests whether token attention over pointwise vessel profiles explains the numeric-transformer benchmark gain.",
+        args=["--no_profile_transformer"],
+    ),
+    AblationVariant(
+        name="module_no_tips_head",
+        category="module",
+        changed_component="TIPS-aware prediction heads",
+        hypothesis="Tests whether separating pre-TIPS and post-TIPS prediction heads reduces mechanism mixing.",
+        args=["--no_tips_head"],
+    ),
+    AblationVariant(
+        name="module_no_aux_mask",
+        category="module",
+        changed_component="Auxiliary missingness mask",
+        hypothesis="Tests whether exposing scalar-feature missingness helps avoid treating absent organ features as real values.",
+        args=["--no_aux_mask"],
+    ),
+    AblationVariant(
+        name="loss_no_post_tips_high_weight",
+        category="loss",
+        changed_component="Post-TIPS high-PVP tail weighting",
+        hypothesis="Tests whether the v5.2 residual pattern is improved by emphasizing high-pressure post-TIPS cases.",
+        args=["--post_tips_high_alpha", "0"],
+    ),
+    AblationVariant(
         name="module_data_mlp_only",
         category="module",
         changed_component="Physics path removed from final predictor",
@@ -188,4 +216,3 @@ def select_variants(names: Iterable[str] | None) -> List[AblationVariant]:
             raise ValueError(f"Unknown ablation variant '{name}'. Valid names: {valid}")
         selected.append(lookup[name])
     return selected
-
