@@ -106,7 +106,7 @@ ALL_STRUCTURES = [
 
 # 用于 pretrain 排除的结构
 EXCLUSION_STRUCTURES = [
-    "bone_all", "spleen", "kidney_left", "kidney_right",
+    "bone_all", "spleen", "liver", "kidney_left", "kidney_right",
     "inferior_vena_cava", "aorta",
 ]
 
@@ -610,14 +610,21 @@ def _write_stl(path: Path, vertices: np.ndarray, faces: np.ndarray):
 
 def load_organ_mask(case, organ_name: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     """加载指定器官的 mask。返回 (mask_bool, affine)。"""
-    nii_path = case.path / "segmentation" / f"{organ_name}.nii.gz"
-    if not nii_path.exists():
-        return None, None
-    try:
-        data, affine, _ = _load_nifti(nii_path)
-        return data > 0, affine
-    except Exception:
-        return None, None
+    seg_dir = case.path / "segmentation"
+    aliases = (organ_name,)
+    if organ_name == "portal_vein":
+        aliases = ("portal_vein", "portal_vein_and_splenic_vein")
+    for directory in (seg_dir / "totalseg_output", seg_dir / "ts_raw", seg_dir):
+        for alias in aliases:
+            nii_path = directory / f"{alias}.nii.gz"
+            if not nii_path.exists():
+                continue
+            try:
+                data, affine, _ = _load_nifti(nii_path)
+                return data > 0, affine
+            except Exception:
+                continue
+    return None, None
 
 
 def get_exclusion_mask(
@@ -629,6 +636,7 @@ def get_exclusion_mask(
     """骨骼+脾+肾+IVC+主动脉的组合排除 mask。"""
     info: dict = {"loaded": []}
     exclusion = np.zeros(vol_shape, dtype=bool)
+    portal_protect = None
 
     for struct_name in EXCLUSION_STRUCTURES:
         mask, affine = load_organ_mask(case, struct_name)
@@ -641,6 +649,19 @@ def get_exclusion_mask(
         dilate = dilate_bone if "bone" in struct_name else dilate_organ
         if ndi is not None and dilate > 0:
             mask = ndi.binary_dilation(mask, iterations=dilate)
+        if struct_name == "liver":
+            if portal_protect is None:
+                portal_protect, _ = load_organ_mask(case, "portal_vein")
+                if portal_protect is not None and portal_protect.shape != vol_shape:
+                    portal_protect = _resample_mask(portal_protect, vol_shape)
+                if portal_protect is not None and ndi is not None and dilate_organ > 0:
+                    portal_protect = ndi.binary_dilation(portal_protect, iterations=dilate_organ)
+                info["portal_protection"] = {
+                    "status": "ok" if portal_protect is not None and portal_protect.any() else "missing",
+                    "voxels": int(portal_protect.sum()) if portal_protect is not None else 0,
+                }
+            if portal_protect is not None:
+                mask = mask & ~portal_protect
         exclusion |= mask
         info["loaded"].append(struct_name)
 

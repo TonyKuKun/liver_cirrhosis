@@ -130,10 +130,15 @@ def compute_mask_from_nifti(
         return "error", 0, f"load failed: {e}"
 
     orig = np.asarray(orig_img.dataobj, dtype=np.float32)
+    affine_match = np.allclose(orig_img.affine, origm_img.affine, atol=1e-4)
+    shape_match = tuple(orig_img.shape) == tuple(origm_img.shape)
+    if not shape_match or not affine_match:
+        try:
+            from nibabel.processing import resample_from_to
+            origm_img = resample_from_to(origm_img, (orig_img.shape, orig_img.affine), order=1)
+        except Exception as e:
+            return "skipped", 0, f"origm resample to orig failed: {e}"
     origm = np.asarray(origm_img.dataobj, dtype=np.float32)
-
-    if orig.shape != origm.shape:
-        return "skipped", 0, f"shape mismatch: {orig.shape} vs {origm.shape}"
 
     diff = origm - orig
     if use_absolute_diff:
@@ -146,8 +151,7 @@ def compute_mask_from_nifti(
     header.set_data_dtype(np.uint8)
     nib.save(nib.Nifti1Image(out, orig_img.affine, header), str(mask_path))
 
-    affine_match = np.allclose(orig_img.affine, origm_img.affine)
-    msg = "" if affine_match else "affine mismatch; used orig affine"
+    msg = "" if shape_match and affine_match else "origm resampled to orig grid/affine"
     return "wrote", int(out.sum()), msg
 
 

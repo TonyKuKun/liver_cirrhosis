@@ -69,6 +69,29 @@ class STLPipelineTests(unittest.TestCase):
         self.assertGreater(float(item["input"].sum()), 0.0)
         self.assertGreater(float(item["label"].sum()), 0.0)
 
+    def test_stl_dataset_skips_dollar_marked_cases_and_missing_pretrain_stl(self) -> None:
+        try:
+            import torch  # noqa: F401
+            import trimesh  # noqa: F401
+        except ImportError as exc:
+            self.skipTest(f"optional dependency missing: {exc}")
+
+        from refinement.dataset import VesselSTLDataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp) / "keep_case"
+            dollar = Path(tmp) / "skip$case"
+            missing = Path(tmp) / "skip_missing_stl"
+            for patient in (keep, dollar, missing):
+                (patient / "dcm").mkdir(parents=True)
+                _write_cube_stl(patient / "vessel.stl")
+            _write_cube_stl(keep / "pretrain.stl")
+            _write_cube_stl(dollar / "pretrain.stl")
+
+            ds = VesselSTLDataset(tmp, grid_size=8)
+
+        self.assertEqual([case.name for case in ds.cases], ["keep_case"])
+
     def test_nii_dataset_crops_and_resizes_masks(self) -> None:
         try:
             import nibabel as nib
@@ -88,6 +111,7 @@ class STLPipelineTests(unittest.TestCase):
             label[9:13, 10:14, 5:9] = 1
             nib.save(nib.Nifti1Image(pre, affine), patient / "pretrain.nii.gz")
             nib.save(nib.Nifti1Image(label, affine), patient / "mask.nii.gz")
+            (patient / "pretrain.stl").touch()
 
             ds = VesselNiiDataset(tmp, grid_size=12, roi_margin=2)
             item = ds[0]
@@ -98,7 +122,7 @@ class STLPipelineTests(unittest.TestCase):
         self.assertGreater(float(item["label"].sum()), 0.0)
         self.assertLess(int((item["crop_slices"][:, 1] - item["crop_slices"][:, 0]).prod()), 24 * 24 * 16)
 
-    def test_nii_dataset_always_skips_at_marked_cases(self) -> None:
+    def test_nii_dataset_skips_dollar_marked_cases_and_missing_pretrain_stl(self) -> None:
         try:
             import nibabel as nib
             import torch  # noqa: F401
@@ -111,15 +135,47 @@ class STLPipelineTests(unittest.TestCase):
             affine = np.eye(4, dtype=np.float32)
             mask = np.zeros((8, 8, 4), dtype=np.uint8)
             mask[2:5, 2:5, 1:3] = 1
-            for name in ("keep_case", "skip@case"):
+            for name in ("keep_case", "skip$case", "skip_missing_stl"):
                 patient = Path(tmp) / name
                 patient.mkdir(parents=True)
                 nib.save(nib.Nifti1Image(mask, affine), patient / "pretrain.nii.gz")
                 nib.save(nib.Nifti1Image(mask, affine), patient / "mask.nii.gz")
+                if name != "skip_missing_stl":
+                    (patient / "pretrain.stl").touch()
 
             ds = VesselNiiDataset(tmp, grid_size=8, include_invalid=True)
 
         self.assertEqual([case.name for case in ds.cases], ["keep_case"])
+
+    def test_nii_dataset_resamples_mask_to_pretrain_space(self) -> None:
+        try:
+            import nibabel as nib
+            import torch  # noqa: F401
+        except ImportError as exc:
+            self.skipTest(f"optional dependency missing: {exc}")
+
+        from refinement.dataset import VesselNiiDataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patient = Path(tmp) / "case"
+            patient.mkdir(parents=True)
+            pre_affine = np.eye(4, dtype=np.float32)
+            label_affine = np.eye(4, dtype=np.float32)
+            label_affine[:3, 3] = 2.0
+            pre = np.zeros((6, 6, 6), dtype=np.uint8)
+            label = np.zeros_like(pre)
+            pre[3:5, 3:5, 3:5] = 1
+            label[1:3, 1:3, 1:3] = 1
+            nib.save(nib.Nifti1Image(pre, pre_affine), patient / "pretrain.nii.gz")
+            nib.save(nib.Nifti1Image(label, label_affine), patient / "mask.nii.gz")
+            (patient / "pretrain.stl").touch()
+
+            ds = VesselNiiDataset(tmp, grid_size=6, roi_margin=0, crop_source="pretrain")
+            item = ds[0]
+
+        self.assertGreater(float(item["label"].sum()), 0.0)
+        self.assertFalse(bool(item["label_affine_matches"]))
+        self.assertTrue(bool(item["label_resampled_to_pretrain"]))
 
     def test_overlay_mask_is_renamed_and_derived(self) -> None:
         try:

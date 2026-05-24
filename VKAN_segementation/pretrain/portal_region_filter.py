@@ -24,13 +24,13 @@ except ImportError:  # pragma: no cover - handled at runtime
     ndi = None
 
 try:
-    from ..utils.common import mask_to_stl
+    from ..utils.common import zyx_mask_to_stl
 except (ImportError, ValueError):
     try:
-        from VKAN_segementation.utils.common import mask_to_stl
+        from VKAN_segementation.utils.common import zyx_mask_to_stl
     except ImportError:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from utils.common import mask_to_stl
+        from utils.common import zyx_mask_to_stl
 
 
 FILTER_VERSION = "2026-05-16-portal-region-filter-v2-liver-first"
@@ -57,6 +57,18 @@ def load_nifti_zyx(path: Path):
     origin = affine[:3, 3]
     origin_xyz = (float(origin[0]), float(origin[1]), float(origin[2]))
     return data, img, spacing_zyx, origin_xyz
+
+
+def load_mask_zyx_like_reference(path: Path, reference_img) -> np.ndarray:
+    import nibabel as nib
+
+    img = nib.load(str(path))
+    if tuple(img.shape[:3]) != tuple(reference_img.shape[:3]) or not np.allclose(img.affine, reference_img.affine, atol=1e-4):
+        from nibabel.processing import resample_from_to
+
+        img = resample_from_to(img, (reference_img.shape[:3], reference_img.affine), order=0)
+    data = np.asarray(img.dataobj) > 0
+    return np.transpose(data, (2, 1, 0))
 
 
 def save_mask_like(mask_zyx: np.ndarray, reference_img, out_path: Path) -> Path:
@@ -108,7 +120,7 @@ def find_liver_mask_path(patient_dir: Path) -> Path:
     return find_structure_mask_path(patient_dir, LIVER_MASK_NAMES, "liver")
 
 
-def load_candidate_mask(patient_dir: Path, candidate_path: Optional[Path] = None) -> tuple[np.ndarray, str]:
+def load_candidate_mask(patient_dir: Path, candidate_path: Optional[Path] = None, reference_img=None) -> tuple[np.ndarray, str]:
     if candidate_path is None:
         npy_path = patient_dir / "vkan_work" / "pretrain_mask.npy"
         nii_path = patient_dir / "pretrain.nii.gz"
@@ -122,6 +134,8 @@ def load_candidate_mask(patient_dir: Path, candidate_path: Optional[Path] = None
     if candidate_path.suffix.lower() == ".npy":
         return np.load(candidate_path).astype(bool), str(candidate_path)
     if candidate_path.name.endswith(".nii.gz") or candidate_path.suffix.lower() == ".nii":
+        if reference_img is not None:
+            return load_mask_zyx_like_reference(candidate_path, reference_img), str(candidate_path)
         data, _img, _spacing, _origin = load_nifti_zyx(candidate_path)
         return (data > 0), str(candidate_path)
     raise ValueError(f"Unsupported candidate mask format: {candidate_path}")
@@ -227,14 +241,13 @@ def filter_patient(
 
     _orig_data, orig_img, spacing_zyx, origin_xyz = load_nifti_zyx(orig_path)
     target_shape = tuple(int(v) for v in _orig_data.shape)
-    candidate, candidate_source = load_candidate_mask(patient_dir, candidate_path)
+    candidate, candidate_source = load_candidate_mask(patient_dir, candidate_path, reference_img=orig_img)
     candidate = resample_bool_mask(candidate, target_shape)
 
     liver_info: dict = {"enabled": bool(subtract_liver), "status": "skipped"}
     if subtract_liver:
         liver_path = find_liver_mask_path(patient_dir)
-        liver_data, _liver_img, _liver_spacing, _liver_origin = load_nifti_zyx(liver_path)
-        liver_mask = resample_bool_mask(liver_data > 0, target_shape)
+        liver_mask = resample_bool_mask(load_mask_zyx_like_reference(liver_path, orig_img), target_shape)
         before_liver = int(candidate.sum())
         candidate = candidate & ~liver_mask
         liver_info = {
@@ -248,8 +261,7 @@ def filter_patient(
         }
 
     portal_path = find_portal_mask_path(patient_dir)
-    portal_data, _portal_img, _portal_spacing, _portal_origin = load_nifti_zyx(portal_path)
-    portal_mask = resample_bool_mask(portal_data > 0, target_shape)
+    portal_mask = resample_bool_mask(load_mask_zyx_like_reference(portal_path, orig_img), target_shape)
 
     filtered, filter_info = filter_by_portal_region(
         candidate,
@@ -275,7 +287,7 @@ def filter_patient(
     npy_out.parent.mkdir(parents=True, exist_ok=True)
     np.save(npy_out, filtered.astype(np.uint8))
     save_mask_like(filtered, orig_img, nii_out)
-    mask_to_stl(filtered, spacing_zyx, stl_out, origin_xyz=origin_xyz)
+    zyx_mask_to_stl(filtered, orig_img.affine, stl_out, name="pretrain_portal_filtered")
 
     meta = {
         "patient": patient_dir.name,
@@ -321,7 +333,7 @@ def iter_patient_dirs(data_root: Path, patient: Optional[str] = None) -> list[Pa
         return [data_root]
     return [
         p for p in sorted(data_root.iterdir())
-        if p.is_dir() and (p / "orig.nii.gz").exists() and not any(m in p.name for m in INVALID_MARKERS)
+        if p.is_dir() and (p / "orig.nii.gz").exists()
     ]
 
 

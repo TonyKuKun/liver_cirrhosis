@@ -36,13 +36,11 @@ class DicomVolume:
 
 
 def discover_patients(root: str | Path) -> list[PatientCase]:
-    """Find valid patient folders and derive standard input/output paths."""
+    """Find patient folders and derive standard input/output paths."""
     root = Path(root)
     cases: list[PatientCase] = []
     patient_dirs = [root] if (root / "dcm").is_dir() else sorted(p for p in root.iterdir() if p.is_dir())
     for path in patient_dirs:
-        if any(marker in path.name for marker in INVALID_MARKERS):
-            continue
         dcm_dir = path / "dcm"
         if not dcm_dir.is_dir():
             continue
@@ -165,7 +163,7 @@ def mask_to_stl(
     return write_binary_stl(out_path, verts_xyz, faces)
 
 
-def nifti_mask_to_stl(mask_xyz: np.ndarray, affine: np.ndarray, out_path: str | Path) -> Path:
+def nifti_mask_to_stl(mask_xyz: np.ndarray, affine: np.ndarray, out_path: str | Path, name: str = "vessel") -> Path:
     """Convert a binary NIfTI-order x-y-z mask to STL using the NIfTI affine."""
     try:
         from nibabel.affines import apply_affine
@@ -180,7 +178,13 @@ def nifti_mask_to_stl(mask_xyz: np.ndarray, affine: np.ndarray, out_path: str | 
     verts_ijk, faces, _, _ = measure.marching_cubes(np.pad(mask, 1), level=0.5)
     verts_ijk -= 1.0
     verts_xyz = apply_affine(np.asarray(affine, dtype=np.float64), verts_ijk)
-    return write_binary_stl(out_path, np.asarray(verts_xyz, dtype=np.float32), faces, "prediction")
+    return write_binary_stl(out_path, np.asarray(verts_xyz, dtype=np.float32), faces, name)
+
+
+def zyx_mask_to_stl(mask_zyx: np.ndarray, affine: np.ndarray, out_path: str | Path, name: str = "vessel") -> Path:
+    """Convert an internal z-y-x mask to STL using the matching NIfTI affine."""
+    mask_xyz = np.transpose(np.asarray(mask_zyx), (2, 1, 0))
+    return nifti_mask_to_stl(mask_xyz, affine, out_path, name=name)
 
 
 def write_binary_stl(out_path: str | Path, vertices_xyz: np.ndarray, faces: np.ndarray, name: str = "vessel") -> Path:

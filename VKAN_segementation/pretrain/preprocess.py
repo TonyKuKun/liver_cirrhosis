@@ -30,13 +30,13 @@ except ImportError:
     ndi = None
 
 try:
-    from ..utils.common import DicomVolume, GemmaClient, discover_patients, mask_to_stl, stl_to_voxels
+    from ..utils.common import DicomVolume, GemmaClient, discover_patients, stl_to_voxels, zyx_mask_to_stl
 except (ImportError, ValueError):
     try:
-        from VKAN_segementation.utils.common import DicomVolume, GemmaClient, discover_patients, mask_to_stl, stl_to_voxels
+        from VKAN_segementation.utils.common import DicomVolume, GemmaClient, discover_patients, stl_to_voxels, zyx_mask_to_stl
     except ImportError:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from utils.common import DicomVolume, GemmaClient, discover_patients, mask_to_stl, stl_to_voxels
+        from utils.common import DicomVolume, GemmaClient, discover_patients, stl_to_voxels, zyx_mask_to_stl
 
 try:
     from .totalseg_integration import (
@@ -65,7 +65,7 @@ except ImportError:
             get_z_range_from_bone = None  # type: ignore
 
 
-PRETRAIN_ALGORITHM_VERSION = "2026-05-16-v6e-tips-high-hu"
+PRETRAIN_ALGORITHM_VERSION = "2026-05-24-v14-orig-orientation-header"
 PRETRAIN_META_NAME = "pretrain_meta.json"
 PRETRAIN_NII_NAME = "pretrain.nii.gz"
 MAX_STL_BYTES = 20_000 * 1024
@@ -73,6 +73,14 @@ TARGET_VOXELS = 420_000
 TARGET_VOXELS_TIPS = 330_000
 REGION_GROW_BRIDGE_MM = 8.0
 REGION_GROW_MAX_SEED_SNAP_MM = 30.0
+PORTAL_REFERENCE_CLEANUP_RADIUS_MM = 25.0
+PORTAL_REFERENCE_CLEANUP_RADIUS_TIPS_MM = 25.0
+PORTAL_REFERENCE_CLEANUP_SEED_DILATE = 2
+PORTAL_REFERENCE_MIN_P50_HU = 100.0
+LIVER_SPLEEN_FALLBACK_MIN_HU = 150.0
+LIVER_SPLEEN_FALLBACK_MAX_HU = 260.0
+LIVER_SPLEEN_FALLBACK_EDGE_MARGIN_HU = 10.0
+LIVER_SPLEEN_FALLBACK_EDGE_HIGH_MARGIN_HU = 20.0
 HU_MARGIN = 5.0  # 门静脉 HU 采样后上下各扩展的边距
 HU_LOW_FLOOR = 75.0
 DEFAULT_HU_HIGH_CAP = 600.0
@@ -89,8 +97,16 @@ DEFAULT_BONE_NAMES = [
     "rib_right_7", "rib_right_8", "rib_right_9", "rib_right_10", "rib_right_11", "rib_right_12",
     "hip_left", "hip_right", "sacrum",
 ]
+VERTEBRA_RANK_INFERIOR_TO_SUPERIOR = {
+    "vertebrae_L5": 0, "vertebrae_L4": 1, "vertebrae_L3": 2, "vertebrae_L2": 3, "vertebrae_L1": 4,
+    "vertebrae_T12": 5, "vertebrae_T11": 6, "vertebrae_T10": 7, "vertebrae_T9": 8, "vertebrae_T8": 9,
+    "vertebrae_T7": 10, "vertebrae_T6": 11, "vertebrae_T5": 12, "vertebrae_T4": 13,
+    "vertebrae_T3": 14, "vertebrae_T2": 15, "vertebrae_T1": 16,
+    "vertebrae_C7": 17, "vertebrae_C6": 18, "vertebrae_C5": 19, "vertebrae_C4": 20,
+    "vertebrae_C3": 21, "vertebrae_C2": 22, "vertebrae_C1": 23,
+}
 BONE_NAMES = list(BONE_LABELS.keys()) if BONE_LABELS else DEFAULT_BONE_NAMES
-EXCLUSION_NAMES = ("bone_all", "spleen", "kidney_left", "kidney_right", "inferior_vena_cava", "aorta")
+EXCLUSION_NAMES = ("bone_all", "spleen", "liver", "kidney_left", "kidney_right", "inferior_vena_cava", "aorta")
 STRUCTURE_ALIASES = {
     "portal_vein": ("portal_vein", "portal_vein_and_splenic_vein"),
 }
@@ -164,15 +180,55 @@ def _resample_bool_mask(mask: np.ndarray, target_shape: tuple[int, int, int]) ->
         return None
 
 
+def _reference_nii_for_segmentation_mask(path: Path) -> Path | None:
+    """Find patient/orig.nii.gz for a mask path."""
+    path = Path(path)
+    for parent in path.parents:
+        ref = parent / "orig.nii.gz"
+        if ref.exists() and ref != path:
+            return ref
+    return None
+
+
 def _load_mask_nii(
     path: Path,
     target_shape: tuple[int, int, int] | None = None,
     cache: MaskCache | None = None,
 ) -> np.ndarray | None:
-    cache_key = ("path", str(path), target_shape)
+    cache_key = ("path", str(path), target_shape, "orig_affine_resampled")
     if cache is not None and cache_key in cache:
         return cache[cache_key]
     try:
+        if target_shape is not None:
+            import nibabel as nib
+
+            img = nib.load(str(path))
+            ref_path = _reference_nii_for_segmentation_mask(path)
+            if ref_path is not None:
+                ref = nib.load(str(ref_path))
+                ref_shape_zyx = (int(ref.shape[2]), int(ref.shape[1]), int(ref.shape[0]))
+                if ref_shape_zyx == tuple(int(v) for v in target_shape):
+                    data = np.asarray(img.dataobj)
+                    if img.shape != ref.shape or not np.allclose(img.affine, ref.affine, atol=1e-4):
+                        try:
+                            from nibabel.orientations import apply_orientation, io_orientation, ornt_transform
+
+                            transform = ornt_transform(io_orientation(img.affine), io_orientation(ref.affine))
+                            data = apply_orientation(data, transform)
+                        except Exception:
+                            data = None
+                        if data is None or data.shape != ref.shape:
+                            from nibabel.processing import resample_from_to
+
+                            img = resample_from_to(img, (ref.shape, ref.affine), order=0)
+                            data = np.asarray(img.dataobj)
+                    mask = np.asarray(data) > 0
+                    if mask.ndim == 3:
+                        mask = np.transpose(mask, (2, 1, 0))
+                    if cache is not None:
+                        cache[cache_key] = mask
+                    return mask
+
         data, _, _, _ = _load_nifti(path)
     except Exception:
         if cache is not None:
@@ -211,6 +267,16 @@ def _load_precomputed_structure_mask(
         return cached, {"structure": name, "source": "cache", "status": status, "voxels": voxels, "loaded": []}
 
     if name == "bone_all":
+        for path in _structure_candidate_paths(case, "bone_all"):
+            if not path.exists():
+                continue
+            mask = _load_mask_nii(path, target_shape, cache)
+            if mask is not None:
+                info.update({"status": "ok", "loaded": [str(path)], "voxels": int(mask.sum())})
+                if cache is not None:
+                    cache[cache_key] = mask
+                return mask, info
+
         combined: np.ndarray | None = None
         for directory in _segmentation_nii_dirs(case):
             loaded_here = []
@@ -231,15 +297,6 @@ def _load_precomputed_structure_mask(
                     cache[cache_key] = combined
                 return combined, info
 
-        for path in _structure_candidate_paths(case, "bone_all"):
-            if not path.exists():
-                continue
-            mask = _load_mask_nii(path, target_shape, cache)
-            if mask is not None:
-                info.update({"status": "ok", "loaded": [str(path)], "voxels": int(mask.sum())})
-                if cache is not None:
-                    cache[cache_key] = mask
-                return mask, info
         if cache is not None:
             cache[cache_key] = None
         return None, {"status": "missing", "structure": name, "source": "precomputed_nii"}
@@ -291,6 +348,7 @@ def _get_exclusion_mask_fast(
 ) -> tuple[np.ndarray, dict]:
     exclusion = np.zeros(vol_shape, dtype=bool)
     info: dict = {"source": "precomputed_nii", "loaded": []}
+    portal_protect: np.ndarray | None = None
 
     for name in EXCLUSION_NAMES:
         mask, mask_info = _load_precomputed_structure_mask(case, name, vol_shape, cache)
@@ -299,12 +357,149 @@ def _get_exclusion_mask_fast(
         dilate = dilate_bone if name == "bone_all" else dilate_organ
         if ndi is not None and dilate > 0:
             mask = ndi.binary_dilation(mask, iterations=dilate)
+        if name == "liver":
+            if portal_protect is None:
+                portal_protect, portal_info = _get_portal_vein_mask_fast(case, vol_shape, cache)
+                if portal_protect is not None and ndi is not None and dilate_organ > 0:
+                    portal_protect = ndi.binary_dilation(portal_protect, iterations=dilate_organ)
+                info["portal_protection"] = {
+                    "status": "ok" if portal_protect is not None and portal_protect.any() else "missing",
+                    "source": portal_info.get("source"),
+                    "voxels": int(portal_protect.sum()) if portal_protect is not None else 0,
+                }
+            if portal_protect is not None:
+                mask = mask & ~portal_protect
         exclusion |= mask
         info["loaded"].append({"name": name, "files": mask_info.get("loaded", [])})
 
     info["total_excluded_voxels"] = int(exclusion.sum())
     info["status"] = "ok" if info["loaded"] else "empty"
     return exclusion, info
+
+
+def _z_extent(mask: np.ndarray) -> tuple[int, int, float] | None:
+    z_values = np.flatnonzero(np.any(mask, axis=(1, 2)))
+    if len(z_values) == 0:
+        return None
+    z_min = int(z_values[0])
+    z_max = int(z_values[-1])
+    return z_min, z_max, float((z_min + z_max) / 2.0)
+
+
+def _infer_vertebra_z_direction(extents: dict[str, tuple[int, int, float]]) -> str | None:
+    ranked = [
+        (VERTEBRA_RANK_INFERIOR_TO_SUPERIOR[name], extent[2])
+        for name, extent in extents.items()
+        if name in VERTEBRA_RANK_INFERIOR_TO_SUPERIOR
+    ]
+    if len(ranked) < 2:
+        return None
+    ranks = np.asarray([item[0] for item in ranked], dtype=np.float64)
+    centers = np.asarray([item[1] for item in ranked], dtype=np.float64)
+    denom = float(np.sum((ranks - ranks.mean()) ** 2))
+    if denom <= 0:
+        return None
+    slope = float(np.sum((ranks - ranks.mean()) * (centers - centers.mean())) / denom)
+    if abs(slope) < 1e-3:
+        return None
+    return "z_up" if slope > 0 else "z_down"
+
+
+def _z_range_from_totalseg_vertebrae_nii(
+    case,
+    vol_shape: tuple[int, int, int],
+    spacing_zyx: tuple[float, float, float],
+    margin_mm: float = 0.0,
+    cache: MaskCache | None = None,
+) -> tuple[int | None, int | None, dict]:
+    """Use segmentation/totalseg_output vertebra masks for the z ROI.
+
+    The lower anatomical bound is the inferior edge of L3. The upper bound is
+    T8 when available, otherwise T9, otherwise the most superior loaded
+    vertebra point.
+    """
+    nz = vol_shape[0]
+    ts_output = case.path / "segmentation" / "totalseg_output"
+    if not ts_output.is_dir():
+        return None, None, {"status": "missing_totalseg_output", "source": "totalseg_vertebrae_nii"}
+
+    extents: dict[str, tuple[int, int, float]] = {}
+    loaded: list[str] = []
+    for name in VERTEBRA_RANK_INFERIOR_TO_SUPERIOR:
+        path = ts_output / f"{name}.nii.gz"
+        if not path.exists():
+            continue
+        mask = _load_mask_nii(path, vol_shape, cache)
+        if mask is None or not mask.any():
+            continue
+        extent = _z_extent(mask)
+        if extent is None:
+            continue
+        extents[name] = extent
+        loaded.append(str(path))
+
+    if "vertebrae_L3" not in extents:
+        return None, None, {
+            "status": "missing_L3",
+            "source": "totalseg_vertebrae_nii",
+            "loaded_count": len(loaded),
+            "loaded_examples": loaded[:5],
+        }
+
+    direction = _infer_vertebra_z_direction(extents)
+    if direction is None:
+        return None, None, {
+            "status": "unknown_vertebra_z_direction",
+            "source": "totalseg_vertebrae_nii",
+            "loaded_count": len(loaded),
+            "loaded_examples": loaded[:5],
+        }
+
+    upper_name = "vertebrae_T8" if "vertebrae_T8" in extents else ("vertebrae_T9" if "vertebrae_T9" in extents else None)
+    upper_source = upper_name or "highest_loaded_vertebra_point"
+
+    l3_min, l3_max, _ = extents["vertebrae_L3"]
+    if direction == "z_down":
+        lower_z = l3_max
+        if upper_name is not None:
+            upper_z = extents[upper_name][0]
+        else:
+            upper_z = min(extent[0] for extent in extents.values())
+    else:
+        lower_z = l3_min
+        if upper_name is not None:
+            upper_z = extents[upper_name][1]
+        else:
+            upper_z = max(extent[1] for extent in extents.values())
+
+    dz = max(float(spacing_zyx[0]), 1e-3)
+    margin = max(0, int(round(margin_mm / dz)))
+    z_start = max(0, min(int(upper_z), int(lower_z)) - margin)
+    z_end = min(nz - 1, max(int(upper_z), int(lower_z)) + margin)
+    if z_end <= z_start:
+        return None, None, {
+            "status": "invalid_vertebra_z_range",
+            "source": "totalseg_vertebrae_nii",
+            "upper_z": int(upper_z),
+            "lower_z": int(lower_z),
+            "z_direction": direction,
+        }
+
+    return z_start, z_end, {
+        "status": "ok",
+        "source": "totalseg_vertebrae_nii",
+        "z_direction": direction,
+        "upper_source": upper_source,
+        "lower_source": "vertebrae_L3_inferior_edge",
+        "upper_z": int(upper_z),
+        "lower_z": int(lower_z),
+        "z_start": z_start,
+        "z_end": z_end,
+        "z_range_mm": round(float((z_end - z_start) * dz), 1),
+        "margin_mm": float(margin_mm),
+        "loaded_count": len(loaded),
+        "loaded_examples": loaded[:5],
+    }
 
 
 def _z_range_from_precomputed_bone_nii(
@@ -449,7 +644,13 @@ def _save_pretrain_nifti(mask: np.ndarray, reference_nii: Path, out_path: Path) 
     header = ref.header.copy()
     header.set_data_dtype(np.uint8)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    nib.save(nib.Nifti1Image(data, ref.affine, header), str(out_path))
+    img = nib.Nifti1Image(data, ref.affine, header)
+
+    qform, qcode = ref.get_qform(coded=True)
+    sform, scode = ref.get_sform(coded=True)
+    img.set_qform(qform if qform is not None else ref.affine, int(qcode) if qform is not None else 1)
+    img.set_sform(sform if sform is not None else ref.affine, int(scode) if sform is not None else 1)
+    nib.save(img, str(out_path))
     return out_path
 
 
@@ -471,10 +672,17 @@ def _standardize_z_from_bone(
 
     如果 bone 分割不可用，退化为 volume 的 20%-82%。
     """
-    portal_margin_mm = max(margin_mm, 45.0 if getattr(case, "is_post_tips", False) else 35.0)
-    z_start, z_end, info = _z_range_from_portal_nii(case, vol_shape, spacing_zyx, portal_margin_mm, cache)
+    z_start, z_end, info = _z_range_from_totalseg_vertebrae_nii(
+        case, vol_shape, spacing_zyx, margin_mm=0.0, cache=cache
+    )
     if z_start is not None and z_end is not None:
         return z_start, z_end, info
+
+    portal_margin_mm = max(margin_mm, 45.0 if getattr(case, "is_post_tips", False) else 35.0)
+    z_start, z_end, portal_info = _z_range_from_portal_nii(case, vol_shape, spacing_zyx, portal_margin_mm, cache)
+    if z_start is not None and z_end is not None:
+        portal_info["vertebra_z_fallback"] = info
+        return z_start, z_end, portal_info
 
     z_start, z_end, info = _z_range_from_precomputed_bone_nii(case, vol_shape, spacing_zyx, margin_mm, cache)
     if z_start is not None and z_end is not None:
@@ -640,6 +848,31 @@ def _subtract_organs(
     return mask, excl_info
 
 
+def _get_tips_exclusion_mask_fast(
+    case,
+    vol_shape: tuple[int, int, int],
+    cache: MaskCache | None = None,
+) -> tuple[np.ndarray, dict]:
+    """Build a conservative exclusion mask for high-HU TIPS recovery.
+
+    Liver and IVC are intentionally not excluded here because a TIPS stent runs
+    through liver parenchyma toward the hepatic venous outflow.
+    """
+    exclusion = np.zeros(vol_shape, dtype=bool)
+    info: dict = {"source": "precomputed_nii", "loaded": []}
+    for name, dilate in (("bone_all", 2), ("aorta", 1), ("kidney_left", 1), ("kidney_right", 1), ("spleen", 1)):
+        mask, mask_info = _load_precomputed_structure_mask(case, name, vol_shape, cache)
+        if mask is None:
+            continue
+        if ndi is not None and dilate > 0:
+            mask = ndi.binary_dilation(mask, iterations=dilate)
+        exclusion |= mask
+        info["loaded"].append({"name": name, "files": mask_info.get("loaded", [])})
+    info["total_excluded_voxels"] = int(exclusion.sum())
+    info["status"] = "ok" if info["loaded"] else "empty"
+    return exclusion, info
+
+
 def _morphological_cleanup(mask: np.ndarray) -> np.ndarray:
     """形态学清理：opening 去噪 + closing 补小洞。"""
     if ndi is None:
@@ -788,6 +1021,176 @@ def _region_grow_from_portal_mask(
     return result, info
 
 
+def _limit_to_portal_reference_neighborhood(
+    mask: np.ndarray,
+    portal_mask: np.ndarray | None,
+    spacing_zyx: tuple[float, float, float],
+    radius_mm: float = PORTAL_REFERENCE_CLEANUP_RADIUS_MM,
+    seed_dilate: int = PORTAL_REFERENCE_CLEANUP_SEED_DILATE,
+) -> tuple[np.ndarray, dict]:
+    """Clip a broad portal-connected component to the portal reference area."""
+    mask = np.asarray(mask, dtype=bool)
+    info: dict = {
+        "enabled": portal_mask is not None,
+        "radius_mm": float(radius_mm),
+        "input_voxels": int(mask.sum()),
+    }
+    if ndi is None or portal_mask is None or not portal_mask.any() or not mask.any():
+        info["status"] = "skipped"
+        info["output_voxels"] = int(mask.sum())
+        return mask, info
+
+    portal = np.asarray(portal_mask, dtype=bool)
+    distance_mm = ndi.distance_transform_edt(~portal, sampling=spacing_zyx)
+    clipped = mask & (distance_mm <= float(radius_mm))
+    info["after_distance_voxels"] = int(clipped.sum())
+    del distance_mm
+
+    if not clipped.any():
+        info["status"] = "empty_after_distance_clip"
+        info["output_voxels"] = 0
+        return clipped, info
+
+    labels = np.empty(clipped.shape, dtype=np.int32)
+    n = ndi.label(clipped, output=labels)
+    seed = portal
+    if seed_dilate > 0:
+        seed = ndi.binary_dilation(portal, iterations=seed_dilate)
+    hit_labels = {int(v) for v in np.unique(labels[seed]) if int(v) > 0}
+    if hit_labels:
+        result = np.isin(labels, list(hit_labels))
+    else:
+        result = clipped
+    del labels
+
+    info.update({
+        "status": "ok",
+        "components_total": int(n),
+        "portal_labels_hit": int(len(hit_labels)),
+        "output_voxels": int(result.sum()),
+        "removed_voxels": int(mask.sum() - result.sum()),
+    })
+    return result, info
+
+
+def _portal_reference_quality(
+    vol: np.ndarray,
+    portal_mask: np.ndarray | None,
+) -> dict:
+    info: dict = {"available": portal_mask is not None and bool(portal_mask.any())}
+    if portal_mask is None or not portal_mask.any():
+        info["status"] = "missing"
+        info["reliable"] = False
+        return info
+    vals = np.asarray(vol[portal_mask], dtype=np.float32)
+    if vals.size == 0:
+        info["status"] = "empty"
+        info["reliable"] = False
+        return info
+    p10, p50, p90 = np.percentile(vals, [10, 50, 90])
+    info.update({
+        "status": "ok",
+        "voxels": int(portal_mask.sum()),
+        "p10": round(float(p10), 1),
+        "p50": round(float(p50), 1),
+        "p90": round(float(p90), 1),
+        "reliable": bool(p50 >= PORTAL_REFERENCE_MIN_P50_HU),
+        "min_p50_hu": PORTAL_REFERENCE_MIN_P50_HU,
+    })
+    return info
+
+
+def _liver_spleen_portal_fallback(
+    mask: np.ndarray,
+    vol: np.ndarray,
+    case,
+    vol_shape: tuple[int, int, int],
+    spacing_zyx: tuple[float, float, float],
+    hu_high: float,
+    cache: MaskCache | None = None,
+) -> tuple[np.ndarray | None, dict]:
+    info: dict = {"enabled": True, "source": "liver_spleen_hu_component"}
+    if ndi is None or not mask.any():
+        info["status"] = "skipped"
+        return None, info
+
+    liver, liver_info = _load_precomputed_structure_mask(case, "liver", vol_shape, cache)
+    spleen, spleen_info = _load_precomputed_structure_mask(case, "spleen", vol_shape, cache)
+    info["liver"] = liver_info
+    info["spleen"] = spleen_info
+    if liver is None or not liver.any() or spleen is None or not spleen.any():
+        info["status"] = "missing_liver_or_spleen"
+        return None, info
+
+    high_low = max(LIVER_SPLEEN_FALLBACK_MIN_HU, min(180.0, float(hu_high) - 25.0))
+    high_high = min(float(hu_high), LIVER_SPLEEN_FALLBACK_MAX_HU)
+    if high_high <= high_low:
+        high_high = max(high_low + 20.0, float(hu_high))
+    candidate = mask & (vol >= high_low) & (vol <= high_high)
+    info.update({
+        "hu_low": round(float(high_low), 1),
+        "hu_high": round(float(high_high), 1),
+        "candidate_voxels": int(candidate.sum()),
+    })
+    if not candidate.any():
+        info["status"] = "empty_candidate"
+        return None, info
+
+    liver_dist = ndi.distance_transform_edt(~liver.astype(bool), sampling=spacing_zyx)
+    spleen_dist = ndi.distance_transform_edt(~spleen.astype(bool), sampling=spacing_zyx)
+    labels = np.empty(candidate.shape, dtype=np.int32)
+    n = ndi.label(candidate, output=labels)
+    counts = np.bincount(labels.ravel(), minlength=n + 1)
+    counts[0] = 0
+
+    best_label = 0
+    best_score = -1e9
+    scored: list[dict] = []
+    for lb in np.flatnonzero(counts >= 1000):
+        comp = labels == int(lb)
+        dl = float(np.percentile(liver_dist[comp], 50))
+        ds = float(np.percentile(spleen_dist[comp], 50))
+        if not (25.0 <= dl <= 130.0 and 25.0 <= ds <= 130.0):
+            continue
+        hu50 = float(np.percentile(vol[comp], 50))
+        score = (
+            2.0 * float(np.log1p(counts[int(lb)]))
+            - 0.03 * (dl + ds)
+            - 0.05 * abs(dl - ds)
+            + 0.01 * hu50
+        )
+        item = {
+            "label": int(lb),
+            "voxels": int(counts[int(lb)]),
+            "score": round(float(score), 3),
+            "dist_liver_p50_mm": round(dl, 1),
+            "dist_spleen_p50_mm": round(ds, 1),
+            "hu_p50": round(hu50, 1),
+        }
+        scored.append(item)
+        if score > best_score:
+            best_score = score
+            best_label = int(lb)
+
+    del liver_dist, spleen_dist
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    info["top_components"] = scored[:8]
+    if best_label <= 0:
+        del labels
+        info["status"] = "no_anatomic_component"
+        return None, info
+
+    selected = labels == best_label
+    del labels
+    info.update({
+        "status": "ok",
+        "components_total": int(n),
+        "selected_label": int(best_label),
+        "output_voxels": int(selected.sum()),
+    })
+    return selected, info
+
+
 # =========================================================================
 # TIPS 支架处理
 # =========================================================================
@@ -800,6 +1203,9 @@ def _add_tips_stent(
     tips_hu_low: float = 430.0,
     tips_hu_high: float = TIPS_HU_HIGH_CAP,
     exclusion_mask: np.ndarray | None = None,
+    portal_mask: np.ndarray | None = None,
+    spacing_zyx: tuple[float, float, float] | None = None,
+    max_portal_distance_mm: float = PORTAL_REFERENCE_CLEANUP_RADIUS_TIPS_MM,
 ) -> tuple[np.ndarray, dict]:
     """单独处理 TIPS 支架（高 HU 通道）。"""
     info: dict = {}
@@ -811,6 +1217,13 @@ def _add_tips_stent(
 
     if exclusion_mask is not None:
         tips_mask = tips_mask & ~exclusion_mask
+
+    if portal_mask is not None and spacing_zyx is not None and ndi is not None and portal_mask.any():
+        distance_mm = ndi.distance_transform_edt(~portal_mask.astype(bool), sampling=spacing_zyx)
+        tips_mask = tips_mask & (distance_mm <= float(max_portal_distance_mm))
+        info["portal_distance_limit_mm"] = float(max_portal_distance_mm)
+        info["tips_voxels_after_distance"] = int(tips_mask.sum())
+        del distance_mm
 
     if ndi is not None:
         tips_mask = ndi.binary_closing(tips_mask, iterations=1)
@@ -865,6 +1278,31 @@ def _pretrain_quality(mask: np.ndarray, stl_bytes: int, max_voxels: int) -> tupl
 
 
 def _evaluate_against_label(case, grid_size=96):
+    label_nii = case.path / "mask.nii.gz"
+    pretrain_nii = _pretrain_nii_path(case)
+    orig_nii = case.path / "orig.nii.gz"
+    if label_nii.exists() and pretrain_nii.exists() and orig_nii.exists():
+        try:
+            dcm = _load_nifti_as_dicomvolume(orig_nii)
+            pre = _load_mask_nii(pretrain_nii, dcm.volume_hu.shape).astype(bool)
+            label = _load_mask_nii(label_nii, dcm.volume_hu.shape).astype(bool)
+            inter = int(np.logical_and(pre, label).sum())
+            pc, lc = int(pre.sum()), int(label.sum())
+            d = pc + lc
+            return {
+                "source": "mask.nii.gz",
+                "dice": round(float((2 * inter / d) if d else 1.0), 4),
+                "precision": round(float((inter / pc) if pc else 0.0), 4),
+                "recall": round(float((inter / lc) if lc else 0.0), 4),
+                "pretrain_voxels": pc,
+                "label_voxels": lc,
+                "intersection_voxels": inter,
+            }
+        except Exception as e:
+            nii_error = str(e)
+    else:
+        nii_error = None
+
     if not case.label_stl.exists() or not case.pretrain_stl.exists():
         return None
     try:
@@ -877,6 +1315,8 @@ def _evaluate_against_label(case, grid_size=96):
     pc, lc = int(pm.sum()), int(lm.sum())
     d = pc + lc
     return {
+        "source": "label_stl",
+        "nii_error": nii_error,
         "dice": round(float((2 * inter / d) if d else 1.0), 4),
         "precision": round(float((inter / pc) if pc else 0.0), 4),
         "recall": round(float((inter / lc) if lc else 0.0), 4),
@@ -989,61 +1429,165 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     mask = _morphological_cleanup(mask)
     print(f"    after morphology: {int(mask.sum())} voxels")
 
+    portal_mask, portal_mask_info = _get_portal_vein_mask_fast(case, vol_shape, mask_cache)
+    if (portal_mask is None or portal_mask.sum() == 0) and get_portal_vein_mask:
+        portal_mask = get_portal_vein_mask(case, vol_shape)
+        portal_mask_info = {"source": "totalseg_module"}
+
     # ==============================================================
     # Step 6: TIPS 支架（如果是 post-TIPS）
     # ==============================================================
     tips_info: dict = {"is_post_tips": bool(case.is_post_tips)}
     if case.is_post_tips:
         # 加载排除 mask 用于 TIPS（避免骨骼被当成支架）
-        excl_mask, tips_excl_info = _get_exclusion_mask_fast(
-            case, vol_shape, dilate_bone=2, dilate_organ=0, cache=mask_cache
+        excl_mask, tips_excl_info = _get_tips_exclusion_mask_fast(
+            case, vol_shape, cache=mask_cache
         )
-        if not tips_excl_info.get("loaded") and get_exclusion_mask is not None:
-            excl_mask, tips_excl_info = get_exclusion_mask(case, vol_shape, dilate_bone=2, dilate_organ=0)
-            tips_excl_info["source"] = "totalseg_module"
         mask, tips_info = _add_tips_stent(mask, vol, z_start, z_end,
-                                           exclusion_mask=excl_mask)
+                                           exclusion_mask=excl_mask,
+                                           portal_mask=portal_mask,
+                                           spacing_zyx=dcm.spacing_zyx)
         tips_info["exclusion"] = tips_excl_info
         del excl_mask
         print(f"    after TIPS: {int(mask.sum())} voxels (tips={tips_info.get('tips_voxels', 0)})")
 
     # ==============================================================
-    # Step 7: 区域生长（从门静脉 mask 或 seed 点）
+    # Step 7: 区域生长（从可信门静脉 mask、肝脾 fallback 或 seed 点）
     # ==============================================================
-    portal_mask, portal_mask_info = _get_portal_vein_mask_fast(case, vol_shape, mask_cache)
-    if (portal_mask is None or portal_mask.sum() == 0) and get_portal_vein_mask:
-        portal_mask = get_portal_vein_mask(case, vol_shape)
-        portal_mask_info = {"source": "totalseg_module"}
+    portal_quality_info = _portal_reference_quality(vol, portal_mask)
+    liver_spleen_info: dict = {"enabled": False, "status": "not_needed"}
+    used_fallback_reference = False
 
-    if portal_mask is not None and portal_mask.sum() > 0:
-        # 优先用门静脉 mask 做区域生长（比单点更稳健）
-        mask, grow_info = _region_grow_from_portal_mask(
-            mask, portal_mask, dcm.spacing_zyx, REGION_GROW_BRIDGE_MM,
+    if not case.is_post_tips and not portal_quality_info.get("reliable", False):
+        fallback_reference, liver_spleen_info = _liver_spleen_portal_fallback(
+            mask, vol, case, vol_shape, dcm.spacing_zyx, hu_high, mask_cache,
         )
-        grow_info["method"] = "portal_mask"
-        grow_info["portal_mask"] = portal_mask_info
-        del portal_mask
-    else:
-        # 退化为单点 seed
-        seed_zyx, seed_info = _get_portal_seed_fast(case, vol_shape, mask_cache)
-        if seed_zyx is None and get_portal_seed is not None:
-            seed_zyx, seed_info = get_portal_seed(case, dcm.spacing_zyx, dcm.origin_xyz)
-        if seed_zyx is not None:
-            mask, grow_info = _region_grow_from_seed(mask, seed_zyx, dcm.spacing_zyx)
-            grow_info["method"] = "portal_seed"
-            grow_info["seed"] = seed_info
-        else:
-            grow_info = {"method": "none", "reason": "no_portal_reference"}
+        if fallback_reference is not None and fallback_reference.any():
+            before_fallback = int(mask.sum())
+            edge_hu_low = max(
+                LIVER_SPLEEN_FALLBACK_MIN_HU,
+                float(liver_spleen_info.get("hu_low", LIVER_SPLEEN_FALLBACK_MIN_HU))
+                - LIVER_SPLEEN_FALLBACK_EDGE_MARGIN_HU,
+            )
+            edge_hu_high = (
+                float(liver_spleen_info.get("hu_high", hu_high))
+                + LIVER_SPLEEN_FALLBACK_EDGE_HIGH_MARGIN_HU
+            )
+            fallback_edge = (
+                ndi.binary_dilation(fallback_reference, iterations=1)
+                & mask
+                & ~fallback_reference
+                & (vol >= edge_hu_low)
+                & (vol <= edge_hu_high)
+            )
+            mask = fallback_reference | fallback_edge
+            portal_cleanup_info = {
+                "enabled": True,
+                "reference": "liver_spleen_fallback",
+                "radius_mm": None,
+                "edge_hu_low": round(float(edge_hu_low), 1),
+                "edge_hu_high": round(float(edge_hu_high), 1),
+                "input_voxels": before_fallback,
+                "reference_voxels": int(fallback_reference.sum()),
+                "edge_voxels": int(fallback_edge.sum()),
+                "output_voxels": int(mask.sum()),
+                "removed_voxels": before_fallback - int(mask.sum()),
+                "status": "ok",
+            }
+            grow_info = {
+                "method": "liver_spleen_fallback",
+                "input_voxels": before_fallback,
+                "output_voxels": int(mask.sum()),
+                "removed": before_fallback - int(mask.sum()),
+                "portal_mask": portal_mask_info,
+            }
+            used_fallback_reference = True
 
-    print(f"    after region grow: {int(mask.sum())} voxels "
-          f"(removed {grow_info.get('input_voxels', 0) - grow_info.get('output_voxels', 0)})")
+    if not used_fallback_reference:
+        if portal_mask is not None and portal_mask.sum() > 0 and portal_quality_info.get("reliable", False):
+            # 优先用可信门静脉 mask 做区域生长（比单点更稳健）
+            mask, grow_info = _region_grow_from_portal_mask(
+                mask, portal_mask, dcm.spacing_zyx, REGION_GROW_BRIDGE_MM,
+            )
+            grow_info["method"] = "portal_mask"
+            grow_info["portal_mask"] = portal_mask_info
+        else:
+            # 退化为单点 seed
+            seed_zyx, seed_info = _get_portal_seed_fast(case, vol_shape, mask_cache)
+            if seed_zyx is None and get_portal_seed is not None:
+                seed_zyx, seed_info = get_portal_seed(case, dcm.spacing_zyx, dcm.origin_xyz)
+            if seed_zyx is not None:
+                mask, grow_info = _region_grow_from_seed(mask, seed_zyx, dcm.spacing_zyx)
+                grow_info["method"] = "portal_seed"
+                grow_info["seed"] = seed_info
+            else:
+                grow_info = {
+                    "method": "none",
+                    "reason": "no_reliable_portal_reference",
+                    "input_voxels": int(mask.sum()),
+                    "output_voxels": int(mask.sum()),
+                }
+
+        print(f"    after region grow: {int(mask.sum())} voxels "
+              f"(removed {grow_info.get('input_voxels', 0) - grow_info.get('output_voxels', 0)})")
+
+        cleanup_reference = portal_mask if portal_quality_info.get("reliable", False) else None
+        mask, portal_cleanup_info = _limit_to_portal_reference_neighborhood(
+            mask, cleanup_reference, dcm.spacing_zyx,
+            radius_mm=PORTAL_REFERENCE_CLEANUP_RADIUS_TIPS_MM if case.is_post_tips else PORTAL_REFERENCE_CLEANUP_RADIUS_MM,
+        )
+    else:
+        print(f"    after liver/spleen fallback: {int(mask.sum())} voxels "
+              f"(removed {grow_info.get('removed', 0)})")
+
+    print(f"    after portal cleanup: {int(mask.sum())} voxels "
+          f"(removed {portal_cleanup_info.get('removed_voxels', 0)})")
+
+    portal_reliable_for_merge = bool(
+        portal_mask is not None and portal_mask.any() and portal_quality_info.get("reliable", False)
+    )
+    portal_reference_info = {
+        "enabled": portal_mask is not None,
+        "reliable": bool(portal_quality_info.get("reliable", False)),
+        "added_voxels": 0,
+    }
+    if portal_reliable_for_merge:
+        before_portal_union = int(mask.sum())
+        mask = mask | portal_mask.astype(bool)
+        portal_reference_info = {
+            "enabled": True,
+            "reliable": True,
+            "portal_voxels": int(portal_mask.sum()),
+            "voxels_before": before_portal_union,
+            "voxels_after": int(mask.sum()),
+            "added_voxels": int(mask.sum()) - before_portal_union,
+        }
+        print(f"    after portal reference merge: {int(mask.sum())} voxels "
+              f"(added {portal_reference_info['added_voxels']})")
+
+    if case.is_post_tips:
+        tips_excl_mask, tips_final_excl_info = _get_tips_exclusion_mask_fast(case, vol_shape, cache=mask_cache)
+        mask, tips_final_info = _add_tips_stent(
+            mask, vol, z_start, z_end,
+            exclusion_mask=tips_excl_mask,
+            portal_mask=portal_mask,
+            spacing_zyx=dcm.spacing_zyx,
+        )
+        tips_info["final_recovery"] = tips_final_info
+        tips_info["final_recovery_exclusion"] = tips_final_excl_info
+        del tips_excl_mask
+        print(f"    after final TIPS recovery: {int(mask.sum())} voxels "
+              f"(tips={tips_final_info.get('tips_voxels', 0)})")
+    del portal_mask
 
     # ==============================================================
     # Step 8: 输出
     # ==============================================================
+    import nibabel as nib
+
     np.save(work_dir / "pretrain_mask.npy", mask.astype(np.uint8))
     nii_path = _save_pretrain_nifti(mask, orig_path, _pretrain_nii_path(case))
-    out_path = mask_to_stl(mask, dcm.spacing_zyx, case.pretrain_stl, origin_xyz=dcm.origin_xyz)
+    out_path = zyx_mask_to_stl(mask, nib.load(str(nii_path)).affine, case.pretrain_stl, name="pretrain")
     stl_bytes = int(out_path.stat().st_size)
     target = TARGET_VOXELS_TIPS if case.is_post_tips else TARGET_VOXELS
     quality, issues, qstats = _pretrain_quality(mask, stl_bytes, target)
@@ -1062,6 +1606,10 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
         "organ_subtraction": excl_info,
         "tips": tips_info,
         "region_grow": grow_info,
+        "portal_reference_quality": portal_quality_info,
+        "portal_reference_cleanup": portal_cleanup_info,
+        "portal_reference_merge": portal_reference_info,
+        "liver_spleen_fallback": liver_spleen_info,
         "pretrain_quality": quality,
         "quality_issues": issues,
         "quality_stats": qstats,
@@ -1092,23 +1640,30 @@ def coarse_segment_patient(case, client=None, force=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="v6: precomputed NIfTI-driven portal vein extraction.",
+        description="precomputed NIfTI-driven portal vein extraction.",
     )
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
     parser.add_argument("--patient", default=None)
-    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--force", default=True, action="store_true")
     parser.add_argument("--skip_existing_pretrain", action="store_true")
     parser.add_argument("--model", default=None)
     parser.add_argument("--api_key", default=None)
     parser.add_argument("--api_base_url", default=None)
     args = parser.parse_args()
 
-    cases = discover_patients(args.data_root)
     if args.patient:
-        cases = [c for c in cases if c.name == args.patient]
-    print(f"[v6] {len(cases)} patients")
+        patient_path = Path(args.patient)
+        if patient_path.exists():
+            cases = discover_patients(patient_path)
+        else:
+            cases = [c for c in discover_patients(args.data_root) if c.name == args.patient]
+    else:
+        cases = discover_patients(args.data_root)
+    if args.patient:
+        cases = [c for c in cases if c.name == Path(args.patient).name or Path(args.patient).exists()]
+    print(f"[{PRETRAIN_ALGORITHM_VERSION}] {len(cases)} patients")
     for case in cases:
-        print(f"[v6] {case.name}:")
+        print(f"[{PRETRAIN_ALGORITHM_VERSION}] {case.name}:")
         try:
             if args.skip_existing_pretrain and case.pretrain_stl.exists() and _pretrain_nii_path(case).exists():
                 print("  result: skipped_existing")

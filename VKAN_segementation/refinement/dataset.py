@@ -11,13 +11,13 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 try:
-    from ..utils.common import INVALID_MARKERS, discover_patients, stl_to_voxels
+    from ..utils.common import discover_patients, stl_to_voxels
 except (ImportError, ValueError):
     try:
-        from VKAN_segementation.utils.common import INVALID_MARKERS, discover_patients, stl_to_voxels
+        from VKAN_segementation.utils.common import discover_patients, stl_to_voxels
     except ImportError:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from utils.common import INVALID_MARKERS, discover_patients, stl_to_voxels
+        from utils.common import discover_patients, stl_to_voxels
 
 
 DEFAULT_LABEL_NAMES = ("mask_label.nii.gz", "mask_smooth.nii.gz")
@@ -28,6 +28,7 @@ class NiiCase:
     name: str
     path: Path
     pretrain_nii: Path
+    pretrain_stl: Path
     label_nii: Path
     predict_mask_nii: Path
     predict_stl: Path
@@ -60,6 +61,26 @@ def _resample_to_shape(volume: np.ndarray, shape: tuple[int, int, int], order: i
     return ndi.zoom(volume, zoom, order=order)
 
 
+def _resample_nii_to_reference(
+    volume: np.ndarray,
+    affine: np.ndarray,
+    reference_shape: tuple[int, int, int],
+    reference_affine: np.ndarray,
+    order: int,
+) -> np.ndarray:
+    if tuple(volume.shape) == tuple(reference_shape) and np.allclose(affine, reference_affine):
+        return volume
+    try:
+        import nibabel as nib
+        from nibabel.processing import resample_from_to
+    except ImportError as exc:
+        raise ImportError("nibabel and scipy are required when NIfTI spaces differ.") from exc
+    source = nib.Nifti1Image(np.asarray(volume, dtype=np.float32), affine)
+    target = (tuple(int(s) for s in reference_shape), np.asarray(reference_affine, dtype=np.float64))
+    aligned = resample_from_to(source, target, order=order)
+    return np.asarray(aligned.dataobj, dtype=np.float32)
+
+
 def _foreground_bbox(mask: np.ndarray, margin: int) -> tuple[slice, slice, slice]:
     coords = np.argwhere(mask)
     if coords.size == 0:
@@ -87,19 +108,22 @@ def _resolve_label(path: Path, label_name: str) -> Path | None:
 def discover_nii_cases(
     root: str | Path,
     pretrain_name: str = "pretrain.nii.gz",
+    pretrain_stl_name: str = "pretrain.stl",
     label_name: str = "auto",
+    require_pretrain_stl: bool = True,
     include_invalid: bool = False,
 ) -> list[NiiCase]:
     root = Path(root)
     patient_dirs = [root] if (root / pretrain_name).exists() else sorted(p for p in root.iterdir() if p.is_dir())
     cases: list[NiiCase] = []
     for path in patient_dirs:
-        if "@" in path.name:
-            continue
-        if not include_invalid and any(marker in path.name for marker in INVALID_MARKERS):
+        if "$" in path.name:
             continue
         pretrain = path / pretrain_name
+        pretrain_stl = path / pretrain_stl_name
         label = _resolve_label(path, label_name)
+        if require_pretrain_stl and not pretrain_stl.exists():
+            continue
         if not pretrain.exists() or label is None:
             continue
         cases.append(
@@ -107,6 +131,7 @@ def discover_nii_cases(
                 name=path.name,
                 path=path,
                 pretrain_nii=pretrain,
+                pretrain_stl=pretrain_stl,
                 label_nii=label,
                 predict_mask_nii=path / "predict_mask.nii.gz",
                 predict_stl=path / "predict.stl",
@@ -124,10 +149,12 @@ class VesselNiiDataset(Dataset):
         data_root: str | Path,
         grid_size: int = 96,
         pretrain_name: str = "pretrain.nii.gz",
+        pretrain_stl_name: str = "pretrain.stl",
         label_name: str = "mask.nii.gz",
         label_threshold: float = 0.5,
         roi_margin: int = 16,
         crop_source: str = "union",
+        require_pretrain_stl: bool = True,
         include_invalid: bool = False,
     ) -> None:
         self.data_root = Path(data_root)
@@ -138,11 +165,13 @@ class VesselNiiDataset(Dataset):
         self.cases = discover_nii_cases(
             self.data_root,
             pretrain_name=pretrain_name,
+            pretrain_stl_name=pretrain_stl_name,
             label_name=label_name,
+            require_pretrain_stl=require_pretrain_stl,
             include_invalid=include_invalid,
         )
         if not self.cases:
-            raise RuntimeError("No usable NIfTI cases found. Need pretrain.nii.gz and a label NIfTI.")
+            raise RuntimeError("No usable NIfTI cases found. Need pretrain.nii.gz, pretrain.stl, and a label NIfTI.")
 
     def __len__(self) -> int:
         return len(self.cases)
@@ -151,8 +180,9 @@ class VesselNiiDataset(Dataset):
         case = self.cases[idx]
         pre, affine = _load_nii(case.pretrain_nii)
         label, label_affine = _load_nii(case.label_nii)
-        if label.shape != pre.shape:
-            label = _resample_to_shape(label, tuple(pre.shape), order=0)
+        label_space_matches = bool(tuple(label.shape) == tuple(pre.shape) and np.allclose(affine, label_affine))
+        if not label_space_matches:
+            label = _resample_nii_to_reference(label, label_affine, tuple(pre.shape), affine, order=0)
         pre_mask = pre > 0.5
         label_mask = label > self.label_threshold
         if self.crop_source == "pretrain":
@@ -171,7 +201,8 @@ class VesselNiiDataset(Dataset):
             "crop_slices": _crop_slices_to_tensor(crop),
             "original_shape": torch.tensor(pre.shape, dtype=torch.int64),
             "affine": torch.from_numpy(affine).float(),
-            "label_affine_matches": torch.tensor(bool(np.allclose(affine, label_affine))),
+            "label_affine_matches": torch.tensor(label_space_matches),
+            "label_resampled_to_pretrain": torch.tensor(not label_space_matches),
             "is_post_tips": torch.tensor(float(case.is_post_tips), dtype=torch.float32),
         }
 
@@ -183,6 +214,7 @@ class VesselSTLDataset(Dataset):
         self.data_root = Path(data_root)
         self.grid_size = int(grid_size)
         cases = discover_patients(self.data_root)
+        cases = [case for case in cases if "$" not in case.name]
         if require_pretrain:
             cases = [case for case in cases if case.pretrain_stl.exists()]
         cases = [case for case in cases if case.label_stl.exists()]
@@ -225,7 +257,7 @@ def collate_fn(items: list[dict]) -> dict:
         "label": torch.stack([item["label"] for item in items]),
         "is_post_tips": torch.stack([item["is_post_tips"] for item in items]),
     }
-    for key in ("bounds", "crop_slices", "original_shape", "affine", "label_affine_matches"):
+    for key in ("bounds", "crop_slices", "original_shape", "affine", "label_affine_matches", "label_resampled_to_pretrain"):
         if key in items[0]:
             batch[key] = torch.stack([item[key] for item in items])
     return batch
