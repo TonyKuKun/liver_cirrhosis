@@ -57,6 +57,20 @@ DEFAULT_VARIANTS: List[AblationVariant] = [
         args=["--no_physics_baseline"],
     ),
     AblationVariant(
+        name="module_fixed_physics_baseline",
+        category="module",
+        changed_component="Fixed Poiseuille baseline anchor",
+        hypothesis="Tests the old hard physics anchor against no physics and learnable reduced-order calibration.",
+        args=["--physics_mode", "fixed"],
+    ),
+    AblationVariant(
+        name="module_learnable_rom_physics",
+        category="module",
+        changed_component="Learnable reduced-order physics",
+        hypothesis="Tests whether soft calibration and gating of reduced-order pressure/flow proxies can recover useful physics without a hard Poiseuille anchor.",
+        args=["--physics_mode", "learnable"],
+    ),
+    AblationVariant(
         name="module_no_aux",
         category="module",
         changed_component="Auxiliary/system scalars",

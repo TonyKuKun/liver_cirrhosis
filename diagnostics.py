@@ -32,6 +32,11 @@ PREDICTION_COLUMNS = [
     "tips_fraction",
     "collateral_fraction",
     "liver_fraction",
+    "physics_gate",
+    "physics_anchor_norm",
+    "physics_raw_norm",
+    "physics_calibrated_norm",
+    "physics_delta_norm",
 ]
 
 
@@ -102,6 +107,21 @@ def prediction_rows_from_batch(out, batch, fold, label_mean, label_std):
     tips_fraction = out["flow_out"]["tips_fraction"].detach().cpu().numpy()
     collateral_fraction = out["flow_out"]["collateral_fraction"].detach().cpu().numpy()
     liver_fraction = out["flow_out"]["liver_fraction"].detach().cpu().numpy()
+    physics_gate = out.get(
+        "pvp_physics_gate", torch.zeros_like(out["pvp_pred"])
+    ).detach().squeeze(-1).cpu().numpy()
+    physics_anchor = out.get(
+        "pvp_baseline_norm", torch.zeros_like(out["pvp_pred"])
+    ).detach().squeeze(-1).cpu().numpy()
+    physics_raw = out.get(
+        "pvp_baseline_raw_norm", torch.zeros_like(out["pvp_pred"])
+    ).detach().squeeze(-1).cpu().numpy()
+    physics_calibrated = out.get(
+        "pvp_physics_calibrated_norm", torch.zeros_like(out["pvp_pred"])
+    ).detach().squeeze(-1).cpu().numpy()
+    physics_delta = out.get(
+        "pvp_physics_delta_norm", torch.zeros_like(out["pvp_pred"])
+    ).detach().squeeze(-1).cpu().numpy()
 
     rows = []
     for i, name in enumerate(batch["name"]):
@@ -126,6 +146,11 @@ def prediction_rows_from_batch(out, batch, fold, label_mean, label_std):
             "tips_fraction": float(tips_fraction[i]),
             "collateral_fraction": float(collateral_fraction[i]),
             "liver_fraction": float(liver_fraction[i]),
+            "physics_gate": float(physics_gate[i]),
+            "physics_anchor_norm": float(physics_anchor[i]),
+            "physics_raw_norm": float(physics_raw[i]),
+            "physics_calibrated_norm": float(physics_calibrated[i]),
+            "physics_delta_norm": float(physics_delta[i]),
         })
     return rows
 
@@ -249,6 +274,10 @@ def collect_oof_predictions(checkpoint_dir, data_root, n_points=100, batch_size=
             use_profile_transformer=args.get("use_profile_transformer", False),
             use_tips_head=args.get("use_tips_head", False),
             use_aux_mask=args.get("use_aux_mask", False),
+            physics_mode=args.get(
+                "physics_mode",
+                "fixed" if args.get("use_physics_baseline", True) else "none",
+            ),
         ).to(device)
         load_model_state_compat(model, ckpt["model_state_dict"])
         loader = DataLoader(Subset(ds, val_idx), batch_size=batch_size, shuffle=False,

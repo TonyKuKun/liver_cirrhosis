@@ -724,6 +724,84 @@ class JunctionPhysics(nn.Module):
         }
 
 
+class LearnableReducedOrderPhysics(nn.Module):
+    """
+    Soft calibration layer for the coarse portal-circuit physics.
+
+    It keeps reduced-order variables such as path pressure drop, branch
+    resistance, learned flow fractions, and junction summaries, but learns
+    both a calibration and a per-sample gate. This avoids forcing noisy
+    Poiseuille proxies to act as a hard additive anchor.
+    """
+
+    def __init__(self, d_hidden: int = 32, d_aux: int = N_AUX,
+                 max_gate: float = 0.75):
+        super().__init__()
+        self.max_gate = float(max_gate)
+        d_in = 2 + N_SEGMENTS * 3 + 15 + N_SEGMENTS + 3 + d_aux
+        self.feat_norm = nn.LayerNorm(d_in)
+        self.net = nn.Sequential(
+            nn.Linear(d_in, d_hidden * 2),
+            nn.LayerNorm(d_hidden * 2),
+            nn.GELU(),
+            nn.Dropout(0.10),
+            nn.Linear(d_hidden * 2, d_hidden),
+            nn.GELU(),
+        )
+        self.delta_head = nn.Linear(d_hidden, 1)
+        self.gate_head = nn.Linear(d_hidden, 1)
+
+        nn.init.zeros_(self.delta_head.weight)
+        nn.init.zeros_(self.delta_head.bias)
+        nn.init.zeros_(self.gate_head.weight)
+        nn.init.constant_(self.gate_head.bias, -2.2)
+
+    @staticmethod
+    def _log1p_signed(x, scale=1.0):
+        return torch.sign(x) * torch.log1p(torch.abs(x) / scale)
+
+    def forward(self, raw_baseline_norm, baseline_pa, endpoint_dP,
+                branch_resistance, Q, q_scale, junction_features,
+                segment_mask, has_tips, aux_norm):
+        raw = raw_baseline_norm.clamp(-5.0, 5.0)
+        log_base = self._log1p_signed(baseline_pa, scale=100.0).unsqueeze(-1)
+        log_endpoint = self._log1p_signed(endpoint_dP, scale=100.0)
+        log_resistance = torch.log1p(
+            branch_resistance.clamp(min=0.0)
+        ).clamp(max=20.0)
+        q_safe = torch.nan_to_num(Q, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 3.0)
+        liver_count = (
+            segment_mask[:, SEG_INDEX['lpv']] + segment_mask[:, SEG_INDEX['rpv']]
+        ).unsqueeze(-1)
+
+        feats = torch.cat([
+            raw.unsqueeze(-1),
+            log_base,
+            log_endpoint,
+            log_resistance,
+            q_safe,
+            torch.nan_to_num(
+                junction_features, nan=0.0, posinf=1e3, neginf=-1e3
+            ).clamp(-1e3, 1e3),
+            segment_mask,
+            q_scale.unsqueeze(-1),
+            has_tips.float().unsqueeze(-1),
+            liver_count,
+            aux_norm,
+        ], dim=-1)
+        feats = torch.nan_to_num(feats, nan=0.0, posinf=1e3, neginf=-1e3)
+        h = self.net(self.feat_norm(feats))
+        delta = self.delta_head(h).squeeze(-1).clamp(-3.0, 3.0)
+        gate = self.max_gate * torch.sigmoid(self.gate_head(h).squeeze(-1))
+        calibrated = (raw + delta).clamp(-5.0, 5.0)
+        return {
+            'anchor_norm': gate * calibrated,
+            'calibrated_norm': calibrated,
+            'delta_norm': delta,
+            'gate': gate,
+        }
+
+
 # =====================================================================
 # Module 6 — Full model
 # =====================================================================
@@ -739,15 +817,21 @@ class PortalPressureNet(nn.Module):
                  use_profile_transformer: bool = True,
                  use_tips_head: bool = True,
                  use_aux_mask: bool = True,
+                 physics_mode: str = None,
                  pvp_mean_pa: float = PVP_MEAN_PA_DEFAULT,
                  pvp_std_pa:  float = PVP_STD_PA_DEFAULT,
                  log_vol_mean: float = LOG_VOL_MEAN_DEFAULT,
                  log_vol_std:  float = LOG_VOL_STD_DEFAULT):
         super().__init__()
+        if physics_mode is None:
+            physics_mode = "fixed" if use_physics_baseline else "none"
+        if physics_mode not in {"none", "fixed", "learnable"}:
+            raise ValueError("physics_mode must be one of: none, fixed, learnable")
         self.d_hidden = d_hidden
         self.use_residual = use_residual
         self.use_q_scale = use_q_scale
-        self.use_physics_baseline = use_physics_baseline
+        self.physics_mode = physics_mode
+        self.use_physics_baseline = physics_mode != "none"
         self.use_aux = use_aux
         self.use_flow_features = use_flow_features
         self.use_branch_embed = use_branch_embed
@@ -781,6 +865,9 @@ class PortalPressureNet(nn.Module):
         )
         self.hydro = PoiseuilleHydrodynamics()
         self.junction_phys = JunctionPhysics()
+        self.learnable_physics = LearnableReducedOrderPhysics(
+            d_hidden=d_hidden, d_aux=N_AUX,
+        )
 
         self.q_estimator = SplenicFlowEstimator(
             d_hidden=8, log_vol_mean=log_vol_mean, log_vol_std=log_vol_std,
@@ -845,6 +932,11 @@ class PortalPressureNet(nn.Module):
                      self.flow_est.bif_outflow_head[-1]]:
             head.weight.data.zero_()
             head.bias.data.zero_()
+
+        self.learnable_physics.delta_head.weight.data.zero_()
+        self.learnable_physics.delta_head.bias.data.zero_()
+        self.learnable_physics.gate_head.weight.data.zero_()
+        self.learnable_physics.gate_head.bias.data.fill_(-2.2)
 
     @staticmethod
     def _make_predictor(d_fused: int, d_hidden: int, dropout: float):
@@ -983,11 +1075,31 @@ class PortalPressureNet(nn.Module):
 
         # ── Physics baseline (v5) ────────────────────────────
         # Cumulative ΔP along the portal system → normalize to label space.
-        baseline_pa   = self._physics_baseline_pa(hemo_per_seg, segment_mask)
-        baseline_norm = ((baseline_pa - self.pvp_mean_pa) / self.pvp_std_pa
-                         ).clamp(min=-5.0, max=5.0)
-        if not self.use_physics_baseline:
-            baseline_norm = torch.zeros_like(baseline_norm)
+        baseline_pa = self._physics_baseline_pa(hemo_per_seg, segment_mask)
+        baseline_raw_norm = ((baseline_pa - self.pvp_mean_pa) / self.pvp_std_pa
+                             ).clamp(min=-5.0, max=5.0)
+        endpoint_dP = torch.stack(
+            [h['pressure_drop_total'] * segment_mask[:, si]
+             for si, h in enumerate(hemo_per_seg)], dim=-1)
+        physics_cal = {
+            'anchor_norm': baseline_raw_norm,
+            'calibrated_norm': baseline_raw_norm,
+            'delta_norm': torch.zeros_like(baseline_raw_norm),
+            'gate': torch.ones_like(baseline_raw_norm),
+        }
+        if self.physics_mode == "none":
+            baseline_norm = torch.zeros_like(baseline_raw_norm)
+            physics_cal['anchor_norm'] = baseline_norm
+            physics_cal['calibrated_norm'] = baseline_norm
+            physics_cal['gate'] = baseline_norm
+        elif self.physics_mode == "fixed":
+            baseline_norm = baseline_raw_norm
+        else:
+            physics_cal = self.learnable_physics(
+                baseline_raw_norm, baseline_pa, endpoint_dP,
+                branch_resistance, Q, q_scale, jp['features'],
+                segment_mask, has_tips, aux_for_flow)
+            baseline_norm = physics_cal['anchor_norm']
 
         # ── Predictor sees baseline as a feature too ─────────
         branch_for_fused = branch_embed if self.use_branch_embed else torch.zeros_like(branch_embed)
@@ -1038,13 +1150,15 @@ class PortalPressureNet(nn.Module):
             'pvp_post_head': (baseline_norm + pvp_post).unsqueeze(-1),
             'pvp_residual': pvp_residual.unsqueeze(-1),
             'pvp_baseline_norm': baseline_norm.unsqueeze(-1),  # ← interpretability
+            'pvp_baseline_raw_norm': baseline_raw_norm.unsqueeze(-1),
+            'pvp_physics_calibrated_norm': physics_cal['calibrated_norm'].unsqueeze(-1),
+            'pvp_physics_delta_norm': physics_cal['delta_norm'].unsqueeze(-1),
+            'pvp_physics_gate': physics_cal['gate'].unsqueeze(-1),
             'pvp_baseline_pa':   baseline_pa.unsqueeze(-1),
             'q_scale': q_scale,
             'attn_weights': attn_weights, 'hemo_per_seg': hemo_per_seg,
             'junction': jp, 'branch_embed': branch_embed,
-            'endpoint_dP': torch.stack(
-                [h['pressure_drop_total'] * segment_mask[:, si]
-                 for si, h in enumerate(hemo_per_seg)], dim=-1),
+            'endpoint_dP': endpoint_dP,
             'segment_mask': segment_mask,
         }
 

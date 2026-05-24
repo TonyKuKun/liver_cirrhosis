@@ -281,6 +281,7 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
         use_profile_transformer=args.use_profile_transformer,
         use_tips_head=args.use_tips_head,
         use_aux_mask=args.use_aux_mask,
+        physics_mode=args.physics_mode,
     ).to(device)
     if fold_idx == 0:
         total, train = count_params(model)
@@ -404,6 +405,8 @@ def main():
     ap.add_argument('--no_q_scale',  dest='use_q_scale', action='store_false')
     ap.add_argument('--use_physics_baseline', action='store_true', default=False)
     ap.add_argument('--no_physics_baseline',  dest='use_physics_baseline', action='store_false')
+    ap.add_argument('--physics_mode', choices=['none', 'fixed', 'learnable'], default=None,
+                    help='Physics anchor: none, fixed Poiseuille baseline, or learnable reduced-order calibration.')
     ap.add_argument('--use_aux', action='store_true', default=True)
     ap.add_argument('--no_aux',  dest='use_aux', action='store_false')
     ap.add_argument('--use_flow_features', action='store_true', default=False)
@@ -432,6 +435,9 @@ def main():
     ap.add_argument('--sample_power',     type=float, default=1.5,
                     help='Extreme-value oversampling power (0=disabled)')
     args = ap.parse_args()
+    if args.physics_mode is None:
+        args.physics_mode = 'fixed' if args.use_physics_baseline else 'none'
+    args.use_physics_baseline = args.physics_mode != 'none'
 
     os.makedirs(args.out_dir, exist_ok=True)
     torch.manual_seed(args.seed)
