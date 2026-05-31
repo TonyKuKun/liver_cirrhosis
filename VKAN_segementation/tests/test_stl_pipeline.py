@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -205,6 +206,8 @@ class STLPipelineTests(unittest.TestCase):
             self.assertEqual(set(np.unique(mask).tolist()), {0, 1})
 
     def test_prediction_outputs_only_predict_stl(self) -> None:
+        if importlib.util.find_spec("torch") is None:
+            self.skipTest("torch is not installed")
         from refinement.predict import _save_prediction_outputs
 
         with tempfile.TemporaryDirectory() as tmp:

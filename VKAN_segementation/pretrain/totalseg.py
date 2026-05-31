@@ -828,6 +828,7 @@ def main():
         "--overwrite",
         "--force",
         dest="overwrite",
+        default=False,
         action="store_true",
         help="Overwrite and re-extract structures even if STL files already exist",
     )

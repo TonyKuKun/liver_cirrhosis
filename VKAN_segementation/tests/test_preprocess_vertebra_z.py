@@ -4,9 +4,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-import nibabel as nib
+
+try:
+    import nibabel as nib
+except ImportError:
+    nib = None
 
 from pretrain.preprocess import (
+    _fill_local_tips_lumen,
     _get_exclusion_mask_fast,
     _get_tips_exclusion_mask_fast,
     _limit_to_portal_reference_neighborhood,
@@ -35,6 +40,8 @@ def _touch_mask(path: Path) -> None:
 
 class PreprocessVertebraZTests(unittest.TestCase):
     def test_pretrain_nifti_preserves_orig_orientation_forms(self) -> None:
+        if nib is None:
+            self.skipTest("nibabel is not installed")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             orig_path = root / "orig.nii.gz"
@@ -222,6 +229,26 @@ class PreprocessVertebraZTests(unittest.TestCase):
         self.assertIn("bone_all", loaded)
         self.assertNotIn("liver", loaded)
         self.assertNotIn("inferior_vena_cava", loaded)
+
+    def test_tips_lumen_fill_is_local_to_stent(self) -> None:
+        tips = np.zeros((9, 12, 12), dtype=bool)
+        tips[3:6, 4, 4:8] = True
+        tips[3:6, 8, 4:8] = True
+        tips[3:6, 4:9, 4] = True
+        tips[3:6, 4:9, 8] = True
+
+        other_hole = np.zeros_like(tips)
+        other_hole[1, 1, 1:4] = True
+        other_hole[1, 4, 1:4] = True
+        other_hole[1, 1:5, 1] = True
+        other_hole[1, 1:5, 4] = True
+
+        filled, info = _fill_local_tips_lumen(tips, (1.0, 1.0, 1.0), max_distance_mm=3.0)
+
+        self.assertTrue(filled[4, 6, 6])
+        self.assertGreater(info["filled_voxels"], 0)
+        self.assertFalse(filled[1, 2, 2])
+        self.assertFalse((filled & other_hole).any())
 
 
 if __name__ == "__main__":

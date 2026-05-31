@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-import base64
-import json
-import os
-import re
 import struct
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 import numpy as np
 
@@ -60,84 +54,6 @@ def discover_patients(root: str | Path) -> list[PatientCase]:
 
 def require_existing_labels(cases: Iterable[PatientCase]) -> list[PatientCase]:
     return [case for case in cases if case.label_stl.exists()]
-
-
-class GemmaClient:
-    """Small OpenAI-compatible chat client used by coarse planning and review."""
-
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str = "gemma-4-31b-it",
-        base_url: str | None = None,
-        timeout: int = 90,
-    ) -> None:
-        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("GEMMA_API_KEY") or os.getenv("OPENAI_API_KEY")
-        self.model = model
-        self.base_url = (
-            base_url
-            or os.getenv("DEEPSEEK_API_BASE_URL")
-            or os.getenv("GEMMA_API_BASE_URL")
-            or os.getenv("OPENAI_BASE_URL")
-            or ""
-        ).rstrip("/")
-        self.timeout = timeout
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.api_key and self.base_url)
-
-    def chat_json(self, system: str, prompt: str, image_paths: list[str | Path] | None = None) -> dict[str, Any]:
-        if not self.enabled:
-            return {}
-        content: str | list[dict[str, Any]]
-        if "deepseek.com" in self.base_url.lower():
-            content = prompt
-        else:
-            content = [{"type": "text", "text": prompt}]
-            for path in image_paths or []:
-                path = Path(path)
-                if not path.exists():
-                    continue
-                mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-                b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-                content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
-        }
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-            return {}
-        message = raw.get("choices", [{}])[0].get("message", {}).get("content", "")
-        if isinstance(message, list):
-            message = "".join(part.get("text", "") for part in message if isinstance(part, dict))
-        return _extract_json(str(message))
-
-
-def _extract_json(text: str) -> dict[str, Any]:
-    try:
-        obj = json.loads(text)
-        return obj if isinstance(obj, dict) else {}
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        if not match:
-            return {}
-        try:
-            obj = json.loads(match.group(0))
-            return obj if isinstance(obj, dict) else {}
-        except json.JSONDecodeError:
-            return {}
 
 
 def mask_to_stl(
@@ -242,10 +158,17 @@ def smooth_stl(in_path: str | Path, out_path: str | Path, iterations: int = 8) -
     except ImportError:
         out_path.write_bytes(in_path.read_bytes())
         return out_path
-    mesh = trimesh.load_mesh(str(in_path), process=True)
+    mesh = trimesh.load_mesh(str(in_path), process=False)
     if hasattr(mesh, "geometry"):
         mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
-    filter_laplacian(mesh, lamb=0.45, iterations=iterations)
+    original_center = np.asarray(mesh.bounds, dtype=np.float64).mean(axis=0)
+    try:
+        filter_laplacian(mesh, lamb=0.45, iterations=iterations, volume_constraint=False)
+    except TypeError:
+        filter_laplacian(mesh, lamb=0.45, iterations=iterations)
+    smoothed_center = np.asarray(mesh.bounds, dtype=np.float64).mean(axis=0)
+    if np.all(np.isfinite(original_center)) and np.all(np.isfinite(smoothed_center)):
+        mesh.apply_translation(original_center - smoothed_center)
     mesh.export(str(out_path))
     return out_path
 

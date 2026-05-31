@@ -1,12 +1,12 @@
-# VKAN portal vein STL extraction
+# Portal vein STL extraction
 
 This folder implements the workflow:
 
-1. Read DICOM slices from `patient/dcm/`.
-2. Use Gemma/OpenAI-compatible API when configured to choose a high-recall HU window and crop box.
-3. Fall back to portal-venous heuristics when the API is unavailable.
-4. Save coarse `patient/pretrain.stl` for training and visual review.
-5. Train a VKAN-style 3D refinement network from cropped `pretrain.nii.gz` and label NIfTI masks, then save `patient/predict_mask.nii.gz`, `patient/predict.stl`, and `patient/predict_smooth.stl`.
+1. Run TotalSegmentator from `patient/orig.nii.gz` to extract organ masks.
+2. Use deterministic preprocessing to build coarse `patient/pretrain.stl` and `patient/pretrain.nii.gz`.
+3. Train the nnVnet refinement model from cropped `pretrain.nii.gz` and label NIfTI masks.
+4. Predict `patient/predict_mask.nii.gz` and `patient/predict.stl`.
+5. Smooth and locally quality-check the final mesh as `patient/predict_smooth.stl`.
 
 Patient naming:
 
@@ -20,45 +20,35 @@ Patient naming:
 py -m pip install -r VKAN_segementation\requirements.txt
 ```
 
-## Configure model API
-
-The client is OpenAI-compatible and calls:
-
-```text
-{GEMMA_API_BASE_URL}/chat/completions
-```
-
-Set these if you want LLM-assisted threshold/crop and final mesh review:
-
-```powershell
-$env:GEMMA_API_KEY="your-api-key"
-$env:GEMMA_API_BASE_URL="https://your-provider/v1"
-```
-
-The default model name is `gemma-4-31b-it`. If the API is not configured or fails, preprocessing still runs with deterministic heuristics.
-
 ## Step-by-step
 
-Generate inspection/training `pretrain.stl` from `patient/dcm/`:
+Run TotalSegmentator organ extraction:
 
 ```powershell
-py VKAN_segementation\pretrain\preprocess.py --data_root D:\your_patient_root --model gemma-4-31b-it
+py VKAN_segementation\pretrain\totalseg.py --data_root D:\your_patient_root
 ```
 
-By default preprocessing regenerates every patient's `pretrain.stl`. Add `--skip_existing_pretrain`
-when you want to skip patients that already have `pretrain.stl`.
+Generate inspection/training `pretrain.stl` from TotalSegmentator outputs and `patient/orig.nii.gz`:
+
+```powershell
+py VKAN_segementation\pretrain\preprocess.py --data_root D:\your_patient_root
+```
+
+By default preprocessing reuses current outputs when the metadata says they are up to date. Add `--force`
+to regenerate outputs, or `--skip_existing_pretrain` to skip patients that already have `pretrain.stl`.
+Add `--only_dollar_patients` when you only want to rerun patient folders whose names contain `$`.
 
 Train:
 
 ```powershell
-py VKAN_segementation\refinement\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\vkan --dataset nii --grid_size 96 --epochs 120 --batch_size 1
+py VKAN_segementation\refinement\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\nnVnet3 --dataset nii --model nnVnet --grid_size 96 --epochs 400 --batch_size 1
 ```
 
 Training writes `best.pt` when validation dice improves and overwrites `last.pt`
 after every epoch. If training is interrupted, continue from `last.pt` with:
 
 ```powershell
-py VKAN_segementation\refinement\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\vkan --dataset nii --resume
+py VKAN_segementation\refinement\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\nnVnet3 --dataset nii --model nnVnet --resume
 ```
 
 NIfTI training uses `pretrain.nii.gz` as input and `mask.nii.gz` as the default target.
@@ -78,7 +68,7 @@ existing `mask.nii.gz`.
 Predict:
 
 ```powershell
-py VKAN_segementation\refinement\predict.py --data_root D:\your_patient_root --checkpoint VKAN_segementation\runs\vkan\best.pt
+py VKAN_segementation\refinement\predict.py --data_root D:\your_patient_root --checkpoint VKAN_segementation\runs\nnVnet3\best.pt
 ```
 
 Smooth and quality-check:
@@ -90,21 +80,21 @@ py VKAN_segementation\postprocess\check_and_smooth.py --data_root D:\your_patien
 One command:
 
 ```powershell
-py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\vkan --epochs 120
+py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\nnVnet3 --epochs 400
 ```
 
 ## Outputs per patient
 
 - `pretrain.stl`: coarse vessel candidate for visual inspection; empty masks and cases over 20,000KB are flagged for review.
 - `pre.stl`: optional correct-case example for debugging failed `pretrain.stl`; it is not used as a preprocessing prior.
-- `mask_label.nii.gz` / `mask_smooth.nii.gz`: binary manual vessel label used by VKAN training.
+- `mask_label.nii.gz` / `mask_smooth.nii.gz`: binary manual vessel label used by nnVnet training.
 - `vessel.stl`: optional manual vessel label kept for STL debugging and overlap diagnostics; it is not used by default NIfTI training.
 - `vkan_work/coarse_plan.json`: HU range and crop box used.
 - `vkan_work/pretrain_meta.json`: preprocessing version, DICOM input timestamp, QA status, overlap diagnostics, and output statistics.
 - `vkan_work/pretrain_mask.npy`: coarse mask for debugging.
-- `predict.stl`: VKAN refined vessel.
+- `predict.stl`: nnVnet refined vessel.
 - `predict_smooth.stl`: smoothed final mesh.
-- `vkan_work/predict_check.json`: mesh summary and optional LLM check.
+- `vkan_work/predict_check.json`: mesh summary and deterministic quality check.
 
 ## Notes
 
@@ -116,7 +106,7 @@ py VKAN_segementation\pipeline.py --data_root D:\your_patient_root --out_dir VKA
 
 ## Code layout
 
-- `pretrain/`: DICOM loading, LLM/heuristic coarse planning, threshold/crop segmentation, and `pretrain.stl` export.
-- `refinement/`: STL dataset, VKAN-style model, training, prediction, and the original `vkan.py` model kept for reuse.
+- `pretrain/`: TotalSegmentator-backed organ masks, deterministic threshold/crop segmentation, and `pretrain.stl` export.
+- `refinement/`: NIfTI/STL datasets, nnVnet training/prediction, and the original `vkan.py` model kept for reuse.
 - `postprocess/`: final mesh check and smoothing.
-- `utils/`: shared patient discovery, Gemma client, STL conversion, voxelization, and smoothing helpers.
+- `utils/`: shared patient discovery, STL conversion, voxelization, and smoothing helpers.

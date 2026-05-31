@@ -1,9 +1,0 @@
-numpy
-pydicom
-torch
-scipy
-scikit-image
-trimesh
-Pillow
-scikit-learn
-

@@ -1,6 +1,6 @@
 """pretrain v5 — 基于 TotalSegmentator 的门静脉预分割。
 
-流程（极简，不依赖 LLM 做初始分割）：
+流程（极简，确定性初始分割）：
     1. 加载 orig.nii.gz
     2. 从 bone 分割定位 Z 轴（膈肌到髂骨）
     3. 从 portal_vein 分割采样 HU → 得到该患者的精确阈值（±5 HU 边距）
@@ -30,13 +30,13 @@ except ImportError:
     ndi = None
 
 try:
-    from ..utils.common import DicomVolume, GemmaClient, discover_patients, stl_to_voxels, zyx_mask_to_stl
+    from ..utils.common import DicomVolume, discover_patients, stl_to_voxels, zyx_mask_to_stl
 except (ImportError, ValueError):
     try:
-        from VKAN_segementation.utils.common import DicomVolume, GemmaClient, discover_patients, stl_to_voxels, zyx_mask_to_stl
+        from VKAN_segementation.utils.common import DicomVolume, discover_patients, stl_to_voxels, zyx_mask_to_stl
     except ImportError:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from utils.common import DicomVolume, GemmaClient, discover_patients, stl_to_voxels, zyx_mask_to_stl
+        from utils.common import DicomVolume, discover_patients, stl_to_voxels, zyx_mask_to_stl
 
 try:
     from .totalseg_integration import (
@@ -51,7 +51,7 @@ except ImportError:
         )
     except ImportError:
         try:
-            from VKAN_segementation.totalseg import (
+            from VKAN_segementation.pretrain.totalseg import (
                 BONE_LABELS, load_organ_mask, get_exclusion_mask, get_portal_seed,
                 get_portal_vein_mask, get_liver_mask, get_z_range_from_bone,
             )
@@ -65,7 +65,7 @@ except ImportError:
             get_z_range_from_bone = None  # type: ignore
 
 
-PRETRAIN_ALGORITHM_VERSION = "2026-05-24-v14-orig-orientation-header"
+PRETRAIN_ALGORITHM_VERSION = "2026-05-24-v16-solid-tips-lumen"
 PRETRAIN_META_NAME = "pretrain_meta.json"
 PRETRAIN_NII_NAME = "pretrain.nii.gz"
 MAX_STL_BYTES = 20_000 * 1024
@@ -81,6 +81,9 @@ LIVER_SPLEEN_FALLBACK_MIN_HU = 150.0
 LIVER_SPLEEN_FALLBACK_MAX_HU = 260.0
 LIVER_SPLEEN_FALLBACK_EDGE_MARGIN_HU = 10.0
 LIVER_SPLEEN_FALLBACK_EDGE_HIGH_MARGIN_HU = 20.0
+PORTAL_BOUNDARY_P50_MARGIN_HU = 15.0
+TIPS_LUMEN_FILL_RADIUS_MM = 5.0
+TIPS_LUMEN_FILL_BIN_MM = 2.0
 HU_MARGIN = 5.0  # 门静脉 HU 采样后上下各扩展的边距
 HU_LOW_FLOOR = 75.0
 DEFAULT_HU_HIGH_CAP = 600.0
@@ -1087,17 +1090,27 @@ def _portal_reference_quality(
         info["status"] = "empty"
         info["reliable"] = False
         return info
-    p10, p50, p90 = np.percentile(vals, [10, 50, 90])
+    p10, p25, p50, p75, p90 = np.percentile(vals, [10, 25, 50, 75, 90])
     info.update({
         "status": "ok",
         "voxels": int(portal_mask.sum()),
         "p10": round(float(p10), 1),
+        "p25": round(float(p25), 1),
         "p50": round(float(p50), 1),
+        "p75": round(float(p75), 1),
         "p90": round(float(p90), 1),
         "reliable": bool(p50 >= PORTAL_REFERENCE_MIN_P50_HU),
         "min_p50_hu": PORTAL_REFERENCE_MIN_P50_HU,
     })
     return info
+
+
+def _portal_boundary_hu_low(hu_low: float, portal_quality_info: dict) -> float:
+    """Raise the low HU cut just enough to drop the low-density portal shell."""
+    p50 = portal_quality_info.get("p50")
+    if p50 is None:
+        return float(hu_low)
+    return max(float(hu_low), float(p50) - PORTAL_BOUNDARY_P50_MARGIN_HU)
 
 
 def _liver_spleen_portal_fallback(
@@ -1240,6 +1253,10 @@ def _add_tips_stent(
             tips_mask = tips_clean
             del lb, tips_clean
 
+    tips_mask, lumen_info = _fill_local_tips_lumen(
+        tips_mask, spacing_zyx, max_distance_mm=TIPS_LUMEN_FILL_RADIUS_MM,
+    )
+    info["lumen_fill"] = lumen_info
     tips_voxels = int(tips_mask.sum())
     info["tips_voxels"] = tips_voxels
 
@@ -1249,6 +1266,154 @@ def _add_tips_stent(
         return combined, info
 
     return mask, info
+
+
+def _fill_local_tips_lumen(
+    tips_mask: np.ndarray,
+    spacing_zyx: tuple[float, float, float] | None,
+    max_distance_mm: float = TIPS_LUMEN_FILL_RADIUS_MM,
+) -> tuple[np.ndarray, dict]:
+    """Fill hollow TIPS lumen only inside the localized high-HU stent region."""
+    info: dict = {"enabled": bool(tips_mask.any()), "max_distance_mm": float(max_distance_mm)}
+    if ndi is None or not tips_mask.any():
+        info["status"] = "skipped"
+        info["filled_voxels"] = 0
+        return tips_mask, info
+
+    fill_candidates = np.zeros(tips_mask.shape, dtype=bool)
+    coords = np.argwhere(tips_mask)
+    lo = coords.min(axis=0)
+    hi = coords.max(axis=0) + 1
+    spacing = np.asarray(spacing_zyx or (1.0, 1.0, 1.0), dtype=np.float64)
+    pad = np.ceil((float(max_distance_mm) + 2.0) / spacing).astype(np.int32)
+    lo = np.maximum(0, lo - pad)
+    hi = np.minimum(np.asarray(tips_mask.shape), hi + pad)
+    local = tips_mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+    local_fill = np.zeros_like(local, dtype=bool)
+
+    # First catch genuinely closed small holes.
+    for axis in range(3):
+        moved = np.moveaxis(local, axis, 0)
+        moved_fill = np.moveaxis(local_fill, axis, 0)
+        for idx in range(moved.shape[0]):
+            sl = moved[idx]
+            if not sl.any():
+                continue
+            holes = ndi.binary_fill_holes(sl) & ~sl
+            if holes.any():
+                moved_fill[idx] |= holes
+
+    # TIPS is often a non-closed metal lattice, so holes are not always closed
+    # in 2D slices. Build a solid local tube from each stent component instead.
+    labels = np.empty(local.shape, dtype=np.int32)
+    n = ndi.label(local, output=labels)
+    counts = np.bincount(labels.ravel(), minlength=n + 1)
+    counts[0] = 0
+    tube_fill = np.zeros_like(local, dtype=bool)
+    components: list[dict] = []
+    for label_id in np.flatnonzero(counts >= 32):
+        component = labels == int(label_id)
+        comp_coords = np.argwhere(component)
+        if comp_coords.shape[0] < 32:
+            continue
+
+        phys = comp_coords.astype(np.float64) * spacing
+        center = phys.mean(axis=0)
+        centered = phys - center
+        try:
+            cov = np.cov(centered.T)
+            eigvals, eigvecs = np.linalg.eigh(cov)
+        except Exception:
+            continue
+        axis = eigvecs[:, int(np.argmax(eigvals))]
+        t = centered @ axis
+        span = float(t.max() - t.min()) if t.size else 0.0
+        if span < 6.0:
+            continue
+
+        n_bins = max(3, int(np.ceil(span / TIPS_LUMEN_FILL_BIN_MM)))
+        edges = np.linspace(float(t.min()), float(t.max()), n_bins + 1)
+        bin_t = (edges[:-1] + edges[1:]) / 2.0
+        centers: list[np.ndarray | None] = []
+        radii: list[float | None] = []
+        for idx in range(n_bins):
+            in_bin = (t >= edges[idx]) & (t < edges[idx + 1] if idx < n_bins - 1 else t <= edges[idx + 1])
+            if int(in_bin.sum()) < 5:
+                centers.append(None)
+                radii.append(None)
+                continue
+            bin_phys = phys[in_bin]
+            bin_center = bin_phys.mean(axis=0)
+            rel = bin_phys - bin_center
+            perp = rel - np.outer(rel @ axis, axis)
+            radius = float(np.percentile(np.linalg.norm(perp, axis=1), 85) + 0.6)
+            centers.append(bin_center)
+            radii.append(float(np.clip(radius, 2.0, float(max_distance_mm))))
+
+        valid = [idx for idx, value in enumerate(centers) if value is not None]
+        if len(valid) < 2:
+            continue
+
+        valid_t = bin_t[valid]
+        center_values = np.vstack([centers[idx] for idx in valid if centers[idx] is not None])
+        radius_values = np.asarray([radii[idx] for idx in valid if radii[idx] is not None], dtype=np.float64)
+        centerline = np.vstack([
+            np.interp(bin_t, valid_t, center_values[:, dim])
+            for dim in range(3)
+        ]).T
+        radius_by_bin = np.interp(bin_t, valid_t, radius_values)
+
+        comp_pad = np.ceil((float(max_distance_mm) + 2.0) / spacing).astype(np.int32)
+        comp_lo = np.maximum(0, comp_coords.min(axis=0) - comp_pad)
+        comp_hi = np.minimum(np.asarray(local.shape), comp_coords.max(axis=0) + comp_pad + 1)
+        zz, yy, xx = np.mgrid[
+            comp_lo[0]:comp_hi[0],
+            comp_lo[1]:comp_hi[1],
+            comp_lo[2]:comp_hi[2],
+        ]
+        grid = np.stack([zz, yy, xx], axis=-1).reshape(-1, 3)
+        grid_phys = grid.astype(np.float64) * spacing
+        grid_t = (grid_phys - center) @ axis
+        bin_idx = np.searchsorted(edges, grid_t, side="right") - 1
+        valid_grid = (bin_idx >= 0) & (bin_idx < n_bins)
+        tube_flat = np.zeros(grid.shape[0], dtype=bool)
+        grid_ids = np.flatnonzero(valid_grid)
+        rel = grid_phys[grid_ids] - centerline[bin_idx[grid_ids]]
+        perp = rel - np.outer(rel @ axis, axis)
+        distance = np.linalg.norm(perp, axis=1)
+        tube_flat[grid_ids] = distance <= radius_by_bin[bin_idx[grid_ids]]
+        tube = tube_flat.reshape(tuple((comp_hi - comp_lo).tolist()))
+        tube_fill[
+            comp_lo[0]:comp_hi[0],
+            comp_lo[1]:comp_hi[1],
+            comp_lo[2]:comp_hi[2],
+        ] |= tube
+        components.append({
+            "label": int(label_id),
+            "stent_voxels": int(counts[int(label_id)]),
+            "span_mm": round(span, 1),
+            "tube_voxels": int(tube.sum()),
+            "median_radius_mm": round(float(np.median(radius_by_bin)), 2),
+        })
+
+    local_fill |= tube_fill & ~local
+    fill_candidates[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = local_fill
+    if fill_candidates.any() and spacing_zyx is not None:
+        distance_mm = ndi.distance_transform_edt(~tips_mask, sampling=spacing_zyx)
+        fill_candidates &= distance_mm <= float(max_distance_mm)
+        del distance_mm
+
+    filled = tips_mask | fill_candidates
+    info.update({
+        "status": "ok",
+        "closed_hole_voxels": int((local_fill & ~tube_fill).sum()),
+        "tube_candidate_voxels": int(tube_fill.sum()),
+        "components": components[:8],
+        "candidate_voxels": int(local_fill.sum()),
+        "filled_voxels": int(fill_candidates.sum()),
+        "output_voxels": int(filled.sum()),
+    })
+    return filled, info
 
 
 # =========================================================================
@@ -1368,11 +1533,15 @@ def _should_rebuild(case, meta_path, input_mtime):
     return False, "up_to_date"
 
 
+def _only_dollar_patients(cases):
+    return [case for case in cases if "$" in case.name]
+
+
 # =========================================================================
 # 主流程
 # =========================================================================
 
-def pretrain_patient(case, client: GemmaClient | None = None, force: bool = False) -> PretrainResult:
+def pretrain_patient(case, force: bool = False) -> PretrainResult:
     work_dir = case.path / "vkan_work"
     meta_path = work_dir / PRETRAIN_META_NAME
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1536,6 +1705,12 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
             mask, cleanup_reference, dcm.spacing_zyx,
             radius_mm=PORTAL_REFERENCE_CLEANUP_RADIUS_TIPS_MM if case.is_post_tips else PORTAL_REFERENCE_CLEANUP_RADIUS_MM,
         )
+        if cleanup_reference is not None and portal_quality_info.get("reliable", False):
+            boundary_hu_low = _portal_boundary_hu_low(hu_low, portal_quality_info)
+            before_boundary = int(mask.sum())
+            mask = mask & (vol >= boundary_hu_low)
+            portal_cleanup_info["boundary_hu_low"] = round(float(boundary_hu_low), 1)
+            portal_cleanup_info["boundary_removed_voxels"] = before_boundary - int(mask.sum())
     else:
         print(f"    after liver/spleen fallback: {int(mask.sum())} voxels "
               f"(removed {grow_info.get('removed', 0)})")
@@ -1553,11 +1728,15 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
     }
     if portal_reliable_for_merge:
         before_portal_union = int(mask.sum())
-        mask = mask | portal_mask.astype(bool)
+        portal_merge_hu_low = _portal_boundary_hu_low(hu_low, portal_quality_info)
+        portal_to_merge = portal_mask.astype(bool) & (vol >= portal_merge_hu_low)
+        mask = mask | portal_to_merge
         portal_reference_info = {
             "enabled": True,
             "reliable": True,
             "portal_voxels": int(portal_mask.sum()),
+            "merge_hu_low": round(float(portal_merge_hu_low), 1),
+            "merge_voxels": int(portal_to_merge.sum()),
             "voxels_before": before_portal_union,
             "voxels_after": int(mask.sum()),
             "added_voxels": int(mask.sum()) - before_portal_union,
@@ -1631,7 +1810,7 @@ def pretrain_patient(case, client: GemmaClient | None = None, force: bool = Fals
 
 
 def coarse_segment_patient(case, client=None, force=False):
-    return pretrain_patient(case, client=client, force=force).path
+    return pretrain_patient(case, force=force).path
 
 
 # =========================================================================
@@ -1644,11 +1823,13 @@ def main():
     )
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
     parser.add_argument("--patient", default=None)
-    parser.add_argument("--force", default=True, action="store_true")
+    parser.add_argument("--force", action="store_true")
     parser.add_argument("--skip_existing_pretrain", action="store_true")
-    parser.add_argument("--model", default=None)
-    parser.add_argument("--api_key", default=None)
-    parser.add_argument("--api_base_url", default=None)
+    parser.add_argument(
+        "--only_dollar_patients",
+        action="store_true",
+        help='Only preprocess patients whose folder name contains "$".',
+    )
     args = parser.parse_args()
 
     if args.patient:
@@ -1661,6 +1842,8 @@ def main():
         cases = discover_patients(args.data_root)
     if args.patient:
         cases = [c for c in cases if c.name == Path(args.patient).name or Path(args.patient).exists()]
+    if args.only_dollar_patients:
+        cases = _only_dollar_patients(cases)
     print(f"[{PRETRAIN_ALGORITHM_VERSION}] {len(cases)} patients")
     for case in cases:
         print(f"[{PRETRAIN_ALGORITHM_VERSION}] {case.name}:")
