@@ -278,29 +278,6 @@ def _resample_with_mask(arr_raw, n_target):
     return vals, mask
 
 
-def _resample_points(points_raw, n_target):
-    """Resample a centerline point list to (n_target, 3)."""
-    try:
-        pts = np.asarray(points_raw, dtype=np.float64)
-    except (TypeError, ValueError):
-        return np.zeros((n_target, 3), np.float32), np.zeros(n_target, np.float32)
-    if pts.ndim != 2 or pts.shape[1] < 3 or pts.shape[0] < 2:
-        return np.zeros((n_target, 3), np.float32), np.zeros(n_target, np.float32)
-    pts = pts[:, :3]
-    valid = np.isfinite(pts).all(axis=1)
-    if valid.sum() < 2:
-        return np.zeros((n_target, 3), np.float32), np.zeros(n_target, np.float32)
-    xp_full = np.linspace(0.0, 1.0, pts.shape[0])
-    xp_v = xp_full[valid]
-    x_new = np.linspace(0.0, 1.0, n_target)
-    out = np.stack([
-        np.interp(x_new, xp_v, pts[valid, j]) for j in range(3)
-    ], axis=-1).astype(np.float32)
-    first_v, last_v = xp_v[0], xp_v[-1]
-    mask = ((x_new >= first_v) & (x_new <= last_v)).astype(np.float32)
-    return out, mask
-
-
 # =====================================================================
 # Dataset
 # =====================================================================
@@ -422,7 +399,6 @@ class PortalVeinDataset(Dataset):
             pw_src = unified.get('pointwise', {}) or {}
             profiles, point_valid, arc_lengths = \
                 self._load_pointwise(pw_src, segment_mask, patient_name=p['name'])
-            centerline_points, centerline_valid = self._load_centerline_points(unified, pw_src)
 
             # Update segment_mask: if pointwise has no valid points, mark absent
             for si in range(N_SEGMENTS):
@@ -437,8 +413,6 @@ class PortalVeinDataset(Dataset):
                 'profiles':      profiles,
                 'point_valid':   point_valid,
                 'arc_lengths':   arc_lengths,
-                'centerline_points': centerline_points,
-                'centerline_valid':  centerline_valid,
                 'segment_mask':  segment_mask,
                 'aux_scalars':   aux,
                 'aux_mask':      aux_mask,
@@ -511,45 +485,6 @@ class PortalVeinDataset(Dataset):
         if cp is not None:
             return np.asarray(cp, dtype=np.float32)
         return np.zeros(3, dtype=np.float32)
-
-    def _segment_centerline_raw(self, unified, pw_json, sname):
-        """Find centerline points across common schema spellings."""
-        candidates = []
-        seg_meta = unified.get('segments_meta', {}) or {}
-        if isinstance(seg_meta, dict):
-            candidates.append(seg_meta.get(sname, {}) or {})
-        if isinstance(pw_json, dict):
-            key_map = {k.lower(): k for k in pw_json.keys() if isinstance(k, str)}
-            seg_data = pw_json.get(sname, None)
-            if seg_data is None and sname.lower() in key_map:
-                seg_data = pw_json[key_map[sname.lower()]]
-            if isinstance(seg_data, dict):
-                candidates.append(seg_data)
-        for source in candidates:
-            for key in (
-                'CenterlinePoints',
-                'centerline_points',
-                'centerlinePoints',
-                'centerline',
-                'points',
-            ):
-                pts = source.get(key, None)
-                if pts is not None:
-                    return pts
-        root_cp = unified.get('CenterlinePoints', None) or unified.get('centerline_points', None)
-        if isinstance(root_cp, dict):
-            return root_cp.get(sname, None) or root_cp.get(sname.upper(), None)
-        return None
-
-    def _load_centerline_points(self, unified, pw_json):
-        points = np.zeros((N_SEGMENTS, self.n_points, 3), dtype=np.float32)
-        valid = np.zeros((N_SEGMENTS, self.n_points), dtype=np.float32)
-        for si, sname in enumerate(SEGMENTS):
-            raw = self._segment_centerline_raw(unified, pw_json, sname)
-            pts, mask = _resample_points(raw, self.n_points)
-            points[si] = pts
-            valid[si] = mask
-        return points, valid
 
     def _load_pointwise(self, pw_json, segment_mask, patient_name=None):
         """
@@ -729,8 +664,6 @@ class PortalVeinDataset(Dataset):
             'profiles':        torch.from_numpy(profiles).float(),
             'profiles_norm':   torch.from_numpy(profiles_norm).float(),
             'arc_lengths':     torch.from_numpy(d['arc_lengths']).float(),
-            'centerline_points': torch.from_numpy(d['centerline_points']).float(),
-            'centerline_valid':  torch.from_numpy(d['centerline_valid']).float(),
             'point_valid':     torch.from_numpy(d['point_valid']).float(),
             'segment_mask':    torch.from_numpy(d['segment_mask']).float(),
             'aux_scalars':     torch.from_numpy(aux).float(),
@@ -751,8 +684,7 @@ class PortalVeinDataset(Dataset):
 # Collate
 # =====================================================================
 def collate_fn(items):
-    tensor_keys = ['profiles', 'profiles_norm', 'arc_lengths',
-                   'centerline_points', 'centerline_valid', 'point_valid',
+    tensor_keys = ['profiles', 'profiles_norm', 'arc_lengths', 'point_valid',
                    'segment_mask', 'aux_scalars', 'aux_norm', 'aux_mask',
                    'organ_volumes', 'organ_valid',
                    'endpoints_3d', 'confluence_3d', 'is_post_tips',
