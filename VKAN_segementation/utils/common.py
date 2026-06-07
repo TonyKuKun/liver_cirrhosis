@@ -148,27 +148,59 @@ def write_ascii_stl(out_path: str | Path, vertices_xyz: np.ndarray, faces: np.nd
 
 
 def smooth_stl(in_path: str | Path, out_path: str | Path, iterations: int = 8) -> Path:
-    """Smooth an STL if trimesh is available, otherwise copy it unchanged."""
+    """Smooth an STL using Laplacian smoothing with safeguards against degeneration."""
     in_path = Path(in_path)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
     try:
         import trimesh
         from trimesh.smoothing import filter_laplacian
+        import numpy as np
     except ImportError:
+        # Fallback: copy original
         out_path.write_bytes(in_path.read_bytes())
         return out_path
+
+    # 加载网格，不自动处理（避免位移）
     mesh = trimesh.load_mesh(str(in_path), process=False)
     if hasattr(mesh, "geometry"):
-        mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
-    original_center = np.asarray(mesh.bounds, dtype=np.float64).mean(axis=0)
+        # 合并场景中的多个几何体
+        meshes = [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
+        if not meshes:
+            out_path.write_bytes(in_path.read_bytes())
+            return out_path
+        mesh = trimesh.util.concatenate(meshes)
+
+    # 原始中心（用于保持位置不变）
+    original_center = mesh.bounds.mean(axis=0)
+
+    # 预处理：清理脏数据
+    mesh.remove_duplicate_faces()
+    mesh.remove_degenerate_faces()
+    mesh.remove_infinite_values()
+    mesh.merge_vertices()
+
+    # 执行平滑（仅使用兼容参数）
     try:
-        filter_laplacian(mesh, lamb=0.45, iterations=iterations, volume_constraint=False)
+        # 使用 volume_constraint=True 避免过度收缩，lamb 适当降低
+        filter_laplacian(mesh, lamb=0.3, iterations=iterations, volume_constraint=True)
     except TypeError:
-        filter_laplacian(mesh, lamb=0.45, iterations=iterations)
-    smoothed_center = np.asarray(mesh.bounds, dtype=np.float64).mean(axis=0)
-    if np.all(np.isfinite(original_center)) and np.all(np.isfinite(smoothed_center)):
-        mesh.apply_translation(original_center - smoothed_center)
+        # 旧版本 trimesh 不支持 volume_constraint，直接调用
+        filter_laplacian(mesh, lamb=0.3, iterations=iterations)
+
+    # 后处理：修复法线并清理
+    mesh.remove_duplicate_faces()
+    mesh.remove_degenerate_faces()
+    mesh.fix_normals()                     # 关键：确保所有法线向外
+    mesh.merge_vertices()
+
+    # 保持整体位置不变（防止漂移）
+    new_center = mesh.bounds.mean(axis=0)
+    if np.all(np.isfinite(original_center)) and np.all(np.isfinite(new_center)):
+        mesh.apply_translation(original_center - new_center)
+
+    # 导出
     mesh.export(str(out_path))
     return out_path
 

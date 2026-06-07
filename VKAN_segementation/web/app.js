@@ -1143,6 +1143,81 @@ function renderInspector() {
     fileList.appendChild(row);
   });
   if (!Object.keys(files).length) fileList.textContent = "暂无文件信息";
+  renderPredictCheck(status.predict_check);
+}
+
+function renderPredictCheck(report) {
+  const box = $("predictCheckBox");
+  if (!box) return;
+  if (!report) {
+    box.innerHTML = `<div class="check-empty">No predict_check.json</div>`;
+    return;
+  }
+  const mesh = report.smooth_mesh || report.mesh || {};
+  const input = report.input_mesh || {};
+  const check = report.quality_check || {};
+  const smoothing = report.smoothing || {};
+  const quality = check.quality || "unknown";
+  const issues = check.issues || [];
+  const bounds = Array.isArray(mesh.bounds) ? mesh.bounds : [];
+  const boundsText = bounds.length === 2
+    ? bounds.map((row) => row.map((value) => Number(value).toFixed(2)).join(", ")).join(" -> ")
+    : "n/a";
+  const extentText = Array.isArray(mesh.extents) && mesh.extents.length
+    ? mesh.extents.map((value) => Number(value).toFixed(1)).join(" x ")
+    : "n/a";
+  const issueClass = issues.length ? "warn" : "ok";
+  const displacement = smoothing.mean_vertex_displacement ?? null;
+  const maxDisplacement = smoothing.max_vertex_displacement ?? null;
+  box.innerHTML = `
+    <div class="check-banner ${quality === "ok" ? "check-ok" : quality === "review" ? "check-review" : "check-danger"}">
+      <strong>${escapeHtml(quality.toUpperCase())}</strong>
+      <span>${issues.length ? `${issues.length} issue${issues.length > 1 ? "s" : ""}` : "ready"}</span>
+    </div>
+    <div class="check-cards">
+      ${checkCard("Faces", formatInteger(mesh.faces), deltaText(input.faces, mesh.faces))}
+      ${checkCard("Components", formatInteger(mesh.components), componentHint(mesh))}
+      ${checkCard("Mean move", formatMaybeNumber(displacement, " mm"), `max ${formatMaybeNumber(maxDisplacement, " mm")}`)}
+    </div>
+    <div class="check-detail-grid">
+      <span>method</span><strong>${escapeHtml(smoothing.method || "n/a")}</strong>
+      <span>iterations</span><strong>${escapeHtml(smoothing.effective_iterations ?? report.smooth_iterations ?? "n/a")}</strong>
+      <span>watertight</span><strong class="${mesh.watertight ? "ok" : "warn"}">${mesh.watertight ? "yes" : "no"}</strong>
+      <span>size</span><strong>${escapeHtml(extentText)} mm</strong>
+      <span>bounds</span><strong>${escapeHtml(boundsText)}</strong>
+    </div>
+    <div class="check-issues ${issueClass}">
+      ${issues.length ? issues.map((issue) => `<div>${escapeHtml(issue)}</div>`).join("") : "<div>No quality issues detected.</div>"}
+    </div>
+  `;
+}
+
+function checkCard(label, value, hint) {
+  return `<div class="check-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><em>${escapeHtml(hint || "")}</em></div>`;
+}
+
+function formatInteger(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n).toLocaleString() : "n/a";
+}
+
+function formatMaybeNumber(value, suffix = "") {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${n.toFixed(2)}${suffix}` : "n/a";
+}
+
+function deltaText(before, after) {
+  const a = Number(before);
+  const b = Number(after);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return "";
+  const delta = b - a;
+  if (delta === 0) return "unchanged";
+  return `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`;
+}
+
+function componentHint(mesh) {
+  const ratio = Number(mesh.largest_component_face_ratio);
+  return Number.isFinite(ratio) ? `${Math.round(ratio * 100)}% largest` : "";
 }
 
 function downloadResults() {
