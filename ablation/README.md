@@ -1,43 +1,71 @@
 # Ablation Experiments
 
-This folder runs model and loss ablations for the PVP predictor.  The point is
-to answer why the full model is or is not better than strong traditional
-baselines.
+This folder contains the final PVP ablation utilities.
 
-## Run All Ablations
+## Scripts
 
-```bash
-conda run -n pytorch python ablation/run_ablations.py \
-  --data_root "F:\PCG data\dataset\test4all_sample" \
-  --out_root runs/ablations_v1
+```text
+ablations.py
+report.py
 ```
 
-This trains one folder per variant and writes:
+## Current Design
 
-- `manifest.json`: exact commands and hypotheses;
-- `comparison.csv`: MAE/RMSE/R2 for each variant and deltas vs `full_model`;
-- `comparison.json`: machine-readable version of the comparison table;
-- `analysis.md`: short automatic interpretation.
+The default ablation reference is the current best PVP model:
 
-## Fast Smoke Run
-
-```bash
-conda run -n pytorch python ablation/run_ablations.py \
-  --out_root runs/ablation_smoke \
-  --variants full_model module_no_aux loss_main_only \
-  --n_folds 2 \
-  --epochs 1 \
-  --patience 1 \
-  --print_every 1
+```text
+8-vessel layout
+liver/spleen volumes as global features
+no organ flow scaling
+pure L2/MSE loss
 ```
 
-## Main Questions
+The split-flow physics loss is kept as an explicit control. The final retained
+version is the narrow core-confluence constraint:
 
-- `module_no_aux`: is the model mainly using TIPS/status/system shortcuts?
-- `module_no_branch_embed`: do learned pointwise geometry embeddings help?
-- `module_no_physics_baseline`: does the Poiseuille pressure-drop anchor help?
-- `module_no_q_scale`: do organ-volume flow priors matter?
-- `module_no_flow_features`: do learned flow fractions and junction features matter?
-- `loss_main_only`: are physics losses helping or over-regularizing this small dataset?
-- `loss_no_tail_weight` and `train_no_extreme_sampler`: are tail-focused tricks improving high/low PVP behavior?
+```text
+--lambda_press 0.03 --split_loss_mode core_confluence
+```
 
+Other physics losses are set to zero in the final ablation suite.
+
+## Run
+
+Loss ablation:
+
+```bash
+conda run -n pytorch python ablation/ablations.py --suite loss --stage full --out_root ablation/runs/loss_ablation_core_split_20260607 --full_n_folds 5 --full_epochs 300 --seed 40 --force
+```
+
+Full architecture ablation template:
+
+```bash
+conda run -n pytorch python ablation/ablations.py --suite all --stage full --out_root ablation/runs/final_20260607 --full_n_folds 5 --full_epochs 300 --seed 40 --force
+```
+
+## Retained Results
+
+Primary loss result:
+
+```text
+ablation/runs/loss_ablation_core_split_20260607/full/comparison.csv
+ablation/runs/loss_ablation_core_split_20260607/full/comparison.json
+ablation/runs/loss_ablation_core_split_20260607/full/analysis.md
+```
+
+Architecture diagnostic result:
+
+```text
+ablation/runs/arch_ablation_l2_fullsplit_20260607/full/comparison.csv
+ablation/runs/arch_ablation_l2_fullsplit_20260607/full/comparison.json
+ablation/runs/arch_ablation_l2_fullsplit_20260607/full/analysis.md
+```
+
+Latest best:
+
+```text
+L2 only + organ global
+MAE  2.8098
+RMSE 3.8433
+R2   0.6142
+```

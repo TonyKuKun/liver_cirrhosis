@@ -54,15 +54,22 @@ def summarize(out_root: str | os.PathLike, manifest: List[Mapping[str, object]])
             row["delta_mae_vs_full"] = float(row["val_mae_mean"] - full["val_mae_mean"])
             row["delta_rmse_vs_full"] = float(row["val_rmse_mean"] - full["val_rmse_mean"])
             row["delta_r2_vs_full"] = float(row["val_r2_mean"] - full["val_r2_mean"])
-            if row.get("category") == "loss":
-                evidence = int(row["delta_mae_vs_full"] < 0)
-                evidence += int(row["delta_rmse_vs_full"] < 0)
-                evidence += int(row["delta_r2_vs_full"] > 0)
+            variant_better = (
+                row["delta_mae_vs_full"] < 0
+                and row["delta_rmse_vs_full"] < 0
+                and row["delta_r2_vs_full"] > 0
+            )
+            reference_better = (
+                row["delta_mae_vs_full"] > 0
+                and row["delta_rmse_vs_full"] > 0
+                and row["delta_r2_vs_full"] < 0
+            )
+            if reference_better:
+                row["module_effective_direction"] = "reference_consistently_better"
+            elif variant_better:
+                row["module_effective_direction"] = "variant_consistently_better"
             else:
-                evidence = int(row["delta_mae_vs_full"] > 0)
-                evidence += int(row["delta_rmse_vs_full"] > 0)
-                evidence += int(row["delta_r2_vs_full"] < 0)
-            row["module_effective_direction"] = "helpful" if evidence >= 2 else "not_helpful_or_noisy"
+                row["module_effective_direction"] = "mixed_or_noisy"
         else:
             row["delta_mae_vs_full"] = None
             row["delta_rmse_vs_full"] = None
@@ -94,18 +101,26 @@ def summarize(out_root: str | os.PathLike, manifest: List[Mapping[str, object]])
     else:
         lines.append("- reference variant is missing; run it before interpreting deltas.")
     done = [r for r in rows if r.get("status") == "done" and r.get("name") != ref_name]
-    helpful = [r for r in done if r.get("module_effective_direction") == "helpful"]
-    noisy = [r for r in done if r.get("module_effective_direction") == "not_helpful_or_noisy"]
-    if helpful:
-        lines.append(f"- Variants with supportive one-factor evidence versus {ref_name}:")
-        for row in sorted(helpful, key=lambda r: -r["delta_mae_vs_full"]):
+    reference_better = [r for r in done if r.get("module_effective_direction") == "reference_consistently_better"]
+    variant_better = [r for r in done if r.get("module_effective_direction") == "variant_consistently_better"]
+    mixed = [r for r in done if r.get("module_effective_direction") == "mixed_or_noisy"]
+    if reference_better:
+        lines.append(f"- Variants where {ref_name} is consistently better across MAE/RMSE/R2:")
+        for row in sorted(reference_better, key=lambda r: -r["delta_mae_vs_full"]):
             lines.append(
                 f"  - {row['name']}: dMAE {row['delta_mae_vs_full']:.4f}, "
                 f"dRMSE {row['delta_rmse_vs_full']:.4f}, dR2 {row['delta_r2_vs_full']:.4f}"
             )
-    if noisy:
-        lines.append(f"- Variants without supportive one-factor evidence versus {ref_name}:")
-        for row in sorted(noisy, key=lambda r: r["delta_mae_vs_full"]):
+    if variant_better:
+        lines.append(f"- Variants consistently better than {ref_name} across MAE/RMSE/R2:")
+        for row in sorted(variant_better, key=lambda r: r["delta_mae_vs_full"]):
+            lines.append(
+                f"  - {row['name']}: dMAE {row['delta_mae_vs_full']:.4f}, "
+                f"dRMSE {row['delta_rmse_vs_full']:.4f}, dR2 {row['delta_r2_vs_full']:.4f}"
+            )
+    if mixed:
+        lines.append("- Mixed/noisy variants where the three metrics disagree:")
+        for row in sorted(mixed, key=lambda r: r["delta_mae_vs_full"]):
             lines.append(
                 f"  - {row['name']}: dMAE {row['delta_mae_vs_full']:.4f}, "
                 f"dRMSE {row['delta_rmse_vs_full']:.4f}, dR2 {row['delta_r2_vs_full']:.4f}"

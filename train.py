@@ -334,6 +334,7 @@ def build_model(args, full_ds, device):
         use_all_profile_channels=args.use_all_profile_channels,
         use_unreliable_raw_lengths=args.use_unreliable_raw_lengths,
         use_organ_global_features=args.use_organ_global_features,
+        disable_organ_features=args.disable_organ_features,
         use_six_vessel_layout=args.use_six_vessel_layout,
         use_three_vessel_layout=args.use_three_vessel_layout,
         use_organ_branch_scales=args.use_organ_branch_scales,
@@ -438,9 +439,13 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
             lambda_mono=args.lambda_mono,
             lambda_residual=args.lambda_residual,
             lambda_spread=args.lambda_spread,
+            lambda_conductance=args.lambda_conductance,
+            lambda_pressure_balance=args.lambda_pressure_balance,
+            lambda_organ_mono=args.lambda_organ_mono,
             extremity_alpha=args.extremity_alpha,
             huber_delta=args.huber_delta,
             disable_physics_losses=args.disable_physics_losses,
+            split_loss_mode=args.split_loss_mode,
         ).to(device)
     else:
         criterion = NewPhysicsLoss(
@@ -451,9 +456,13 @@ def train_fold(fold_idx, train_idx, val_idx, full_ds, args, device):
             lambda_mono=args.lambda_mono,
             lambda_residual=args.lambda_residual,
             lambda_spread=args.lambda_spread,
+            lambda_conductance=args.lambda_conductance,
+            lambda_pressure_balance=args.lambda_pressure_balance,
+            lambda_organ_mono=args.lambda_organ_mono,
             extremity_alpha=args.extremity_alpha,
             huber_delta=args.huber_delta,
             disable_physics_losses=args.disable_physics_losses,
+            split_loss_mode=args.split_loss_mode,
         ).to(device)
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=max(args.epochs, 1), eta_min=args.lr * 0.01)
@@ -641,7 +650,9 @@ def parse_args(argv=None):
     ap.add_argument("--fixed_physics_params", action="store_true", default=False)
     ap.add_argument("--use_all_profile_channels", action="store_true", default=False)
     ap.add_argument("--use_unreliable_raw_lengths", action="store_true", default=False)
-    ap.add_argument("--use_organ_global_features", action="store_true", default=False)
+    ap.add_argument("--use_organ_global_features", action="store_true", default=True)
+    ap.add_argument("--no_organ_global_features", dest="use_organ_global_features", action="store_false")
+    ap.add_argument("--disable_organ_features", action="store_true", default=False)
     ap.add_argument("--use_six_vessel_layout", action="store_true", default=False)
     ap.add_argument("--use_three_vessel_layout", action="store_true", default=False)
     ap.add_argument("--use_organ_branch_scales", action="store_true", default=True)
@@ -649,13 +660,17 @@ def parse_args(argv=None):
     ap.add_argument("--use_eight_vessel_layout", action="store_true", default=False)
     ap.add_argument("--disable_physics_losses", action="store_true", default=False)
     ap.add_argument("--huber_delta", type=float, default=1.0)
-    ap.add_argument("--lambda_flow_prior", type=float, default=0.05)
-    ap.add_argument("--lambda_press", type=float, default=0.03)
+    ap.add_argument("--lambda_flow_prior", type=float, default=0.0)
+    ap.add_argument("--lambda_press", type=float, default=0.0)
     ap.add_argument("--lambda_smooth", type=float, default=0.0)
     ap.add_argument("--lambda_physio", type=float, default=0.0)
-    ap.add_argument("--lambda_mono", type=float, default=0.02)
+    ap.add_argument("--lambda_mono", type=float, default=0.0)
     ap.add_argument("--lambda_residual", type=float, default=0.0)
     ap.add_argument("--lambda_spread", type=float, default=0.0)
+    ap.add_argument("--lambda_conductance", type=float, default=0.0)
+    ap.add_argument("--lambda_pressure_balance", type=float, default=0.0)
+    ap.add_argument("--lambda_organ_mono", type=float, default=0.0)
+    ap.add_argument("--split_loss_mode", choices=["full", "core_confluence"], default="core_confluence")
     ap.add_argument("--extremity_alpha", type=float, default=1.0)
     ap.add_argument("--sample_power", type=float, default=1.5)
     args = ap.parse_args(argv)

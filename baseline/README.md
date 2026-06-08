@@ -54,4 +54,11 @@ feature sets with:
   columns.
 - `feature_importance.csv`: tree importances or absolute linear coefficients
   averaged across folds when available.
+# Baseline And Legacy Backup
+
+This folder is kept in the final cleaned project for comparison and rollback.
+
+`legacy_model_backup/` contains the root-level `dataset.py`, `model.py`,
+`train.py`, and `README.md` as they existed before promoting the final
+eight-vessel model to the project root.
 

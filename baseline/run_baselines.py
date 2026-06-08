@@ -29,7 +29,6 @@ from baseline.models import (  # noqa: E402
     fit_baseline_model,
 )
 from dataset import PortalVeinDataset  # noqa: E402
-from diagnostics import summarize_prediction_rows  # noqa: E402
 from train import compute_metrics, make_cv_splits  # noqa: E402
 
 
@@ -132,6 +131,25 @@ def _summarize_baseline(rows: Sequence[dict]) -> Dict[str, object]:
     }
 
 
+def _summarize_group(rows: Sequence[dict]) -> Dict[str, object]:
+    if not rows:
+        return {"n": 0}
+    return _summarize_baseline(rows)
+
+
+def summarize_prediction_rows(rows: Sequence[dict]) -> Dict[str, object]:
+    groups = {
+        "overall": list(rows),
+        "pre_tips": [r for r in rows if int(r.get("post_tips", 0)) == 0],
+        "post_tips": [r for r in rows if int(r.get("post_tips", 0)) == 1],
+        "has_lgv": [r for r in rows if int(r.get("has_lgv", 0)) == 1],
+        "has_pgv": [r for r in rows if int(r.get("has_pgv", 0)) == 1],
+        "has_rpv": [r for r in rows if int(r.get("has_rpv", 0)) == 1],
+        "no_rpv": [r for r in rows if int(r.get("has_rpv", 0)) == 0],
+    }
+    return {name: _summarize_group(group_rows) for name, group_rows in groups.items()}
+
+
 def _aggregate_importance(importance_accum: Dict[tuple, List[dict]]) -> List[dict]:
     rows = []
     for (feature_set, model_name), entries in sorted(importance_accum.items()):
@@ -157,7 +175,12 @@ def _aggregate_importance(importance_accum: Dict[tuple, List[dict]]) -> List[dic
 
 def run_baselines(args) -> Dict[str, object]:
     os.makedirs(args.out_dir, exist_ok=True)
-    dataset = PortalVeinDataset(args.data_root, n_points=args.n_points, verbose=True)
+    dataset = PortalVeinDataset(
+        args.data_root,
+        n_points=args.n_points,
+        verbose=True,
+        include_00_prefix_samples=args.include_00_prefix_samples,
+    )
     table = build_feature_table(dataset)
     splits, split_info = load_cv_splits(args.split_json, dataset.data, args.n_folds, args.seed)
 
@@ -291,6 +314,7 @@ def parse_args(argv: Sequence[str] | None = None):
     ap.add_argument("--n_folds", type=int, default=5)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--n_inner_folds", type=int, default=3)
+    ap.add_argument("--include_00_prefix_samples", action="store_true", default=False)
     ap.add_argument(
         "--feature_sets",
         nargs="+",
@@ -307,4 +331,3 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

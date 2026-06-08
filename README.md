@@ -1,261 +1,290 @@
-# PVP Predictor
+# PVP Predictor 门静脉压力预测模型
 
-PVP Predictor 是一个用于预测门静脉压力（Portal Vein Pressure, PVP）的物理约束几何深度学习项目。它的输入不是普通的二维图像，而是从 CT 后处理得到的门静脉系统中心线、逐点血管截面几何、血管拓扑、器官体积以及少量系统级临床/解剖特征。模型的目标也不只是输出一个 PVP 数值，而是在预测的同时给出流量分配、压力降、壁面切应力、注意力权重等可解释的中间结果。
+本项目用于基于门静脉系统血管剖面几何、肝脾器官全局信息和可学习血流动力学代理量预测门静脉压力（portal venous pressure, PVP）。
 
-这个项目的基本思想是：**用物理模型提供可靠骨架，用神经网络学习真实人体中偏离理想公式的部分**。因此，模型不是把所有 CT 特征简单堆进一个黑盒回归器，而是沿着“几何 -> 流量 -> 水动力 -> 压力基线 -> 神经校正”的路径逐步推理。
-
-![Overall pipeline](picture/01_overall_pipeline.png)
-
-## 项目背景与临床问题
-
-门静脉高压是肝硬化、门静脉血栓（PVT）、侧支循环形成以及 TIPS 术后评估中的核心问题。PVP 可以直接反映门静脉系统的压力负荷，但直接测量具有侵入性，不适合频繁随访或大规模筛查。
-
-CT 影像则提供了另一条路线：门静脉主干、脾静脉、肠系膜上静脉、肝内左右门静脉、TIPS 支架和侧支血管的形态，都与血流阻力和压力负荷相关。比如管腔变窄会提高阻力，非圆形残腔会破坏理想圆管假设，侧支或 TIPS 会改变分流路径，脾/肝体积也能间接反映门静脉流量与肝内阻力状态。
-
-![Clinical portal vein system](picture/02_clinical_portal_vein.png)
-
-在本项目中，一位患者的门静脉系统被抽象为 8 条血管段：
-
-| 缩写 | 含义 | 在模型中的作用 |
-| --- | --- | --- |
-| `mpv` | Main Portal Vein，门静脉主干 | PVP 物理基线的关键路径 |
-| `sv` | Splenic Vein，脾静脉 | 与 SMV 一起构成入口汇流 |
-| `smv` | Superior Mesenteric Vein，肠系膜上静脉 | 与 SV 一起决定门静脉入口流量来源 |
-| `lpv` | Left Portal Vein，左门静脉 | 肝内出口分支之一 |
-| `rpv` | Right Portal Vein，右门静脉 | 肝内出口分支之一 |
-| `tips` | TIPS 支架/分流通道 | 术后人工低阻力分流路径 |
-| `lgv` | Left Gastric Vein，胃左静脉侧支 | 侧支循环与代偿分流 |
-| `pgv` | Posterior Gastric Vein，胃后静脉侧支 | 侧支循环与代偿分流 |
-
-## 当前挑战
-
-**1. 标签昂贵，样本规模有限。** PVP 不是常规无创指标，真实标签获取成本高。小样本条件下，纯神经网络容易过拟合，也容易把高压患者预测回均值。
-
-**2. 门静脉不是理想圆管。** PVT、偏心狭窄、海绵样变和分裂管腔会让普通等效直径失真。若直接套用圆管 Poiseuille 公式，阻力可能被明显低估。
-
-**3. 血流量 Q 不可直接从 CT 读出。** CT 能给出几何，但真实门静脉流量受脾脏体积、肝脏体积、肝内阻力、侧支循环和 TIPS 共同影响。模型必须估计患者级流量尺度。
-
-**4. 解剖结构经常缺失或重构。** 某些患者没有 TIPS，某些侧支不存在，某些血管段中心线质量不足。模型需要用 `segment_mask` 和 `point_valid` 稳定处理这些情况。
-
-**5. 分叉分流必须守恒。** SV 和 SMV 汇入 MPV，MPV 又向 LPV/RPV/TIPS 或侧支分流。若每条血管独立预测流量，很容易违反质量守恒。
-
-**6. 纯物理模型和纯数据模型都不够。** Poiseuille 解释了半径、长度、流量与压力降的主关系，但真实人体还有弯曲、入口效应、湍动趋势、术后支架和侧支代偿等非理想因素。
-
-## 方法概览
-
-模型采用 **physics-anchored residual learning**。也就是说，模型先通过几何和流量估计得到一个物理压力基线，再让神经网络学习全局校正和局部残差：
+当前最终模型由 72 个有效样本的 subject-level 5-fold 验证结果选出。最终推荐配置为：
 
 ```text
-pvp_pred = physics_baseline + predictor_correction + residual_correction
+8 血管剖面几何
++ 肝脾体积全局特征
++ GlobalFlowCorrector
++ PhysicsResidualNet
++ 纯 L2/MSE 监督
 ```
 
-这种结构有两个好处。第一，模型从训练初期就站在合理物理基线上，而不是从随机 MLP 开始猜压力。第二，神经网络的任务被缩小为“校正物理公式不够准确的地方”，更适合小样本医学场景。
+![模型架构图](docs/figures/model_architecture.png)
 
-核心创新包括：
+上图为当前最终模型架构图，可通过 [docs/draw_model_architecture.py](docs/draw_model_architecture.py) 重新生成。图片文件位于 [docs/figures/model_architecture.png](docs/figures/model_architecture.png)。
 
-- **形态感知有效半径 `r_eff`**：结合水力直径、内切半径和实心度，适应规则圆管、偏心狭窄和 PVT 后不规则残腔。
-- **解剖约束图网络**：8 条血管段作为图节点，消息只沿真实相邻关系传播。
-- **守恒流量估计**：在入口、汇合出口、肝内分叉三个 junction 上用 masked softmax 分配流量。
-- **患者级 Q scale**：用脾/肝体积估计患者个体化流量尺度。
-- **可微 Poiseuille 水动力层**：逐点计算速度、WSS、Re、阻力和压力降。
-- **物理约束损失**：同时约束 PVP 误差、Murray 偏离、压力残差、半径平滑、生理范围和压力单调性。
+下面是通过 imagegen 生成的期刊风格架构参考图，用于展示更接近顶刊图形摘要的视觉风格：
 
-## 输入几何特征
+![imagegen 架构参考图](docs/figures/imagegen_architecture_reference.png)
 
-模型的核心输入是逐点血管几何。每位患者有 8 条候选血管段，每条血管中心线被重采样为 `N` 个点，每个点包含 11 个几何通道。因此原始几何输入张量为：
+## 模型架构
+
+### 输入血管
+
+当前最终模型使用 8 条血管：
 
 ```text
-profiles:      (B, 8, N, 11)
-profiles_norm: (B, 8, N, 11)
-point_valid:   (B, 8, N)
-segment_mask:  (B, 8)
+mpv, sv, smv, lpv, rpv, tips, lgv, pgv
 ```
 
-其中 `B` 是 batch size，`8` 是血管段数量，`N` 是中心线采样点数，`11` 是每个点的几何特征数量。
+其中：
 
-![Data and geometric features](picture/03_data_features.png)
+| 缩写 | 含义 |
+|---|---|
+| `mpv` | 门静脉主干 |
+| `sv` | 脾静脉 |
+| `smv` | 肠系膜上静脉 |
+| `lpv` | 肝门左支 |
+| `rpv` | 肝门右支 |
+| `tips` | TIPS 手术管 |
+| `lgv` | 胃左静脉 |
+| `pgv` | 胃后静脉 |
 
-### 11 个逐点几何通道
+血管是否存在由 `segment_mask` 和剖面有效数据表示。`has_tips`、`has_lgv`、`has_pgv` 这类存在标志不直接作为辅助输入，因为它们可以从剖面数据和 `segment_mask` 中体现。
 
-| 特征 | 含义 | 为什么重要 |
-| --- | --- | --- |
-| `area` | 横截面积 | 直接影响速度 `v = Q / A`；面积变小通常意味着狭窄和更高阻力。 |
-| `hydraulic_diameter` | 水力直径 `4A/P` | 比普通等效直径更适合非圆形管腔，是 Poiseuille 物理路径的重要尺度。 |
-| `perimeter` | 横截面周长 | 反映管腔边界复杂度；同样面积下，周长越复杂，越可能偏离理想圆管。 |
-| `curvature` | 中心线曲率 | 表示血管弯曲程度，影响 Dean number 和弯曲流动风险。 |
-| `torsion` | 中心线空间扭转 | 补充 3D 走行复杂性，帮助模型理解血管不是平面曲线。 |
-| `inscribed_radius` | 最大内切半径 | 描述真正可通行的最小尺度，对偏心狭窄和残余管腔尤其关键。 |
-| `solidity` | 截面紧实度 `A/A_convex` | 衡量截面是否规则、饱满；PVT 后残腔或分裂管腔通常 solidity 较低。 |
-| `r_insc_to_r_eq_ratio` | 内切半径与等效半径关系 | 判断管腔是否接近圆形；越偏离，圆管假设越不可靠。 |
-| `dA_ds_norm` | 面积沿中心线变化率 | 捕捉急剧狭窄、扩张或支架入口处的几何突变。 |
-| `circularity` | 圆形度 `4πA/P²` | 直接衡量横截面接近圆形的程度，辅助判断 Poiseuille 假设可信度。 |
-| `n_components` | 横截面连通区域数 | 识别分裂管腔、复杂 PVT 或无效截面；正常单腔通常为 1。 |
+### 剖面几何特征
 
-这些特征可以分成两类：
+默认只使用相对可信、物理含义明确的剖面几何：
 
-| 类别 | 特征 | 作用 |
-| --- | --- | --- |
-| 物理计算核心特征 | `area`, `hydraulic_diameter`, `curvature`, `inscribed_radius` | 直接进入速度、Re、Dean number、有效半径和压力降计算。 |
-| 形态可信度与残差学习特征 | `perimeter`, `torsion`, `solidity`, `r_insc_to_r_eq_ratio`, `dA_ds_norm`, `circularity`, `n_components` | 告诉模型当前管腔是否适合用理想公式解释，以及哪里需要神经网络补偿。 |
+| 特征 | 中文说明 | 用途 |
+|---|---|---|
+| `area` | 截面积 | 计算流速、有效半径、阻力代理 |
+| `hydraulic_diameter` | 水力直径 | 描述血管口径 |
+| `inscribed_radius` | 内切半径 | 支持有效半径估计 |
+| `curvature` | 曲率 | 表征弯曲导致的二次流影响 |
+| `solidity` | 实心度 | 描述截面规则性 |
+| `circularity` | 圆形度 | 描述截面形状紧凑程度 |
+| `dA_ds_norm` | 归一化面积沿程变化 | 描述沿血管方向的截面积变化 |
 
-### `r_eff`：面向非圆形管腔的有效半径
+默认不使用 `torsion`、`perimeter`、`r_insc_to_r_eq_ratio`、`n_components` 等噪声较大或稳定性不足的特征。SMV、LPV、RPV 等血管的原始绝对长度也不进入硬物理公式，因为这些血管容易受到小分支截断和提取不完整的影响。
 
-当前模型没有简单地把直径除以 2 作为半径，而是使用形态感知有效半径：
+### 肝脾全局特征
+
+当前模型将肝脏和脾脏体积作为病人层面的全局状态输入：
 
 ```text
-alpha = 1 - solidity
-r_eff = (1 - alpha) * (0.5 * hydraulic_diameter)
-        + alpha * inscribed_radius
+spleen_volume_ml
+liver_volume_ml
+spleen_liver_ratio
 ```
 
-直观理解是：当管腔接近规则圆形时，`solidity` 较高，模型更信任 `hydraulic_diameter`；当管腔不规则、偏心或分裂时，`solidity` 降低，模型更多参考 `inscribed_radius`，从而避免把一个狭窄残腔误当作宽圆管。
-
-这个 `r_eff` 在三处保持一致：Poiseuille 前向计算、分支阻力先验、平滑正则项。这样做能避免训练目标和前向物理路径使用不同半径定义。
-
-## 模型结构
-
-### 1. 分支几何编码与解剖图网络
-
-每条血管段的 `profiles_norm` 首先进入共享的 `GeometryEncoder`。编码器使用一维卷积沿中心线读取局部几何变化，再用 GroupNorm 避免 padding 和无效点污染归一化统计。随后 `AttentionPool` 在有效点上做加权汇聚，把每条血管的 `(N, H)` 序列压缩为一个 `(H,)` 分支向量。
-
-这些分支向量再被堆叠成 8 个节点，送入 `VesselGraphNet`。图网络只沿解剖上相邻的血管传播消息，例如 MPV 与 SV/SMV、LPV/RPV、TIPS、LGV/PGV 相连。这样，MPV 的表示能感知入口汇流、肝内分叉和侧支/TIPS 分流，而不会把不直接相邻的分支强行连在一起。
-
-![Encoder and anatomical graph](picture/04_encoder_graph.png)
-
-这一模块输出两个重要结果：
-
-- `branch_embed: (B, 8, H)`，用于后续流量估计和最终预测。
-- `attn_weights: (B, 8, N)`，用于解释模型在每条中心线上关注的位置。
-
-### 2. 流量估计与 Poiseuille 水动力层
-
-血流量 `Q` 是连接几何和压力的关键变量，但它不能直接从 CT 中读取。因此模型分两步处理：
-
-1. `SplenicFlowEstimator` 根据脾脏和肝脏体积估计患者级 `q_scale`。
-2. `FlowRateEstimator` 在三个 junction 上估计相对流量分配。
-
-流量分配使用三个局部 softmax：
-
-| Junction | 分流关系 | 约束 |
-| --- | --- | --- |
-| Inflow | `SV` vs `SMV` | 两者共同构成入口流量 |
-| Confluence outflow | `MPV` vs `LGV` vs `PGV` | 主干与侧支竞争分流 |
-| Bifurcation outflow | `LPV` vs `RPV` vs `TIPS` | 肝内左右支和 TIPS 分流共享 MPV 流量 |
-
-每个 softmax 的 logits 由三部分组成：Murray law 直径先验、分支阻力先验、可学习神经修正。缺失血管通过 mask 排除，因此不会被分到流量。
-
-![Flow and physics module](picture/05_flow_physics.png)
-
-得到每条血管的 `Q_scaled` 后，`PoiseuilleHydrodynamics` 沿中心线逐点计算：
-
-| 输出 | 含义 |
-| --- | --- |
-| `velocity_m_per_s` | 局部流速 |
-| `wss_pa` | 壁面切应力 |
-| `reynolds` | Reynolds 数 |
-| `local_R_pa_s_per_m4` | 单位长度局部阻力 |
-| `cum_R_pa_s_per_m3` | 沿中心线累计阻力 |
-| `pressure_drop_pa` | 局部累计压力降 |
-| `dean` | 弯曲流动相关 Dean number |
-| `area_gradient` | 面积变化率 |
-
-这些输出既参与最终 PVP 预测，也可以用于可视化和模型诊断。
-
-### 3. 物理基线、神经校正与损失函数
-
-模型的物理基线来自门静脉到肝内分支的压力降：
+肝脾体积来自 STL 最大联通区域，缓存文件为：
 
 ```text
-baseline_pa = dP_MPV + mean(dP_LPV, dP_RPV)
+runs/stl_largest_component_volume_cache.json
 ```
 
-随后模型把以下信息拼成 `fused features`：8 条血管的图嵌入、每条血管的 Q、junction 物理特征、`q_scale`、物理基线和 26 维辅助特征。`Predictor MLP` 学习全局校正，`PhysicsResidualNet` 读取高 Re、高 WSS、低 solidity、剧烈面积变化等指标，学习局部非理想流动带来的残差。
+重要结论：肝脾体积不作为硬性的入口流量修正项，而是作为全局特征输入模型。消融结果显示，这种方式比直接用器官体积修正 Q 更稳定。
 
-![Prediction and loss module](picture/06_prediction_loss.png)
+### 可学习物理层
 
-训练损失由多项组成：
+模型先从剖面几何计算血流动力学代理量，再交给后续网络修正。主要中间量包括：
 
-| 损失项 | 作用 |
-| --- | --- |
-| `main` | PVP 主预测误差，使用加权 Huber，增强高压尾部学习。 |
-| `murray` | 限制流量分配不要无约束偏离 Murray 先验。 |
-| `press` | 约束左右肝内分支压力残差。 |
-| `smooth` | 约束 `r_eff` 沿中心线平滑变化。 |
-| `physio` | 限制 WSS、Re 等水动力量落在合理生理范围。 |
-| `mono` | 约束压力降沿中心线单调增加。 |
-| `residual` | 避免神经残差过大，防止完全覆盖物理基线。 |
-| `spread` | 防止预测结果塌缩到均值。 |
+| 中间量 | 说明 |
+|---|---|
+| 有效半径 | 由截面积和内切半径共同估计 |
+| 相对流量 `Q` | 模型内部学习的分支相对流量状态 |
+| 流速 | 由 `Q / area` 得到的代理量 |
+| 壁面切应力 | 黏性剪切相关代理 |
+| Reynolds 数 | 惯性流动相关代理 |
+| Dean 数 | 曲率和二次流相关代理 |
+| 阻力代理 | Poiseuille 近似启发的阻力项 |
+| 压降代理 | 沿程累计压降代理 |
 
-## 输出与可解释性
+黏度尺度、半径指数、压力尺度、有效长度尺度等不是完全写死的常数，而是可学习参数，并限制在稳定范围内。这样可以保留物理方向，同时避免错误的绝对长度或手工常数把模型带偏。
 
-一次 forward 不只返回 PVP，还返回完整的中间状态：
+### 全局修正与预测头
 
-| 输出 | 解释 |
-| --- | --- |
-| `pvp_pred` | 最终 PVP 预测，处于归一化标签空间。 |
-| `pvp_baseline_pa` / `pvp_baseline_norm` | Poiseuille 路径给出的物理压力基线。 |
-| `pvp_physics` / `pvp_residual` | baseline+MLP 校正，以及局部 residual 校正。 |
-| `Q`, `flow_out` | 每条血管相对流量、junction 分流比例、delta 和 mask。 |
-| `hemo_per_seg` | 每条血管逐点速度、WSS、Re、阻力、压降等。 |
-| `junction` | Murray 偏离、左右压力残差、侧支/TIPS/肝内分流比例等。 |
-| `attn_weights` | 每条血管中心线上的注意力权重。 |
-| `branch_embed` | 图网络后的血管节点表示。 |
+`GlobalFlowCorrector` 使用筛选后的全局特征和肝脾体积修正中间血流特征。`PhysicsResidualNet` 在物理代理量基础上学习残差修正。最终 `PVP prediction head` 汇总血流特征、`segment_mask`、肝脾全局状态和物理残差状态，输出 PVP（mmHg）。
 
-这些输出让模型诊断更直接：如果某位患者预测为高压，可以进一步看是 MPV 压降高、肝内分支阻力高、TIPS 分流不足、侧支负荷重，还是 residual correction 在提示非理想流动风险。
+`FlowGraphRefiner` 保留为可选图网络模块，用于血管间解剖消息传递。当前版本已经保留 CenterlinePoints 连接信息接口，但从现有消融结果看，GNN 还没有稳定提升性能，后续应重点改进真实连接位置和边权建模。
 
-## 训练
+### 训练目标
+
+当前最终默认训练目标为纯 L2/MSE：
+
+```text
+L = MSE(PVP_pred, PVP_true)
+```
+
+同时保留一个可复现实验用的核心合流分流约束：
+
+```text
+MPV ~= SMV + SV
+```
+
+运行方式：
 
 ```bash
-python train.py \
-  --data_root /path/to/patient_dataset \
-  --out_dir ./runs/current \
-  --n_points 200 \
-  --n_folds 5 \
-  --epochs 300 \
-  --batch_size 8 \
-  --lr 1e-3 \
-  --weight_decay 1e-4 \
-  --patience 40
+--lambda_press 0.03 --split_loss_mode core_confluence
 ```
 
-训练流程会保存：
+实验结果显示，核心合流分流约束比旧版宽分流约束更合理，但仍没有超过纯 L2/MSE，因此不作为最终默认 loss。
 
-| 文件 | 内容 |
-| --- | --- |
-| `normalization.pt` | profile、aux、label 的训练集归一化统计 |
-| `splits.json` | 交叉验证划分 |
-| `fold_*/best.pt` | 每个 fold 的最佳模型 |
-| `fold_*/history.csv` | 每个 epoch 的训练/验证指标 |
-| `oof_predictions.csv` | out-of-fold 预测结果 |
-| `oof_group_summary.json` | 分组诊断统计 |
-| `summary.json` | 交叉验证总体指标 |
+## 实验结果
 
-## 推理与可视化
+### 数据与验证方式
 
-```bash
-python visualize.py \
-  --checkpoint_dir ./runs/current \
-  --data_root /path/to/patient_dataset \
-  --out_dir ./inference_out \
-  --fold 0 \
-  --make_plots
-```
+| 项目 | 数值 |
+|---|---:|
+| 数据路径 | `F:\PCG data\dataset\test4all_sample` |
+| 有效样本 | 72 scans |
+| 受试者数量 | 50 subjects |
+| 验证方式 | subject-level 5-fold |
+| 评价指标 | MAE, RMSE, R2 |
 
-可视化工具可以导出每个患者的血流动力学结果，并生成注意力曲线、流量分配对照图、STL/PLY 表面映射以及与 CFD 结果的对照统计。
+### 最终模型与 baseline 对比
 
-## 文件结构
+传统 baseline 中表现最好的是 `physics/AdaBoost`。最终深度模型相对该 baseline 的 MAE 降低约 17.8%，RMSE 降低约 10.3%。
+
+| 方法 | 特征集 | MAE | RMSE | R2 | 说明 |
+|---|---|---:|---:|---:|---|
+| 均值预测 | 标签均值 | 5.285 | 6.267 | -0.003 | 基础 sanity baseline |
+| ExtraTrees | 几何特征 | 3.685 | 4.550 | 0.472 | 几何特征中 MAE 最好 |
+| AdaBoost | 物理代理特征 | 3.420 | 4.286 | 0.531 | 最佳传统 baseline |
+| ExtraTrees | 辅助/全局特征 | 3.730 | 4.532 | 0.476 | 全局特征 baseline |
+| ElasticNetCV | 综合特征 | 3.641 | 4.481 | 0.487 | 几何 + 物理 + 辅助特征 |
+| **最终模型** | **深度物理先验几何模型** | **2.810** | **3.843** | **0.614** | 当前最佳结果 |
+
+baseline 结果文件：
 
 ```text
-PVP_predictor/
-  dataset.py       # 数据发现、逐点重采样、mask、归一化、STL 体积
-  model.py         # 几何编码、图网络、流量估计、水动力、预测头、损失
-  train.py         # K-fold 训练、subject split、极端值采样、checkpoint
-  diagnostics.py   # OOF 预测汇总、分组统计、兼容加载
-  visualize.py     # 推理、hemodynamics 导出、attention/flow 图、STL 映射
-  picture/         # README 中使用的模型与临床示意图
-  tests/           # 关键行为测试
+baseline/runs/final_20260607_baselines_72_seed40/summary.csv
+baseline/runs/final_20260607_baselines_72_seed40/summary.json
 ```
 
-## 一句话总结
+### Loss 消融实验
 
-PVP Predictor 的核心不是用神经网络替代血流动力学，而是把门静脉系统的几何、拓扑、流量守恒和 Poiseuille 关系变成模型的默认推理路径，再让神经网络只学习真实临床场景中偏离理想物理公式的那一部分。
+最新 loss 消融聚焦于核心合流分流约束：
+
+| 方案 | MAE | RMSE | R2 | 结论 |
+|---|---:|---:|---:|---|
+| **L2 only + 肝脾全局特征** | **2.810** | **3.843** | **0.614** | 最终默认 |
+| L2 + 核心合流分流 loss | 2.887 | 3.941 | 0.595 | 比旧分流更好，但仍弱于纯 L2 |
+| L2 + 旧版宽分流 loss | 3.022 | 4.140 | 0.556 | 约束过宽，效果最差 |
+
+结果文件：
+
+```text
+ablation/runs/loss_ablation_core_split_20260607/full/comparison.csv
+ablation/runs/loss_ablation_core_split_20260607/full/analysis.md
+```
+
+分析：旧版分流 loss 同时约束 LGV、PGV、TIPS 和肝内分支，对 TIPS 术后和存在代偿血管的样本过于僵硬。收窄为 MPV/SMV/SV 核心合流后负面影响变小，但模型已有的相对流量构造和肝脾全局状态已经捕捉到大部分相关信息，因此该物理约束仍未带来额外收益。
+
+### 模型结构与特征消融
+
+下表来自之前的架构诊断实验。该实验仍保留用于模块分析；最终默认配置以最新 loss 消融为准。
+
+| 消融项 | MAE | RMSE | R2 | 解释 |
+|---|---:|---:|---:|---|
+| 宽分流参考模型 | 3.022 | 4.140 | 0.556 | 历史架构诊断参考 |
+| 去掉肝脾全局特征 | 3.084 | 4.222 | 0.528 | 肝脾体积作为全局特征有效 |
+| 去掉 GlobalFlowCorrector | 3.417 | 4.559 | 0.463 | 全局修正模块重要 |
+| 去掉 PhysicsResidualNet | 3.268 | 4.218 | 0.538 | 物理残差修正有效 |
+| 去掉 FlowGraphRefiner | 2.998 | 4.039 | 0.578 | 当前 GNN 实现未稳定提升 |
+| 固定物理参数 | 2.922 | 4.192 | 0.548 | 指标混合，保留可学习标定 |
+| 使用全部剖面特征 | 3.058 | 3.919 | 0.602 | RMSE/R2 改善但 MAE 变差，暂不默认 |
+| 使用不可靠原始长度 | 2.895 | 4.022 | 0.580 | 有潜力，但不进入硬物理公式 |
+| 6 血管布局 | 3.005 | 4.187 | 0.548 | 指标混合，不替代 8 血管 |
+| 3 血管布局 | 3.106 | 4.194 | 0.536 | 弱于 8 血管 |
+
+结果文件：
+
+```text
+ablation/runs/arch_ablation_l2_fullsplit_20260607/full/comparison.csv
+ablation/runs/arch_ablation_l2_fullsplit_20260607/full/analysis.md
+```
+
+### 实验结论
+
+| 问题 | 当前结论 |
+|---|---|
+| 肝脾体积是否有用？ | 有用，但应作为全局特征，而不是硬性 Q 边界修正。 |
+| 最终 loss 用纯 L2 还是物理 split loss？ | 当前纯 L2/MSE 最好。 |
+| 是否使用所有剖面几何？ | 不默认使用，保留可信剖面几何子集。 |
+| 原始血管长度是否进入物理公式？ | 不进入硬物理公式，可作为后续学习特征候选。 |
+| 是否压缩到 3 或 6 条血管？ | 当前不推荐，8 血管仍是最终默认。 |
+| GNN 是否已经成熟？ | 还没有，后续需要用 CenterlinePoints 的真实连接位置和边权重重新设计。 |
+
+## 使用方法
+
+### 训练最终 PVP 模型
+
+```bash
+conda run -n pytorch python train.py ^
+  --data_root "F:\PCG data\dataset\test4all_sample" ^
+  --out_dir runs\final_pvp_8v_organ_global_l2 ^
+  --no_organ_flow_scale ^
+  --lambda_press 0
+```
+
+### 运行核心合流分流 loss 对照
+
+```bash
+conda run -n pytorch python train.py ^
+  --data_root "F:\PCG data\dataset\test4all_sample" ^
+  --out_dir runs\pvp_8v_organ_global_l2_core_split ^
+  --no_organ_flow_scale ^
+  --lambda_press 0.03 ^
+  --split_loss_mode core_confluence
+```
+
+### 运行 loss 消融
+
+```bash
+conda run -n pytorch python ablation/ablations.py ^
+  --suite loss ^
+  --stage full ^
+  --out_root ablation/runs/loss_ablation_core_split_20260607 ^
+  --full_n_folds 5 ^
+  --full_epochs 300 ^
+  --seed 40 ^
+  --force
+```
+
+### 运行传统 baseline
+
+```bash
+conda run -n pytorch python baseline/run_baselines.py ^
+  --data_root "F:\PCG data\dataset\test4all_sample" ^
+  --out_dir baseline/runs/final_20260607_baselines_72_seed40 ^
+  --n_points 200
+```
+
+### 重新生成中文架构图
+
+```bash
+conda run -n pytorch python docs/draw_model_architecture.py
+```
+
+## 目录结构
+
+```text
+dataset.py                         数据集、特征读取、器官体积缓存
+model.py                           最终物理先验 PVP/CSPH 模型
+train.py                           训练与交叉验证入口
+baseline/                          传统机器学习 baseline 和旧模型备份
+ablation/                          消融实验与报告工具
+ablation/runs/                     保留的最终实验结果
+docs/draw_model_architecture.py     中文架构图绘制脚本
+docs/figures/                      README 图片
+FINAL_20260607_RESULTS_ANALYSIS.md  中文最终实验分析
+```
+
+## 当前推荐方案
+
+当前数据集上推荐使用：
+
+```text
+8 血管模型
++ 肝脾体积全局特征
++ GlobalFlowCorrector
++ PhysicsResidualNet
++ 纯 L2/MSE loss
+```
+
+核心合流分流 loss 可作为论文补充实验或负结果报告：它比旧版宽分流更符合解剖逻辑，但在当前数据上仍未改善 MAE、RMSE 或 R2。

@@ -1,146 +1,109 @@
-# 2026-06-07 最终实验结果与消融分析
+# 2026-06-07 PVP 最终消融结论
 
-## 实验设置
+## 当前实验设置
 
 - 数据：`F:\PCG data\dataset\test4all_sample`
-- 有效样本：72 scans / 50 subjects
+- 有效样本：72 scans
 - 验证：subject-level 5-fold
-- PVP 评价指标：MAE、RMSE、R2
-- 主监督损失：严格使用 L2/MSE，即 `mean((pred - label_norm)^2)`
-- `--disable_physics_losses`：关闭所有物理约束和 spread 项，只保留纯 MSE
+- 指标：MAE、RMSE、R2
+- 肝/脾体积：从 STL 最大联通区域计算，缓存于 `runs/stl_largest_component_volume_cache.json`
+- 最终血管布局：8 血管，即 `mpv, sv, smv, lpv, rpv, tips, lgv, pgv`
+- 肝脾体积使用方式：只作为全局特征，不再单独修正入口流量
+- 当前物理 loss 候选：只保留 L2 和分流 loss；其他物理 loss 已从最终实验中移除
 
-本轮消融已按“一次只改变一个变量”重新整理，分为两类：
-
-1. 模型消融：以最终 8 血管模型为 reference，逐项删除或改变一个模块。
-2. Loss 消融：以纯 MSE 为 reference，逐项加入一个简化物理约束或一个明确的约束族。
+## 架构诊断消融结果
 
 结果文件：
 
-- 模型消融：`ablation/runs/final_20260607_onefactor_model/full/comparison.csv`
-- Loss 消融：`ablation/runs/final_20260607_onefactor_loss/full/comparison.csv`
-- baseline：`baseline/runs/final_20260607_baselines_72_seed40/summary.json`
+```text
+ablation/runs/arch_ablation_l2_fullsplit_20260607/full/comparison.csv
+ablation/runs/arch_ablation_l2_fullsplit_20260607/full/analysis.md
+```
 
-## 最终 PVP 模型
+| Variant | MAE | RMSE | R2 | 结论 |
+|---|---:|---:|---:|---|
+| L2 only + organ global | 2.810 | 3.843 | 0.614 | 本轮最佳 |
+| L2 + split loss + organ global | 3.022 | 4.140 | 0.556 | 分流 loss 使三项指标变差 |
+| no organ global features | 3.084 | 4.222 | 0.528 | 肝脾体积作为全局特征有效 |
+| no global flow corrector | 3.417 | 4.559 | 0.463 | GlobalFlowCorrector 明确有效 |
+| no physics residual | 3.268 | 4.218 | 0.538 | PhysicsResidualNet 明确有效 |
+| no flow graph | 2.998 | 4.039 | 0.578 | GNN 当前有轻微负贡献 |
+| use unreliable raw lengths | 2.895 | 4.022 | 0.580 | 原始长度仍需谨慎，结果提示可作为候选而非默认 |
+| three-vessel layout | 3.106 | 4.194 | 0.536 | 8 血管优于 3 血管 |
+| six-vessel layout | 3.005 | 4.187 | 0.548 | 指标混合，不替代 8 血管 |
+| all profile channels | 3.058 | 3.919 | 0.602 | RMSE/R2 变好但 MAE 变差，暂不作为默认 |
 
-当前推荐最终版本是 8 血管方案：
+## 最新 Loss 消融结果：核心合流分流 Loss
+
+根据后续分析，旧版分流 loss 过宽，同时约束了代偿血管、TIPS 和肝内分支。现在新增 `core_confluence` 模式，只约束核心合流：
+
+```text
+MPV ~= SMV + SV
+```
+
+结果文件：
+
+```text
+ablation/runs/loss_ablation_core_split_20260607/full/comparison.csv
+ablation/runs/loss_ablation_core_split_20260607/full/analysis.md
+```
+
+| Variant | MAE | RMSE | R2 | 结论 |
+|---|---:|---:|---:|---|
+| L2 only + organ global | 2.810 | 3.843 | 0.614 | 仍然最佳 |
+| L2 + core confluence split | 2.887 | 3.941 | 0.595 | 比旧分流 loss 好，但仍弱于纯 L2 |
+| L2 + full split | 3.022 | 4.140 | 0.556 | 最差 |
+
+结论：把分流 loss 收窄到 MPV/SMV/SV 后，负面影响明显减小，但仍没有带来正收益。因此最终默认仍采用纯 L2，核心合流分流 loss 只作为可选物理约束实验保留。
+
+## 关键判断
+
+1. 最好的结果是 `L2 only + organ global`，MAE 2.810、RMSE 3.843、R2 0.614。
+2. 分流 loss 在严格 5-fold 中没有带来收益。新版核心合流分流 loss 比旧版更好，但仍使 MAE 增加 0.077、RMSE 增加 0.098、R2 下降 0.020。
+3. 肝脾体积不适合作为单独的 Q 修正边界条件；目前最有效的方式是作为全局特征输入。
+4. GlobalFlowCorrector 和 PhysicsResidualNet 是当前最稳定有效的两个模块。
+5. CenterlinePoints-aware GNN 的解剖信息方向是合理的，但当前实现对指标没有正收益，需要下一步重做边定义或边权，而不是作为默认必需模块。
+6. 8 血管布局仍然优于 3 血管压缩布局；6 血管结果接近但指标不一致，暂不替代 8 血管。
+
+## 当前推荐默认方案
 
 ```text
 8-vessel layout
-+ corrected PGV-SV graph
-+ CenterlinePoints position-aware GNN
-+ Q / flow as intermediate state
++ core profile geometry only
++ liver/spleen volumes as global features
 + GlobalFlowCorrector
 + PhysicsResidualNet
-+ learnable physics parameters
-+ core geometry channels only
-+ simplified physics loss
-- hard OrganFlowScaleNet disabled by default
-- unreliable raw branch lengths not used by default
++ pure L2/MSE loss
+- no organ boundary Q scaling
+- no explicit split loss by default
+- no conductance / pressure balance / monotonic pressure loss
+- no unreliable raw branch lengths by default
 ```
 
-核心几何通道：
+推荐训练命令：
 
-```text
-area, hydraulic_diameter, inscribed_radius, curvature,
-solidity, circularity, dA_ds_norm
+```bash
+conda run -n pytorch python train.py ^
+  --data_root "F:\PCG data\dataset\test4all_sample" ^
+  --out_dir runs\final_pvp_8v_organ_global_l2 ^
+  --no_organ_flow_scale ^
+  --lambda_press 0
 ```
 
-不默认使用：
+如需复现分流 loss 对照：
 
-```text
-torsion, perimeter, r_insc_to_r_eq_ratio, n_components
+```bash
+conda run -n pytorch python train.py ^
+  --data_root "F:\PCG data\dataset\test4all_sample" ^
+  --out_dir runs\pvp_8v_organ_global_l2_core_split ^
+  --no_organ_flow_scale ^
+  --lambda_press 0.03 ^
+  --split_loss_mode core_confluence
 ```
 
-## Baseline 对照
+## 下一步改进建议
 
-| Baseline | Features | MAE | RMSE | R2 |
-|---|---:|---:|---:|---:|
-| physics + AdaBoost | 32 | 3.420 | 4.286 | 0.531 |
-| physics + RandomForest | 32 | 3.518 | 4.352 | 0.516 |
-| physics + ExtraTrees | 32 | 3.532 | 4.372 | 0.512 |
-| combined + ElasticNetCV | 1088 | 3.641 | 4.481 | 0.487 |
-
-最终神经网络 PVP 模型优于最强 baseline：
-
-```text
-Final model:       MAE 2.873, RMSE 3.794, R2 0.618
-Best baseline:     MAE 3.420, RMSE 4.286, R2 0.531
-Absolute gain:     MAE -0.547, RMSE -0.492, R2 +0.087
-```
-
-## 模型消融
-
-Reference：`full_model`
-
-| Variant | 改变的变量 | MAE | RMSE | R2 | 结论 |
-|---|---|---:|---:|---:|---|
-| full_model | none | 2.873 | 3.794 | 0.618 | 最终 reference |
-| with_organ_flow_scale | 加入硬器官流量缩放 | 2.883 | 3.805 | 0.616 | 变化极小，不建议默认硬启用 |
-| no_global_flow_corrector | 删除全局修正 | 3.456 | 4.530 | 0.467 | 明确有用，必须保留 |
-| no_flow_graph | 删除 GNN | 3.352 | 4.416 | 0.496 | 明确有用，必须保留 |
-| no_physics_residual | 删除 residual head | 3.031 | 4.074 | 0.560 | 有用，建议保留 |
-| fixed_physics_params | 固定物理参数 | 2.901 | 3.998 | 0.584 | 可学习物理参数更好 |
-| all_profile_channels | 加入全部剖面通道 | 3.244 | 4.517 | 0.474 | 噪声增加，不建议 |
-| use_unreliable_raw_lengths | 使用不可靠原始长度 | 2.962 | 3.953 | 0.588 | 不建议默认使用 |
-| six_vessel_layout | 合并代偿/TIPS 为 6 血管 | 3.069 | 4.025 | 0.571 | 不如 8 血管 |
-| three_vessel_layout | 代偿+MPV+SV 三血管 | 3.088 | 3.966 | 0.595 | 更紧凑但 MAE 不如 8 血管 |
-
-模型结论：
-
-- 8 血管方案仍然最优。
-- GlobalFlowCorrector 和位置感知 GNN 是最重要的两个结构模块。
-- PhysicsResidualNet 在严格 MSE 训练下是有用的，之前“去掉 residual 更好”的结论被本轮严格消融推翻。
-- 6 血管和 3 血管能减少零输入，但损失了解剖细节，最终不如 8 血管。
-- 全部几何通道和不可靠原始长度都会带来噪声。
-
-## Loss 消融
-
-Reference：`loss_mse_only`
-
-| Variant | Loss | MAE | RMSE | R2 | 结论 |
-|---|---|---:|---:|---:|---|
-| loss_mse_only | MSE | 2.883 | 3.967 | 0.589 | 纯监督 baseline |
-| loss_mse_plus_continuity | MSE + 管内流量连续 | 2.883 | 3.967 | 0.589 | 基本无变化 |
-| loss_mse_plus_split | MSE + 分流守恒 | 2.873 | 3.794 | 0.618 | 有正向作用 |
-| loss_mse_plus_pressure_mono | MSE + 压降单调 | 2.883 | 3.967 | 0.589 | 基本无变化 |
-| loss_mse_plus_flow_conservation | MSE + 连续 + 分流 | 2.873 | 3.794 | 0.618 | 主要收益来自分流 |
-| loss_mse_plus_all_simple_physics | MSE + 全部简化物理约束 | 2.873 | 3.794 | 0.618 | 最终默认 |
-
-Loss 结论：
-
-- 当前真正有效的简化物理约束是分流/汇合处流量守恒。
-- `area * velocity` 管内连续项几乎不改变结果，因为模型内部速度本来由 `Q / area` 得到，这个约束接近恒成立。
-- 压力单调项目前没有带来独立增益，可能因为预测头主要由 flow/global/residual 特征驱动。
-- 最终保留全部简化物理 loss，主要原因是它不伤害性能，并提供更好的流量一致性和可解释性。
-
-## 当前物理约束
-
-中间状态统一选择流量 `Q`，速度只作为物理计算派生量：
-
-```text
-velocity = Q / area
-```
-
-保留的简化物理约束：
-
-1. 管内流量连续：同一血管沿程 `area * velocity` 应尽量稳定。
-2. 分流守恒：MPV 汇合处满足 `Q_MPV ~= Q_SMV + Q_SV`，代偿/TIPS 作为分流路径参与约束。
-3. 压降单调：累计压力代理沿程不应反向下降。
-
-最终结果显示，分流守恒是最有实际贡献的约束。
-
-## Radiology 投稿前建议
-
-模型还可以这样加强：
-
-1. 做 repeated 5-fold CV，至少 5 个 seed，报告 mean 和 95% CI。
-2. 对 PVP 的 MAE/RMSE/R2 做 paired bootstrap CI，并和 physics + AdaBoost 做配对比较。
-3. 单独报告 pre-TIPS、post-TIPS、LGV、PGV、TIPS 亚组。
-4. 对 CenterlinePoints 做质量分层，验证位置感知 GNN 是否在中心线质量高的样本中收益更大。
-5. 对 CSPH 不建议现在宣称超过文献，应该作为 secondary endpoint，重点强调连续 PVP 估计和可解释血流中间量。
-
-当前论文叙事建议：
-
-```text
-An anatomy-aware, physics-informed portal venous graph model improves continuous PVP estimation over conventional vascular-feature baselines. The main gain comes from global flow correction, CenterlinePoints-aware graph refinement, and flow-split conservation, while compact vessel layouts and noisy geometric channels reduce performance.
-```
+- 分流 loss 不应直接作为默认项；如果继续研究，需要降低权重或改成只在 MPV/SMV/SV 同时高质量存在时启用。
+- GNN 应重点改边权：用 `CenterlinePoints` 里的真实连接点、连接位置和距离，而不是只靠固定解剖邻接。
+- 原始长度这次意外变好，但考虑到 SMV/LPV/RPV 分支截断误差大，建议只作为学习特征候选，不进入硬物理公式。
+- Radiology 投稿时建议主表报告 `L2 only + organ global`，补充材料报告 `L2 + core confluence split loss` 作为物理约束未改善性能的负结果。

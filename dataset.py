@@ -23,6 +23,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+_STL_VOLUME_CACHE = None
+_STL_VOLUME_CACHE_PATH = os.path.join(
+    os.path.dirname(__file__), 'runs', 'stl_largest_component_volume_cache.json'
+)
+
 
 # ── Branch order ───────────────────────────────────────────────────────
 SEGMENTS = ['mpv', 'sv', 'smv', 'lpv', 'rpv', 'tips', 'lgv', 'pgv']
@@ -200,6 +205,10 @@ def _compute_stl_volume_ml(stl_path):
     """
     if not os.path.exists(stl_path):
         return np.nan
+    cache_key = _stl_cache_key(stl_path)
+    cached = _get_stl_volume_cache().get(cache_key)
+    if cached is not None:
+        return float(cached)
     try:
         with open(stl_path, 'rb') as f:
             header = f.read(80)
@@ -227,6 +236,10 @@ def _compute_stl_volume_ml(stl_path):
         if len(verts) < 4:
             return np.nan
 
+        verts = _largest_connected_triangle_component(verts)
+        if len(verts) < 4:
+            return np.nan
+
         # Signed volume via divergence theorem
         v0 = verts[:, 0, :]
         v1 = verts[:, 1, :]
@@ -235,10 +248,81 @@ def _compute_stl_volume_ml(stl_path):
         signed_vol = np.sum(v0 * cross) / 6.0
         volume_mm3 = abs(signed_vol)
         volume_ml = volume_mm3 / 1000.0  # mm³ → cm³ = mL
-        return float(volume_ml) if volume_ml > 0.1 else np.nan
+        out = float(volume_ml) if volume_ml > 0.1 else np.nan
+        if np.isfinite(out):
+            _get_stl_volume_cache()[cache_key] = out
+            _save_stl_volume_cache()
+        return out
 
     except Exception:
         return np.nan
+
+
+def _stl_cache_key(stl_path):
+    try:
+        st = os.stat(stl_path)
+        return f"{os.path.abspath(stl_path)}|{st.st_size}|{st.st_mtime_ns}"
+    except OSError:
+        return os.path.abspath(stl_path)
+
+
+def _get_stl_volume_cache():
+    global _STL_VOLUME_CACHE
+    if _STL_VOLUME_CACHE is None:
+        try:
+            with open(_STL_VOLUME_CACHE_PATH, 'r', encoding='utf-8') as f:
+                _STL_VOLUME_CACHE = json.load(f)
+        except Exception:
+            _STL_VOLUME_CACHE = {}
+    return _STL_VOLUME_CACHE
+
+
+def _save_stl_volume_cache():
+    try:
+        os.makedirs(os.path.dirname(_STL_VOLUME_CACHE_PATH), exist_ok=True)
+        with open(_STL_VOLUME_CACHE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(_get_stl_volume_cache(), f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _largest_connected_triangle_component(verts):
+    """Return triangles from the largest connected STL mesh island."""
+    verts = np.asarray(verts, dtype=np.float64)
+    n_tri = len(verts)
+    if n_tri < 2:
+        return verts
+
+    rounded = np.round(verts, decimals=4)
+    vertex_to_tris = {}
+    for ti in range(n_tri):
+        for vi in range(3):
+            key = tuple(rounded[ti, vi].tolist())
+            vertex_to_tris.setdefault(key, []).append(ti)
+
+    seen = np.zeros(n_tri, dtype=bool)
+    best = []
+    for start in range(n_tri):
+        if seen[start]:
+            continue
+        stack = [start]
+        seen[start] = True
+        comp = []
+        while stack:
+            ti = stack.pop()
+            comp.append(ti)
+            for vi in range(3):
+                key = tuple(rounded[ti, vi].tolist())
+                for nb in vertex_to_tris.get(key, []):
+                    if not seen[nb]:
+                        seen[nb] = True
+                        stack.append(nb)
+        if len(comp) > len(best):
+            best = comp
+
+    if not best:
+        return verts
+    return verts[np.asarray(best, dtype=np.int64)]
 
 
 def _resample(arr, n_target):
