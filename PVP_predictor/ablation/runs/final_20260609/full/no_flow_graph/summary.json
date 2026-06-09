@@ -1,0 +1,167 @@
+{
+  "n_folds": 5,
+  "n_samples": 72,
+  "fold_results": [
+    {
+      "fold": 0,
+      "best_epoch": 28,
+      "val_mae": 3.465024709701538,
+      "val_rmse": 4.123903751373291,
+      "val_r2": 0.5473928079485113,
+      "n_train": 57,
+      "n_val": 15
+    },
+    {
+      "fold": 1,
+      "best_epoch": 4,
+      "val_mae": 3.7212398052215576,
+      "val_rmse": 4.8822021484375,
+      "val_r2": 0.3434438933044083,
+      "n_train": 58,
+      "n_val": 14
+    },
+    {
+      "fold": 2,
+      "best_epoch": 20,
+      "val_mae": 2.2464466094970703,
+      "val_rmse": 3.3116440773010254,
+      "val_r2": 0.6921508086426945,
+      "n_train": 58,
+      "n_val": 14
+    },
+    {
+      "fold": 3,
+      "best_epoch": 16,
+      "val_mae": 3.6249897480010986,
+      "val_rmse": 4.689047336578369,
+      "val_r2": 0.44158140039674776,
+      "n_train": 57,
+      "n_val": 15
+    },
+    {
+      "fold": 4,
+      "best_epoch": 7,
+      "val_mae": 3.088257312774658,
+      "val_rmse": 4.51493501663208,
+      "val_r2": 0.5583321242547383,
+      "n_train": 58,
+      "n_val": 14
+    }
+  ],
+  "val_mae_mean": 3.2291916370391847,
+  "val_mae_std": 0.5366628467722849,
+  "val_rmse_mean": 4.3043464660644535,
+  "val_rmse_std": 0.555747621316887,
+  "val_r2_mean": 0.51658020690942,
+  "val_r2_std": 0.11757438432315673,
+  "oof_summary": {
+    "overall": {
+      "n": 72,
+      "mae": 3.2379642592536078,
+      "rmse": 4.3421889347732145,
+      "bias": 0.2959582010904948,
+      "label_mean": 27.05105580223931,
+      "pred_mean": 27.347014003329807
+    },
+    "folds": {
+      "0": {
+        "n": 15,
+        "mae": 3.4650245666503907
+      },
+      "1": {
+        "n": 14,
+        "mae": 3.7212397711617604
+      },
+      "2": {
+        "n": 14,
+        "mae": 2.2464466094970703
+      },
+      "3": {
+        "n": 15,
+        "mae": 3.6249898274739585
+      },
+      "4": {
+        "n": 14,
+        "mae": 3.0882572446550642
+      }
+    }
+  },
+  "split_info": {
+    "split_mode": "subject",
+    "method": "GreedyBalancedGroupKFold(PVP)",
+    "n_subjects": 50,
+    "n_folds": 5,
+    "post_tips": 35,
+    "pre_tips": 37,
+    "fold_stats": [
+      {
+        "fold": 0,
+        "val_mean_pvp": 26.87182642618815,
+        "val_std_pvp": 6.129820962971375,
+        "val_min": 16.920000076293945,
+        "val_max": 38.24906921386719
+      },
+      {
+        "fold": 1,
+        "val_mean_pvp": 27.475836481366837,
+        "val_std_pvp": 6.025316152622109,
+        "val_min": 16.18000030517578,
+        "val_max": 38.24906921386719
+      },
+      {
+        "fold": 2,
+        "val_mean_pvp": 27.11059652056013,
+        "val_std_pvp": 5.96862999720127,
+        "val_min": 18.389999389648438,
+        "val_max": 37.51350784301758
+      },
+      {
+        "fold": 3,
+        "val_mean_pvp": 27.45922737121582,
+        "val_std_pvp": 6.274869144846022,
+        "val_min": 16.18000030517578,
+        "val_max": 37.51350784301758
+      },
+      {
+        "fold": 4,
+        "val_mean_pvp": 26.32143919808524,
+        "val_std_pvp": 6.793656721538219,
+        "val_min": 16.18000030517578,
+        "val_max": 37.5099983215332
+      }
+    ]
+  },
+  "args": {
+    "data_root": "F:\\PCG data\\dataset\\test4all_sample",
+    "out_dir": "ablation\\runs\\final_20260609\\full\\no_flow_graph",
+    "n_points": 200,
+    "n_folds": 5,
+    "seed": 40,
+    "split_mode": "subject",
+    "include_00_prefix_samples": false,
+    "epochs": 300,
+    "batch_size": 8,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "patience": 40,
+    "print_every": 10,
+    "d_hidden": 32,
+    "dropout": 0.15,
+    "flow_gnn_layers": 2,
+    "use_organ_flow_scale": false,
+    "use_global_flow_corrector": true,
+    "use_flow_graph": false,
+    "fixed_physics_params": false,
+    "use_all_profile_channels": false,
+    "use_unreliable_raw_lengths": false,
+    "use_organ_global_features": true,
+    "disable_organ_features": false,
+    "use_six_vessel_layout": false,
+    "use_three_vessel_layout": false,
+    "use_organ_branch_scales": true,
+    "use_eight_vessel_layout": false,
+    "lambda_shunt": 0.03,
+    "split_loss_mode": "core_confluence",
+    "sample_power": 1.5
+  }
+}

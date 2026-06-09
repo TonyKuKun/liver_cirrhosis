@@ -1,6 +1,6 @@
 """Physics-constrained flow model for portal vein pressure prediction.
 
-This model is intentionally separate from the legacy root-level ``model.py``.
+This model is intentionally separate from the root-level segmentation ``model.py``.
 It keeps the data loader unchanged, but changes the modeling order to:
 
     selected profile geometry -> learnable physics layer -> flow features

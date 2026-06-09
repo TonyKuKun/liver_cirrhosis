@@ -520,8 +520,17 @@ def main(argv=None):
         "label_std": full_ds.label_std,
     }, os.path.join(args.out_dir, "normalization.pt"))
     splits, split_info = make_cv_splits(full_ds.data, args.n_folds, args.seed, args.split_mode)
+    split_records = []
+    for fi, (train_idx, val_idx) in enumerate(splits):
+        split_records.append({
+            "fold": int(fi),
+            "train_idx": [int(i) for i in train_idx],
+            "val_idx": [int(i) for i in val_idx],
+            "train_names": [str(full_ds.data[int(i)]["name"]) for i in train_idx],
+            "val_names": [str(full_ds.data[int(i)]["name"]) for i in val_idx],
+        })
     with open(os.path.join(args.out_dir, "splits.json"), "w", encoding="utf-8") as f:
-        json.dump({"split_info": split_info}, f, indent=2, ensure_ascii=False)
+        json.dump({"split_info": split_info, "folds": split_records}, f, indent=2, ensure_ascii=False)
 
     fold_results = []
     all_rows = []

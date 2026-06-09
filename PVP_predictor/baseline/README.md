@@ -1,64 +1,40 @@
-# Traditional Baselines
+# PVP Baselines
 
-This folder contains reproducible non-deep-learning baselines for PVP
-prediction.  The goal is a fair comparison against the main geometric
-physics-informed model, using the same `PortalVeinDataset`, the same
-subject-level PVP-balanced folds, and the same OOF metric style.
+本目录保存传统机器学习 baseline。2026-06-09 已使用主模型同一份 `splits.json` 重新运行，旧版备份模型目录已删除。
 
-## Why These Baselines
+## 当前结果
 
-Direct portal-vein centerline-geometry baselines for PVP are uncommon in the
-literature.  Portal-hypertension work more often uses CT radiomics, while
-coronary CT-FFR work commonly uses vessel geometry, stenosis descriptors,
-pressure-drop proxies, CFD, or reduced-order hemodynamic models.  This suite
-therefore includes:
+- 目录：`baseline/runs/final_20260609_baselines`
+- 最优 baseline：`physics/adaboost`
+- 指标：MAE 3.420, RMSE 4.286, R2 0.531
 
-- naive train-fold mean and median predictors;
-- pure geometry summaries from branch profiles;
-- Poiseuille/Murray-inspired resistance and pressure-drop proxies;
-- auxiliary/system features from `AUX_KEYS` and extra unified-feature scalars;
-- traditional regressors on each feature set.
+| baseline | features | n | MAE | RMSE | R2 | bias |
+| --- | --- | --- | --- | --- | --- | --- |
+| physics/adaboost | 32 | 72 | 3.420 | 4.286 | 0.531 | -0.212 |
+| physics/random_forest | 32 | 72 | 3.518 | 4.352 | 0.516 | -0.112 |
+| physics/extra_trees | 32 | 72 | 3.532 | 4.372 | 0.512 | -0.378 |
+| combined/elasticnet_cv | 1088 | 72 | 3.580 | 4.418 | 0.502 | 0.318 |
+| combined/extra_trees | 1088 | 72 | 3.672 | 4.515 | 0.480 | -0.122 |
+| combined/hist_gradient_boosting | 1088 | 72 | 3.677 | 4.484 | 0.487 | -0.097 |
+| geometry/extra_trees | 897 | 72 | 3.685 | 4.550 | 0.472 | -0.054 |
+| physics/hist_gradient_boosting | 32 | 72 | 3.699 | 4.645 | 0.449 | -0.086 |
+| geometry/elasticnet_cv | 897 | 72 | 3.704 | 4.480 | 0.488 | 0.264 |
+| aux/extra_trees | 159 | 72 | 3.733 | 4.536 | 0.475 | 0.119 |
 
-Useful reference anchors:
+## 重新运行
 
-- CT radiomics for portal pressure: https://pubmed.ncbi.nlm.nih.gov/32146345/
-- CT-derived FFR/CFD: https://pmc.ncbi.nlm.nih.gov/articles/PMC3790916/
-- Reduced-order FFR: https://pubmed.ncbi.nlm.nih.gov/28600860/
-- Arterial stenosis pressure-drop reduced-order modeling: https://pmc.ncbi.nlm.nih.gov/articles/PMC8486142/
-
-## Run
-
-```bash
-conda run -n pytorch python baseline/run_baselines.py \
-  --data_root "F:\PCG data\dataset\test4all_sample" \
-  --split_json runs/v5.1/splits.json \
-  --out_dir runs/baseline_v1 \
-  --n_points 200
+```powershell
+conda run -n pytorch python baseline/run_baselines.py ^
+  --data_root "F:\PCG data\dataset\test4all_sample" ^
+  --split_json runs\final_20260609_pvp_l2_shunt\splits.json ^
+  --out_dir baseline\runs\final_20260609_baselines ^
+  --n_points 200 --seed 40
 ```
 
-By default the script evaluates `geometry`, `physics`, `aux`, and `combined`
-feature sets with:
+输出：
 
-`LinearRegression`, `RidgeCV`, `LassoCV`, `ElasticNetCV`, RBF `SVR`, `KNN`,
-`RandomForest`, `ExtraTrees`, `GradientBoosting`, `HistGradientBoosting`, and
-`AdaBoost`, plus train-fold mean and median baselines.
-
-## Outputs
-
-- `oof_predictions.csv`: long-form OOF predictions with `feature_set` and
-  `model` columns.
-- `summary.csv`: one row per baseline with overall and fold-mean metrics.
-- `summary.json`: full metrics and fold records.
-- `per_group_summary.json`: diagnostic group summaries per baseline.
-- `feature_schema.json`: generated tabular features and dropped all-missing
-  columns.
-- `feature_importance.csv`: tree importances or absolute linear coefficients
-  averaged across folds when available.
-# Baseline And Legacy Backup
-
-This folder is kept in the final cleaned project for comparison and rollback.
-
-`legacy_model_backup/` contains the root-level `dataset.py`, `model.py`,
-`train.py`, and `README.md` as they existed before promoting the final
-eight-vessel model to the project root.
-
+- `summary.csv`
+- `summary.json`
+- `oof_predictions.csv`
+- `per_group_summary.json`
+- `feature_importance.csv`

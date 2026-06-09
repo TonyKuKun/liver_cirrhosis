@@ -27,7 +27,7 @@ class Variant:
 
 
 MODEL_VARIANTS = [
-    Variant("full_model", "reference", "none", "8-vessel model with organ global features and pure L2 loss.", []),
+    Variant("full_model", "reference", "none", "8-vessel model with organ global features, one PVP head, and L2 plus shunt loss.", []),
     Variant("no_organ_global_features", "module", "organ global features", "Tests liver/spleen volumes as global context.", ["--no_organ_global_features"]),
     Variant("no_global_flow_corrector", "module", "GlobalFlowCorrector", "Tests whether global features improve corrected Q states.", ["--no_global_flow_corrector"]),
     Variant("no_flow_graph", "module", "FlowGraphRefiner", "Tests whether CenterlinePoints-aware graph message passing helps.", ["--no_flow_graph"]),
@@ -143,7 +143,7 @@ def prune_checkpoints(out_dir: Path) -> None:
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data_root", type=str, default=r"F:\PCG data\dataset\test4all_sample")
-    ap.add_argument("--out_root", type=str, default=str(ROOT / "ablation" / "runs" / "final_20260607"))
+    ap.add_argument("--out_root", type=str, default=str(ROOT / "ablation" / "runs" / "final_20260609"))
     ap.add_argument("--python", type=str, default=sys.executable)
     ap.add_argument("--variants", nargs="*", default=None)
     ap.add_argument("--suite", choices=["model", "loss", "all"], default="all")

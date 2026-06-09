@@ -13,9 +13,8 @@ OUT_DIR = ROOT / "figures"
 def font(size: int, bold: bool = False):
     candidates = [
         "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/simsun.ttc",
         "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/simhei.ttf",
     ]
     for path in candidates:
         try:
@@ -88,23 +87,23 @@ def draw_architecture() -> Path:
         draw.text((x + 26, y + 24), title, font=f_box, fill=colors["ink"])
         text_left(x + 26, y + 78, body, f_small, fill=colors["muted"], spacing=8)
 
-    draw.text((120, 78), "物理先验约束的门静脉压力预测模型", font=f_title, fill=colors["ink"])
+    draw.text((120, 78), "PVP Predictor: current final architecture", font=f_title, fill=colors["ink"])
     draw.text(
         (122, 150),
-        "八血管剖面几何 + 可学习血流动力学层 + 肝脾全局状态修正",
+        "8-vessel cross-section geometry + learnable hemodynamics + organ global context + one PVP head",
         font=f_sub,
         fill=colors["muted"],
     )
 
     columns = [120, 575, 1030, 1485, 1940, 2395, 2850]
     headers = [
-        "输入",
-        "几何特征\n筛选",
-        "可学习\n物理层",
-        "血流/全局\n修正",
-        "可选图网络\n修正",
-        "预测头",
-        "监督信号",
+        "Input",
+        "Geometry\nfilter",
+        "Learnable\nphysics",
+        "Global flow\ncorrection",
+        "Flow graph\nrefiner",
+        "PVP head",
+        "Training\nloss",
     ]
     for x, header in zip(columns, headers):
         text_left(x, 245, header, f_box, fill=colors["ink"], spacing=2)
@@ -116,8 +115,8 @@ def draw_architecture() -> Path:
         440,
         colors["blue"],
         colors["blue_line"],
-        "血管剖面序列",
-        "8 条血管分支\nMPV, SV, SMV\nLPV, RPV, TIPS\nLGV, PGV\n\n血管存在 mask\n中心线点信息",
+        "Vessel sequences",
+        "8 vessel branches\nMPV, SV, SMV\nLPV, RPV, TIPS\nLGV, PGV\n\nsegment mask\nCenterlinePoints-ready",
     )
     add_box(
         120,
@@ -126,8 +125,8 @@ def draw_architecture() -> Path:
         290,
         colors["teal"],
         colors["teal_line"],
-        "器官全局信息",
-        "脾脏体积\n肝脏体积\n脾/肝体积比\n\n来自 STL 最大\n联通区域",
+        "Organ global state",
+        "spleen volume\nliver volume\nspleen/liver ratio\n\nfrom largest connected\nSTL components",
     )
     add_box(
         575,
@@ -136,8 +135,8 @@ def draw_architecture() -> Path:
         560,
         colors["gray"],
         colors["gray_line"],
-        "可信剖面几何",
-        "面积 area\n水力直径\n内切半径\n曲率\nsolidity\ncircularity\ndA/ds norm\n\n默认剔除：\n扭率、周长、\n组件数等噪声特征",
+        "Reliable geometry",
+        "area\nhydraulic diameter\ninscribed radius\ncurvature\nsolidity\ncircularity\ndA/ds norm\n\nDefault excludes noisy\nraw length/torsion\nand component counts",
     )
     add_box(
         1030,
@@ -146,8 +145,8 @@ def draw_architecture() -> Path:
         670,
         colors["amber"],
         colors["amber_line"],
-        "血流动力学代理量",
-        "有效半径\n相对流量 Q\n流速 = Q / 面积\n壁面切应力\nReynolds 数\nDean 数\n阻力代理\n压降代理\n\n黏度、半径指数、\n压力尺度可学习",
+        "Physics proxy layer",
+        "effective radius\nrelative flow Q\nvelocity = Q / area\nwall shear proxy\nReynolds proxy\nDean proxy\nresistance proxy\npressure-drop proxy\n\nviscosity, radius exponent\nand pressure scale are\nlearnable unless ablated",
     )
     add_box(
         1485,
@@ -156,8 +155,8 @@ def draw_architecture() -> Path:
         590,
         colors["teal"],
         colors["teal_line"],
-        "全局血流修正器",
-        "读取筛选后的\n全局特征与\n肝脾体积信息\n\n修正中间血流特征\n但不把肝脾体积\n作为硬性 Q 边界\n\n不直接使用\nhas_tips 等标志",
+        "GlobalFlowCorrector",
+        "uses filtered global\ngeometry and organ state\n\ntunes intermediate\nflow features\n\norgan volumes are context,\nnot hard Q constraints\n\npresence flags are excluded",
     )
     add_box(
         1940,
@@ -167,7 +166,7 @@ def draw_architecture() -> Path:
         colors["blue"],
         colors["blue_line"],
         "FlowGraphRefiner",
-        "血管间解剖消息传递\n\n保留 CenterlinePoints\n连接信息接口\n\n当前作为可选模块，\n后续重点改进边权\n和真实连接位置",
+        "anatomical message passing\nbetween vessel branches\n\nkeeps the interface for\nCenterlinePoints graph data\n\ncurrent ablation shows\nsmall but positive effect\nfor the reference model",
     )
     add_box(
         2395,
@@ -176,8 +175,8 @@ def draw_architecture() -> Path:
         540,
         colors["green"],
         colors["green_line"],
-        "PVP 预测头",
-        "汇总修正后的\n血流/物理特征\n血管存在 mask\n肝脾全局状态\n物理残差状态\n\n输出门静脉压力\nPVP mmHg",
+        "Single PVP head",
+        "aggregates corrected\nflow and physics features\nsegment mask\norgan global context\nphysics baseline state\n\noutputs portal venous\npressure in mmHg",
     )
     add_box(
         2850,
@@ -186,8 +185,8 @@ def draw_architecture() -> Path:
         660,
         colors["rose"],
         colors["rose_line"],
-        "训练目标",
-        "最终默认：\nL2 / MSE PVP loss\n\n可复现实验：\n核心合流分流 loss\nMPV ~= SMV + SV\n\n旧版宽分流、压降单调、\n器官 Q 硬修正\n默认关闭",
+        "Objective",
+        "L2 / MSE PVP loss\n+\noptional shunt loss\n\ncore_confluence:\nMPV ~= SMV + SV\n\nsingle-task PVP regression\none prediction head\nno extra auxiliary objectives",
     )
 
     arrow(505, 560, 575, 590)
@@ -202,44 +201,44 @@ def draw_architecture() -> Path:
     arrow(2465, 1260, 2465, 975, color="#9aa7b5", line_width=4)
     draw.text(
         (690, 1288),
-        "segment_mask 用于屏蔽缺失血管；全局状态用于校准病人层面的血流表征",
+        "segment_mask blocks missing vessels; organ context calibrates patient-level flow state.",
         font=f_small,
         fill=colors["muted"],
     )
 
     round_rect(120, 1405, 1020, 1660, "#ffffff", colors["gray_line"], radius=28, line_width=3)
-    draw.text((150, 1435), "为什么这样设计？", font=f_box, fill=colors["ink"])
+    draw.text((150, 1435), "Why this design", font=f_box, fill=colors["ink"])
     text_left(
         150,
         1495,
-        "先使用相对可靠的剖面几何。\n不把不准确的绝对血管长度写入硬物理公式。\n肝脾体积作为全局状态，而不是直接强行缩放 Q。",
+        "Use reliable cross-section geometry first.\nKeep uncertain raw vessel length out of hard formulas.\nUse organ volumes as global patient context instead of direct Q rescaling.",
         f_small,
         fill=colors["muted"],
     )
 
     round_rect(1090, 1405, 1990, 1660, "#ffffff", colors["gray_line"], radius=28, line_width=3)
-    draw.text((1120, 1435), "当前验证最优配置", font=f_box, fill=colors["ink"])
+    draw.text((1120, 1435), "2026-06-09 reference", font=f_box, fill=colors["ink"])
     text_left(
         1120,
         1495,
-        "8 血管 + 肝脾全局特征 + 纯 L2/MSE。\nSubject-level 5-fold：MAE 2.81，RMSE 3.84，R2 0.61。\n核心分流 loss 只作为可复现实验保留。",
+        "8 vessels + organ global features\nL2 + core_confluence shunt loss\nSubject-level 5-fold:\nMAE 3.153, RMSE 3.986, R2 0.585\nOOF bias -0.002 mmHg",
         f_small,
         fill=colors["muted"],
     )
 
     round_rect(2060, 1405, 3280, 1660, "#ffffff", colors["gray_line"], radius=28, line_width=3)
-    draw.text((2090, 1435), "消融实验结论", font=f_box, fill=colors["ink"])
+    draw.text((2090, 1435), "2026-06-09 ablation takeaways", font=f_box, fill=colors["ink"])
     text_left(
         2090,
         1495,
-        "肝脾全局特征、GlobalFlowCorrector 和 PhysicsResidualNet 有效。\n核心合流分流 loss 优于旧版宽分流，但仍弱于纯 L2。\n最佳传统 baseline：physics/AdaBoost，MAE 3.42，RMSE 4.29，R2 0.53。",
+        "GlobalFlowCorrector and FlowGraphRefiner help the reference.\nFixed physics parameters, L2-only, and full shunt loss score better in this rerun.\nBest baseline: geometry/extra_trees, MAE 3.685, RMSE 4.550, R2 0.472.",
         f_small,
         fill=colors["muted"],
     )
 
     draw.text(
         (120, 1785),
-        "PVP_predictor 最终模型架构图 | README 文档图",
+        "PVP_predictor architecture figure | regenerated from 2026-06-09 experiments",
         font=f_tiny,
         fill="#8994a3",
     )
