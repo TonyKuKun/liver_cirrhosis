@@ -988,25 +988,6 @@ class FlowGraphRefiner(nn.Module):
         return h
 
 
-class PhysicsResidualNet(nn.Module):
-    def __init__(self, d_in: int, d_hidden: int = 32, dropout: float = 0.1):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(d_in, d_hidden),
-            nn.LayerNorm(d_hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_hidden, d_hidden // 2),
-            nn.GELU(),
-            nn.Linear(d_hidden // 2, 1),
-        )
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.zeros_(self.net[-1].bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)
-
-
 class NewPortalPressureNet(nn.Module):
     def __init__(
         self,
@@ -1016,7 +997,6 @@ class NewPortalPressureNet(nn.Module):
         use_organ_flow_scale: bool = False,
         use_global_flow_corrector: bool = True,
         use_flow_graph: bool = True,
-        use_physics_residual: bool = True,
         fixed_physics_params: bool = False,
         use_all_profile_channels: bool = False,
         use_unreliable_raw_lengths: bool = False,
@@ -1050,7 +1030,6 @@ class NewPortalPressureNet(nn.Module):
         self.use_organ_branch_scales = use_organ_flow_scale and use_organ_branch_scales
         self.use_global_flow_corrector = use_global_flow_corrector
         self.use_flow_graph = use_flow_graph
-        self.use_physics_residual = use_physics_residual
         self.disable_organ_features = bool(disable_organ_features)
         self.label_mean = float(label_mean)
         self.label_std = float(max(label_std, 1e-3))
@@ -1099,16 +1078,6 @@ class NewPortalPressureNet(nn.Module):
             + d_hidden
         )
         self.predictor = nn.Sequential(
-            nn.Linear(d_fused, d_hidden * 2),
-            nn.LayerNorm(d_hidden * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_hidden * 2, d_hidden),
-            nn.GELU(),
-            nn.Linear(d_hidden, 1),
-        )
-        self.residual = PhysicsResidualNet(d_fused, d_hidden=d_hidden, dropout=dropout) if use_physics_residual else None
-        self.csph_predictor = nn.Sequential(
             nn.Linear(d_fused, d_hidden * 2),
             nn.LayerNorm(d_hidden * 2),
             nn.GELU(),
@@ -1477,15 +1446,12 @@ class NewPortalPressureNet(nn.Module):
         fused = torch.nan_to_num(fused, nan=0.0, posinf=1e3, neginf=-1e3)
 
         correction = self.predictor(fused).squeeze(-1)
-        residual = self.residual(fused) if self.residual is not None else torch.zeros_like(correction)
-        pvp_pred = (baseline_norm + correction + residual).unsqueeze(-1)
-        csph_logit = self.csph_predictor(fused).squeeze(-1)
+        pvp_pred = (baseline_norm + correction).unsqueeze(-1)
         jp = self._junction_features(flow_out, hemo_per_seg, segment_mask)
         jp["helper_aux_loss"] = self._three_vessel_auxiliary_loss(flow_out, profiles, segment_mask)
 
         return {
             "pvp_pred": pvp_pred,
-            "csph_logit": csph_logit.unsqueeze(-1),
             "Q": Q,
             "flow_out": flow_out,
             "junction": jp,
@@ -1494,7 +1460,6 @@ class NewPortalPressureNet(nn.Module):
             "raw_flow_features": flow_features,
             "branch_embed": branch_embed,
             "branch_stats": branch_stats,
-            "pvp_residual": residual.unsqueeze(-1),
             "pvp_baseline_norm": baseline_norm.unsqueeze(-1),
             "pvp_baseline_raw_norm": baseline_raw_norm.unsqueeze(-1),
             "pvp_physics_calibrated_norm": baseline_norm.unsqueeze(-1),
@@ -1515,71 +1480,18 @@ class NewPortalPressureNet(nn.Module):
 class NewPhysicsLoss(nn.Module):
     def __init__(
         self,
-        lambda_flow_prior: float = 0.0,
-        lambda_press: float = 0.03,
-        lambda_smooth: float = 0.005,
-        lambda_physio: float = 0.005,
-        lambda_mono: float = 0.0,
-        lambda_residual: float = 0.02,
-        lambda_spread: float = 0.0,
-        lambda_conductance: float = 0.0,
-        lambda_pressure_balance: float = 0.0,
-        lambda_organ_mono: float = 0.0,
-        extremity_alpha: float = 1.0,
-        huber_delta: float = 1.0,
-        disable_physics_losses: bool = False,
+        lambda_shunt: float = 0.03,
         split_loss_mode: str = "core_confluence",
     ):
         super().__init__()
         if split_loss_mode not in {"full", "core_confluence"}:
             raise ValueError(f"Unknown split_loss_mode: {split_loss_mode}")
-        scale = 0.0 if disable_physics_losses else 1.0
-        self.disable_physics_losses = bool(disable_physics_losses)
         self.split_loss_mode = split_loss_mode
-        self.lambda_flow_prior = 0.0
-        self.lambda_press = lambda_press * scale
-        self.lambda_smooth = lambda_smooth * scale
-        self.lambda_physio = lambda_physio * scale
-        self.lambda_mono = 0.0
-        self.lambda_residual = lambda_residual * scale
-        self.lambda_spread = lambda_spread * scale
-        self.lambda_conductance = lambda_conductance * scale
-        self.lambda_pressure_balance = lambda_pressure_balance * scale
-        self.lambda_organ_mono = lambda_organ_mono * scale
-        self.extremity_alpha = extremity_alpha
-        self.huber_delta = huber_delta
-
-    @staticmethod
-    def _hinge_outside_range(x: torch.Tensor, lo: float, hi: float, mask: torch.Tensor) -> torch.Tensor:
-        below = F.relu((lo - x) / max(abs(lo), 1.0))
-        above = F.relu((x - hi) / max(abs(hi), 1.0))
-        v = (below.pow(2) + above.pow(2)) * mask
-        return v.sum() / mask.sum().clamp(min=1.0)
+        self.lambda_shunt = float(lambda_shunt)
 
     @staticmethod
     def _safe(x: torch.Tensor, cap: float = 1e3) -> torch.Tensor:
         return torch.nan_to_num(x, nan=0.0, posinf=cap, neginf=cap).clamp(max=cap)
-
-    @staticmethod
-    def _continuity_loss(model_out: Mapping[str, object], batch: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        hemo = model_out["hemo_per_seg"]
-        point_valid = batch["point_valid"]
-        physics_loss_segment_mask = model_out.get("physics_loss_segment_mask", batch["segment_mask"])
-        losses = []
-        for si in range(N_SEGMENTS):
-            alive = physics_loss_segment_mask[:, si] > 0.5
-            if alive.sum() == 0:
-                continue
-            vmask = point_valid[alive, si]
-            h = hemo[si]
-            flow_rate = h["area_m2"][alive] * h["velocity_m_per_s"][alive]
-            mean_q = (flow_rate * vmask).sum(dim=-1, keepdim=True) / vmask.sum(dim=-1, keepdim=True).clamp(min=1.0)
-            rel = (flow_rate - mean_q) / mean_q.abs().clamp(min=1e-8)
-            losses.append((rel.pow(2) * vmask).sum() / vmask.sum().clamp(min=1.0))
-        if not losses:
-            pred = model_out["pvp_pred"].squeeze(-1)
-            return torch.tensor(0.0, device=pred.device)
-        return torch.stack(losses).mean()
 
     @staticmethod
     def _core_confluence_split_loss(model_out: Mapping[str, object], batch: Mapping[str, torch.Tensor]) -> torch.Tensor:
@@ -1611,231 +1523,17 @@ class NewPhysicsLoss(nn.Module):
             return self._core_confluence_split_loss(model_out, batch)
         return self._full_split_loss(model_out, batch)
 
-    @staticmethod
-    def _conductance_split_loss(model_out: Mapping[str, object], batch: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        q = model_out["Q"]
-        flow = model_out["flow_out"]
-        resistance = flow.get("branch_resistance")
-        if resistance is None or q.size(1) < N_SEGMENTS or resistance.size(1) < N_SEGMENTS:
-            return torch.tensor(0.0, device=q.device)
-        ix = SEG_INDEX
-        conductance = 1.0 / resistance.clamp(min=1e-6)
-        losses = []
-
-        def add_group(frac_key, mask_key, indices):
-            if frac_key not in flow or mask_key not in flow:
-                return
-            idx = [ix[n] for n in indices]
-            pred = flow[frac_key]
-            active = flow[mask_key]
-            if pred.size(1) != len(idx) or active.size(1) != len(idx):
-                return
-            enough = active.sum(dim=-1) >= 2
-            if enough.sum() == 0:
-                return
-            target_raw = conductance[:, idx].detach() * active
-            target = target_raw / target_raw.sum(dim=-1, keepdim=True).clamp(min=1e-6)
-            losses.append(((pred - target).pow(2).sum(dim=-1)[enough]).mean())
-
-        add_group("sv_outflow_frac", "sv_outflow_mask", ("mpv", "pgv"))
-        add_group("conf_outflow_frac", "conf_outflow_mask", ("mpv", "lgv"))
-        add_group("bif_outflow_frac", "bif_outflow_mask", ("lpv", "rpv", "tips"))
-        if not losses:
-            return torch.tensor(0.0, device=q.device)
-        return torch.stack(losses).mean()
-
-    @staticmethod
-    def _pressure_balance_loss(model_out: Mapping[str, object], batch: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        hemo = model_out["hemo_per_seg"]
-        segment_mask = model_out.get("segment_mask", batch["segment_mask"])
-        ix = SEG_INDEX
-        lpv = ix["lpv"]
-        rpv = ix["rpv"]
-        active = segment_mask[:, lpv] * segment_mask[:, rpv]
-        if active.sum() == 0:
-            pred = model_out["pvp_pred"].squeeze(-1)
-            return torch.tensor(0.0, device=pred.device)
-        dP_l = torch.log1p(hemo[lpv]["pressure_drop_total"].abs())
-        dP_r = torch.log1p(hemo[rpv]["pressure_drop_total"].abs())
-        return ((dP_l - dP_r).pow(2) * active).sum() / active.sum().clamp(min=1.0)
-
-    @staticmethod
-    def _organ_boundary_monotonic_loss(model_out: Mapping[str, object], batch: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        q_scale = model_out.get("q_scale")
-        if q_scale is None or q_scale.size(1) < N_SEGMENTS:
-            pred = model_out["pvp_pred"].squeeze(-1)
-            return torch.tensor(0.0, device=pred.device)
-        organ_volumes = batch["organ_volumes"]
-        organ_valid = batch["organ_valid"]
-        ix = SEG_INDEX
-        losses = []
-
-        def add_pairwise(volume, valid, scale):
-            valid_pair = (valid[:, None] * valid[None, :]) > 0.5
-            order = volume[:, None] > volume[None, :]
-            mask = valid_pair & order
-            if mask.sum() == 0:
-                return
-            diff = scale[:, None] - scale[None, :]
-            losses.append(F.relu(0.01 - diff)[mask].pow(2).mean())
-
-        add_pairwise(organ_volumes[:, 0], organ_valid[:, 0], q_scale[:, ix["sv"]])
-        add_pairwise(organ_volumes[:, 1], organ_valid[:, 1], q_scale[:, ix["mpv"]])
-        if not losses:
-            return torch.tensor(0.0, device=q_scale.device)
-        return torch.stack(losses).mean()
-
-    @staticmethod
-    def _pressure_monotonic_loss(model_out: Mapping[str, object], batch: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        hemo = model_out["hemo_per_seg"]
-        point_valid = batch["point_valid"]
-        physics_loss_segment_mask = model_out.get("physics_loss_segment_mask", batch["segment_mask"])
-        losses = []
-        for si in range(N_SEGMENTS):
-            alive = physics_loss_segment_mask[:, si] > 0.5
-            if alive.sum() == 0:
-                continue
-            v = point_valid[alive, si]
-            dp = hemo[si]["pressure_drop_pa"][alive]
-            ddp = dp[:, 1:] - dp[:, :-1]
-            mwp = v[:, 1:] * v[:, :-1]
-            losses.append((F.relu(-ddp).pow(2) * mwp).sum() / mwp.sum().clamp(min=1.0))
-        if not losses:
-            pred = model_out["pvp_pred"].squeeze(-1)
-            return torch.tensor(0.0, device=pred.device)
-        return torch.stack(losses).mean()
-
     def forward(self, model_out: Mapping[str, object], label_norm: torch.Tensor, batch: Mapping[str, torch.Tensor]):
         pred = model_out["pvp_pred"].squeeze(-1)
         err = pred - label_norm
         L_main = err.pow(2).mean()
-
-        if pred.numel() >= 4:
-            L_spread = F.relu(1.0 - pred.var() / label_norm.var().clamp(min=1e-3)).pow(2)
-        else:
-            L_spread = torch.tensor(0.0, device=pred.device)
-
-        L_flow = torch.tensor(0.0, device=pred.device)
-        L_press = self._split_loss(model_out, batch)
-        L_mono = torch.tensor(0.0, device=pred.device)
-        L_smooth = torch.tensor(0.0, device=pred.device)
-        L_physio = torch.tensor(0.0, device=pred.device)
-        L_residual = torch.tensor(0.0, device=pred.device)
-        L_conductance = self._conductance_split_loss(model_out, batch)
-        L_pressure_balance = self._pressure_balance_loss(model_out, batch)
-        L_organ_mono = self._organ_boundary_monotonic_loss(model_out, batch)
-
+        L_shunt = self._split_loss(model_out, batch)
         L_main = self._safe(L_main)
-        L_flow = self._safe(L_flow)
-        L_press = self._safe(L_press)
-        L_smooth = self._safe(L_smooth)
-        L_physio = self._safe(L_physio)
-        L_mono = self._safe(L_mono)
-        L_residual = self._safe(L_residual)
-        L_spread = self._safe(L_spread)
-        L_conductance = self._safe(L_conductance)
-        L_pressure_balance = self._safe(L_pressure_balance)
-        L_organ_mono = self._safe(L_organ_mono)
-
-        total = (
-            L_main
-            + self.lambda_press * L_press
-            + self.lambda_smooth * L_smooth
-            + self.lambda_physio * L_physio
-            + self.lambda_residual * L_residual
-            + self.lambda_spread * L_spread
-            + self.lambda_conductance * L_conductance
-            + self.lambda_pressure_balance * L_pressure_balance
-            + self.lambda_organ_mono * L_organ_mono
-        )
+        L_shunt = self._safe(L_shunt)
+        total = L_main + self.lambda_shunt * L_shunt
         return total, {
             "main": float(L_main.detach()),
-            "flow_prior": float(L_flow.detach()),
-            "press": float(L_press.detach()),
-            "smooth": float(L_smooth.detach()),
-            "physio": float(L_physio.detach()),
-            "mono": float(L_mono.detach()),
-            "residual": float(L_residual.detach()),
-            "spread": float(L_spread.detach()),
-            "conductance": float(L_conductance.detach()),
-            "pressure_balance": float(L_pressure_balance.detach()),
-            "organ_mono": float(L_organ_mono.detach()),
-            "total": float(total.detach()),
-        }
-
-
-class NewCSPHLoss(NewPhysicsLoss):
-    """CSPH binary loss with optional hemodynamic regularization.
-
-    CSPH is derived from the PVP label as PPG = PVP - 10 mmHg and
-    clinically significant portal hypertension is PPG >= 10 mmHg.
-    Therefore the default CSPH threshold is PVP >= 20 mmHg.
-    """
-
-    def __init__(
-        self,
-        csph_pvp_threshold: float = 20.0,
-        pos_weight: float | None = None,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.csph_pvp_threshold = float(csph_pvp_threshold)
-        if pos_weight is None:
-            self.register_buffer("pos_weight", torch.tensor(1.0), persistent=False)
-        else:
-            self.register_buffer("pos_weight", torch.tensor(float(pos_weight)), persistent=False)
-
-    def forward(self, model_out: Mapping[str, object], label_norm: torch.Tensor, batch: Mapping[str, torch.Tensor]):
-        logits = model_out["csph_logit"].squeeze(-1)
-        target = (batch["label"] >= self.csph_pvp_threshold).float()
-        bce = F.binary_cross_entropy_with_logits(
-            logits,
-            target,
-            pos_weight=self.pos_weight.to(logits.device).clamp(min=1e-3),
-        )
-
-        L_flow = torch.tensor(0.0, device=logits.device)
-        L_press = self._split_loss(model_out, batch)
-        L_mono = torch.tensor(0.0, device=logits.device)
-        L_smooth = torch.tensor(0.0, device=logits.device)
-        L_physio = torch.tensor(0.0, device=logits.device)
-        L_conductance = self._conductance_split_loss(model_out, batch)
-        L_pressure_balance = self._pressure_balance_loss(model_out, batch)
-        L_organ_mono = self._organ_boundary_monotonic_loss(model_out, batch)
-
-        L_main = self._safe(bce)
-        L_flow = self._safe(L_flow)
-        L_press = self._safe(L_press)
-        L_smooth = self._safe(L_smooth)
-        L_physio = self._safe(L_physio)
-        L_mono = self._safe(L_mono)
-        L_residual = torch.tensor(0.0, device=logits.device)
-        L_spread = torch.tensor(0.0, device=logits.device)
-        L_conductance = self._safe(L_conductance)
-        L_pressure_balance = self._safe(L_pressure_balance)
-        L_organ_mono = self._safe(L_organ_mono)
-
-        total = (
-            L_main
-            + self.lambda_press * L_press
-            + self.lambda_smooth * L_smooth
-            + self.lambda_physio * L_physio
-            + self.lambda_conductance * L_conductance
-            + self.lambda_pressure_balance * L_pressure_balance
-            + self.lambda_organ_mono * L_organ_mono
-        )
-        return total, {
-            "main": float(L_main.detach()),
-            "flow_prior": float(L_flow.detach()),
-            "press": float(L_press.detach()),
-            "smooth": float(L_smooth.detach()),
-            "physio": float(L_physio.detach()),
-            "mono": float(L_mono.detach()),
-            "residual": float(L_residual.detach()),
-            "spread": float(L_spread.detach()),
-            "conductance": float(L_conductance.detach()),
-            "pressure_balance": float(L_pressure_balance.detach()),
-            "organ_mono": float(L_organ_mono.detach()),
+            "shunt": float(L_shunt.detach()),
             "total": float(total.detach()),
         }
 

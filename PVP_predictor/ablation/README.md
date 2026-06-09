@@ -17,17 +17,16 @@ The default ablation reference is the current best PVP model:
 8-vessel layout
 liver/spleen volumes as global features
 no organ flow scaling
-pure L2/MSE loss
+L2/MSE loss + core-confluence shunt loss
 ```
 
-The split-flow physics loss is kept as an explicit control. The final retained
-version is the narrow core-confluence constraint:
+The retained shunt loss is the narrow core-confluence constraint:
 
 ```text
---lambda_press 0.03 --split_loss_mode core_confluence
+--lambda_shunt 0.03 --split_loss_mode core_confluence
 ```
 
-Other physics losses are set to zero in the final ablation suite.
+No other physics losses are part of the final training objective.
 
 ## Run
 
@@ -64,8 +63,5 @@ ablation/runs/arch_ablation_l2_fullsplit_20260607/full/analysis.md
 Latest best:
 
 ```text
-L2 only + organ global
-MAE  2.8098
-RMSE 3.8433
-R2   0.6142
+L2 + core-confluence shunt loss + organ global
 ```

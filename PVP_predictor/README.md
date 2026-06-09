@@ -8,8 +8,8 @@
 8 血管剖面几何
 + 肝脾体积全局特征
 + GlobalFlowCorrector
-+ PhysicsResidualNet
-+ 纯 L2/MSE 监督
++ 单一 PVP prediction head
++ L2/MSE + core-confluence 分流 loss
 ```
 
 ![模型架构图](docs/figures/model_architecture.png)
@@ -98,19 +98,17 @@ runs/stl_largest_component_volume_cache.json
 
 ### 全局修正与预测头
 
-`GlobalFlowCorrector` 使用筛选后的全局特征和肝脾体积修正中间血流特征。`PhysicsResidualNet` 在物理代理量基础上学习残差修正。最终 `PVP prediction head` 汇总血流特征、`segment_mask`、肝脾全局状态和物理残差状态，输出 PVP（mmHg）。
+`GlobalFlowCorrector` 使用筛选后的全局特征和肝脾体积修正中间血流特征。最终只保留一个 `PVP prediction head`，汇总血流特征、`segment_mask`、肝脾全局状态和物理基线状态，输出 PVP（mmHg）。
 
 `FlowGraphRefiner` 保留为可选图网络模块，用于血管间解剖消息传递。当前版本已经保留 CenterlinePoints 连接信息接口，但从现有消融结果看，GNN 还没有稳定提升性能，后续应重点改进真实连接位置和边权建模。
 
 ### 训练目标
 
-当前最终默认训练目标为纯 L2/MSE：
+当前最终默认训练目标只包含 L2/MSE 和核心合流分流 loss：
 
 ```text
-L = MSE(PVP_pred, PVP_true)
+L = MSE(PVP_pred, PVP_true) + lambda_shunt * shunt_loss
 ```
-
-同时保留一个可复现实验用的核心合流分流约束：
 
 ```text
 MPV ~= SMV + SV
@@ -119,10 +117,10 @@ MPV ~= SMV + SV
 运行方式：
 
 ```bash
---lambda_press 0.03 --split_loss_mode core_confluence
+--lambda_shunt 0.03 --split_loss_mode core_confluence
 ```
 
-实验结果显示，核心合流分流约束比旧版宽分流约束更合理，但仍没有超过纯 L2/MSE，因此不作为最终默认 loss。
+旧版宽分流约束已不作为最终训练目标保留。
 
 ## 实验结果
 
@@ -162,8 +160,8 @@ baseline/runs/final_20260607_baselines_72_seed40/summary.json
 
 | 方案 | MAE | RMSE | R2 | 结论 |
 |---|---:|---:|---:|---|
-| **L2 only + 肝脾全局特征** | **2.810** | **3.843** | **0.614** | 最终默认 |
-| L2 + 核心合流分流 loss | 2.887 | 3.941 | 0.595 | 比旧分流更好，但仍弱于纯 L2 |
+| L2 only + 肝脾全局特征 | 2.810 | 3.843 | 0.614 | 历史对照 |
+| **L2 + 核心合流分流 loss** | **2.887** | **3.941** | **0.595** | **当前默认结构** |
 | L2 + 旧版宽分流 loss | 3.022 | 4.140 | 0.556 | 约束过宽，效果最差 |
 
 结果文件：
@@ -184,7 +182,6 @@ ablation/runs/loss_ablation_core_split_20260607/full/analysis.md
 | 宽分流参考模型 | 3.022 | 4.140 | 0.556 | 历史架构诊断参考 |
 | 去掉肝脾全局特征 | 3.084 | 4.222 | 0.528 | 肝脾体积作为全局特征有效 |
 | 去掉 GlobalFlowCorrector | 3.417 | 4.559 | 0.463 | 全局修正模块重要 |
-| 去掉 PhysicsResidualNet | 3.268 | 4.218 | 0.538 | 物理残差修正有效 |
 | 去掉 FlowGraphRefiner | 2.998 | 4.039 | 0.578 | 当前 GNN 实现未稳定提升 |
 | 固定物理参数 | 2.922 | 4.192 | 0.548 | 指标混合，保留可学习标定 |
 | 使用全部剖面特征 | 3.058 | 3.919 | 0.602 | RMSE/R2 改善但 MAE 变差，暂不默认 |
@@ -204,7 +201,7 @@ ablation/runs/arch_ablation_l2_fullsplit_20260607/full/analysis.md
 | 问题 | 当前结论 |
 |---|---|
 | 肝脾体积是否有用？ | 有用，但应作为全局特征，而不是硬性 Q 边界修正。 |
-| 最终 loss 用纯 L2 还是物理 split loss？ | 当前纯 L2/MSE 最好。 |
+| 最终 loss 用哪些项？ | 只保留 L2/MSE 和核心合流分流 loss。 |
 | 是否使用所有剖面几何？ | 不默认使用，保留可信剖面几何子集。 |
 | 原始血管长度是否进入物理公式？ | 不进入硬物理公式，可作为后续学习特征候选。 |
 | 是否压缩到 3 或 6 条血管？ | 当前不推荐，8 血管仍是最终默认。 |
@@ -217,9 +214,10 @@ ablation/runs/arch_ablation_l2_fullsplit_20260607/full/analysis.md
 ```bash
 conda run -n pytorch python train.py ^
   --data_root "F:\PCG data\dataset\test4all_sample" ^
-  --out_dir runs\final_pvp_8v_organ_global_l2 ^
+  --out_dir runs\final_pvp_8v_organ_global_l2_shunt ^
   --no_organ_flow_scale ^
-  --lambda_press 0
+  --lambda_shunt 0.03 ^
+  --split_loss_mode core_confluence
 ```
 
 ### 运行核心合流分流 loss 对照
@@ -229,7 +227,7 @@ conda run -n pytorch python train.py ^
   --data_root "F:\PCG data\dataset\test4all_sample" ^
   --out_dir runs\pvp_8v_organ_global_l2_core_split ^
   --no_organ_flow_scale ^
-  --lambda_press 0.03 ^
+  --lambda_shunt 0.03 ^
   --split_loss_mode core_confluence
 ```
 
@@ -265,7 +263,7 @@ conda run -n pytorch python docs/draw_model_architecture.py
 
 ```text
 dataset.py                         数据集、特征读取、器官体积缓存
-model.py                           最终物理先验 PVP/CSPH 模型
+model.py                           最终物理先验 PVP 模型
 train.py                           训练与交叉验证入口
 baseline/                          传统机器学习 baseline 和旧模型备份
 ablation/                          消融实验与报告工具
@@ -283,8 +281,8 @@ FINAL_20260607_RESULTS_ANALYSIS.md  中文最终实验分析
 8 血管模型
 + 肝脾体积全局特征
 + GlobalFlowCorrector
-+ PhysicsResidualNet
-+ 纯 L2/MSE loss
++ 单一 PVP prediction head
++ L2/MSE + core-confluence 分流 loss
 ```
 
 核心合流分流 loss 可作为论文补充实验或负结果报告：它比旧版宽分流更符合解剖逻辑，但在当前数据上仍未改善 MAE、RMSE 或 R2。

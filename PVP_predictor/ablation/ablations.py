@@ -31,7 +31,6 @@ MODEL_VARIANTS = [
     Variant("no_organ_global_features", "module", "organ global features", "Tests liver/spleen volumes as global context.", ["--no_organ_global_features"]),
     Variant("no_global_flow_corrector", "module", "GlobalFlowCorrector", "Tests whether global features improve corrected Q states.", ["--no_global_flow_corrector"]),
     Variant("no_flow_graph", "module", "FlowGraphRefiner", "Tests whether CenterlinePoints-aware graph message passing helps.", ["--no_flow_graph"]),
-    Variant("no_physics_residual", "module", "PhysicsResidualNet", "Tests whether the residual prediction head helps.", ["--no_physics_residual"]),
     Variant("fixed_physics_params", "module", "LearnablePhysicsLayer parameters", "Tests learnable physical calibration versus fixed constants.", ["--fixed_physics_params"]),
     Variant("all_profile_channels", "geometry", "optional profile channels", "Tests whether optional geometry channels add signal or noise.", ["--use_all_profile_channels"]),
     Variant("use_unreliable_raw_lengths", "geometry", "unreliable raw lengths", "Tests whether raw SMV/LPV/RPV lengths should stay excluded.", ["--use_unreliable_raw_lengths"]),
@@ -41,9 +40,9 @@ MODEL_VARIANTS = [
 
 
 LOSS_VARIANTS = [
-    Variant("loss_l2_only", "reference", "L2 only", "Current default supervision.", []),
-    Variant("loss_l2_plus_core_split", "loss", "add core confluence split loss", "Tests only the MPV=SMV+SV core confluence constraint.", ["--lambda_press", "0.03", "--split_loss_mode", "core_confluence"]),
-    Variant("loss_l2_plus_full_split", "loss", "add full split loss", "Tests the previous broad split-flow residual.", ["--lambda_press", "0.03", "--split_loss_mode", "full"]),
+    Variant("loss_l2_only", "loss", "L2 only", "Pure PVP regression supervision.", ["--lambda_shunt", "0"]),
+    Variant("loss_l2_plus_core_split", "loss", "add core confluence shunt loss", "Tests only the MPV=SMV+SV core confluence constraint.", ["--lambda_shunt", "0.03", "--split_loss_mode", "core_confluence"]),
+    Variant("loss_l2_plus_full_split", "loss", "add full shunt loss", "Tests the broad split-flow residual.", ["--lambda_shunt", "0.03", "--split_loss_mode", "full"]),
 ]
 
 
@@ -67,6 +66,11 @@ def select_variants(names: Sequence[str] | None, suite: str):
 
 
 def build_command(args, variant: Variant, out_dir: Path, epochs: int, n_folds: int):
+    loss_args = (
+        list(variant.args)
+        if variant.category == "loss"
+        else ["--lambda_shunt", str(args.lambda_shunt), "--split_loss_mode", args.split_loss_mode, *variant.args]
+    )
     return [
         args.python,
         str(ROOT / "train.py"),
@@ -84,20 +88,9 @@ def build_command(args, variant: Variant, out_dir: Path, epochs: int, n_folds: i
         "--d_hidden", str(args.d_hidden),
         "--dropout", str(args.dropout),
         "--flow_gnn_layers", str(args.flow_gnn_layers),
-        "--lambda_flow_prior", "0",
-        "--lambda_press", str(args.lambda_press),
-        "--lambda_smooth", "0",
-        "--lambda_physio", "0",
-        "--lambda_mono", "0",
-        "--lambda_residual", "0",
-        "--lambda_spread", "0",
-        "--lambda_conductance", "0",
-        "--lambda_pressure_balance", "0",
-        "--lambda_organ_mono", "0",
-        "--split_loss_mode", args.split_loss_mode,
         "--sample_power", str(args.sample_power),
         "--no_organ_flow_scale",
-        *variant.args,
+        *loss_args,
     ]
 
 
@@ -173,7 +166,7 @@ def parse_args(argv=None):
     ap.add_argument("--d_hidden", type=int, default=32)
     ap.add_argument("--dropout", type=float, default=0.15)
     ap.add_argument("--flow_gnn_layers", type=int, default=2)
-    ap.add_argument("--lambda_press", type=float, default=0.0)
+    ap.add_argument("--lambda_shunt", type=float, default=0.03)
     ap.add_argument("--split_loss_mode", choices=["full", "core_confluence"], default="core_confluence")
     ap.add_argument("--sample_power", type=float, default=1.5)
     return ap.parse_args(argv)
