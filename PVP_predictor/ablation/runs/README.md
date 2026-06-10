@@ -1,10 +1,20 @@
-# Ablation Runs
+# PVP Predictor Ablation Runs
 
-只保留当前需要引用的 2026-06-09 完整消融：
+Current retained run:
 
-- `final_20260609/full`
+- `final_20260610/full`
 
-参考配置 `full_model`：MAE 3.153, RMSE 3.986, R2 0.585。
-最优配置 `loss_l2_plus_full_split`：MAE 2.934, RMSE 3.891, R2 0.606。
+The comparison files in that directory summarize 14 full 5-fold variants. The reference `full_model` is the final model:
 
-当前仅保留 2026-06-09 完整消融分析文件。
+- MAE 2.685 +/- 0.746
+- RMSE 3.605
+- R2 0.643
+
+Key worse variants:
+
+- `loss_l2_only`: MAE 2.700
+- `with_physics_residual`: MAE 2.809
+- `no_dropout_regularizer`: MAE 2.942
+- `no_organ_global_features`: MAE 3.104
+- `no_flow_graph`: MAE 3.171
+- `no_global_flow_corrector`: MAE 3.479

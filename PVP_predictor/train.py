@@ -276,6 +276,8 @@ def build_model(args, full_ds, device):
         use_organ_flow_scale=args.use_organ_flow_scale,
         use_global_flow_corrector=args.use_global_flow_corrector,
         use_flow_graph=args.use_flow_graph,
+        use_physics_residual=args.use_physics_residual,
+        use_dropout_regularizer=args.use_dropout_regularizer,
         fixed_physics_params=args.fixed_physics_params,
         use_all_profile_channels=args.use_all_profile_channels,
         use_unreliable_raw_lengths=args.use_unreliable_raw_lengths,
@@ -473,6 +475,10 @@ def parse_args(argv=None):
     ap.add_argument("--no_global_flow_corrector", dest="use_global_flow_corrector", action="store_false")
     ap.add_argument("--use_flow_graph", action="store_true", default=True)
     ap.add_argument("--no_flow_graph", dest="use_flow_graph", action="store_false")
+    ap.add_argument("--use_physics_residual", action="store_true", default=False)
+    ap.add_argument("--no_physics_residual", dest="use_physics_residual", action="store_false")
+    ap.add_argument("--use_dropout_regularizer", action="store_true", default=True)
+    ap.add_argument("--no_dropout_regularizer", dest="use_dropout_regularizer", action="store_false")
     ap.add_argument("--fixed_physics_params", action="store_true", default=False)
     ap.add_argument("--use_all_profile_channels", action="store_true", default=False)
     ap.add_argument("--use_unreliable_raw_lengths", action="store_true", default=False)
@@ -484,7 +490,7 @@ def parse_args(argv=None):
     ap.add_argument("--use_organ_branch_scales", action="store_true", default=True)
     ap.add_argument("--no_organ_branch_scales", dest="use_organ_branch_scales", action="store_false")
     ap.add_argument("--use_eight_vessel_layout", action="store_true", default=False)
-    ap.add_argument("--lambda_shunt", type=float, default=0.03)
+    ap.add_argument("--lambda_shunt", type=float, default=0.005)
     ap.add_argument("--split_loss_mode", choices=["full", "core_confluence"], default="core_confluence")
     ap.add_argument("--sample_power", type=float, default=1.5)
     args = ap.parse_args(argv)

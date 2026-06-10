@@ -27,9 +27,11 @@ class Variant:
 
 
 MODEL_VARIANTS = [
-    Variant("full_model", "reference", "none", "8-vessel model with organ global features, one PVP head, and L2 plus shunt loss.", []),
+    Variant("full_model", "reference", "none", "8-vessel model with organ global features, one PVP head, training dropout regularization, and L2 plus light core shunt loss.", []),
     Variant("no_organ_global_features", "module", "organ global features", "Tests liver/spleen volumes as global context.", ["--no_organ_global_features"]),
     Variant("no_global_flow_corrector", "module", "GlobalFlowCorrector", "Tests whether global features improve corrected Q states.", ["--no_global_flow_corrector"]),
+    Variant("with_physics_residual", "module", "PhysicsResidualNet", "Tests whether the extra internal physics residual correction branch still helps.", ["--use_physics_residual"]),
+    Variant("no_dropout_regularizer", "module", "AuxiliaryDropoutRegularizer", "Tests the training-only stochastic regularizer.", ["--no_dropout_regularizer"]),
     Variant("no_flow_graph", "module", "FlowGraphRefiner", "Tests whether CenterlinePoints-aware graph message passing helps.", ["--no_flow_graph"]),
     Variant("fixed_physics_params", "module", "LearnablePhysicsLayer parameters", "Tests learnable physical calibration versus fixed constants.", ["--fixed_physics_params"]),
     Variant("all_profile_channels", "geometry", "optional profile channels", "Tests whether optional geometry channels add signal or noise.", ["--use_all_profile_channels"]),
@@ -41,8 +43,8 @@ MODEL_VARIANTS = [
 
 LOSS_VARIANTS = [
     Variant("loss_l2_only", "loss", "L2 only", "Pure PVP regression supervision.", ["--lambda_shunt", "0"]),
-    Variant("loss_l2_plus_core_split", "loss", "add core confluence shunt loss", "Tests only the MPV=SMV+SV core confluence constraint.", ["--lambda_shunt", "0.03", "--split_loss_mode", "core_confluence"]),
-    Variant("loss_l2_plus_full_split", "loss", "add full shunt loss", "Tests the broad split-flow residual.", ["--lambda_shunt", "0.03", "--split_loss_mode", "full"]),
+    Variant("loss_l2_plus_core_split", "loss", "add core confluence shunt loss", "Tests the selected light MPV=SMV+SV core confluence constraint.", ["--lambda_shunt", "0.005", "--split_loss_mode", "core_confluence"]),
+    Variant("loss_l2_plus_full_split", "loss", "add full shunt loss", "Tests the broad split-flow residual at the same light weight.", ["--lambda_shunt", "0.005", "--split_loss_mode", "full"]),
 ]
 
 
@@ -95,7 +97,10 @@ def build_command(args, variant: Variant, out_dir: Path, epochs: int, n_folds: i
 
 
 def run_stage(args, variants: Sequence[Variant], stage_name: str, epochs: int, n_folds: int):
-    out_root = Path(args.out_root) / stage_name
+    base_out_root = Path(args.out_root)
+    if not base_out_root.is_absolute():
+        base_out_root = ROOT / base_out_root
+    out_root = base_out_root / stage_name
     out_root.mkdir(parents=True, exist_ok=True)
     manifest = []
     for variant in variants:
@@ -143,7 +148,7 @@ def prune_checkpoints(out_dir: Path) -> None:
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data_root", type=str, default=r"F:\PCG data\dataset\test4all_sample")
-    ap.add_argument("--out_root", type=str, default=str(ROOT / "ablation" / "runs" / "final_20260609"))
+    ap.add_argument("--out_root", type=str, default=str(ROOT / "ablation" / "runs" / "final_20260610"))
     ap.add_argument("--python", type=str, default=sys.executable)
     ap.add_argument("--variants", nargs="*", default=None)
     ap.add_argument("--suite", choices=["model", "loss", "all"], default="all")
@@ -166,7 +171,7 @@ def parse_args(argv=None):
     ap.add_argument("--d_hidden", type=int, default=32)
     ap.add_argument("--dropout", type=float, default=0.15)
     ap.add_argument("--flow_gnn_layers", type=int, default=2)
-    ap.add_argument("--lambda_shunt", type=float, default=0.03)
+    ap.add_argument("--lambda_shunt", type=float, default=0.005)
     ap.add_argument("--split_loss_mode", choices=["full", "core_confluence"], default="core_confluence")
     ap.add_argument("--sample_power", type=float, default=1.5)
     return ap.parse_args(argv)

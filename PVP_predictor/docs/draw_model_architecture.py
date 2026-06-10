@@ -166,7 +166,7 @@ def draw_architecture() -> Path:
         colors["blue"],
         colors["blue_line"],
         "FlowGraphRefiner",
-        "anatomical message passing\nbetween vessel branches\n\nkeeps the interface for\nCenterlinePoints graph data\n\ncurrent ablation shows\nsmall but positive effect\nfor the reference model",
+        "anatomical message passing\nbetween vessel branches\n\nkeeps the interface for\nCenterlinePoints graph data\n\n2026-06-10 ablation:\nremoving graph worsens\nMAE from 2.685 to 3.171",
     )
     add_box(
         2395,
@@ -176,7 +176,7 @@ def draw_architecture() -> Path:
         colors["green"],
         colors["green_line"],
         "Single PVP head",
-        "aggregates corrected\nflow and physics features\nsegment mask\norgan global context\nphysics baseline state\n\noutputs portal venous\npressure in mmHg",
+        "aggregates corrected\nflow and physics features\nsegment mask\norgan global context\nphysics baseline state\n\none output only:\nportal venous pressure",
     )
     add_box(
         2850,
@@ -186,7 +186,7 @@ def draw_architecture() -> Path:
         colors["rose"],
         colors["rose_line"],
         "Objective",
-        "L2 / MSE PVP loss\n+\noptional shunt loss\n\ncore_confluence:\nMPV ~= SMV + SV\n\nsingle-task PVP regression\none prediction head\nno extra auxiliary objectives",
+        "L2 / MSE PVP loss\n+\nlight shunt loss\n\nlambda_shunt = 0.005\ncore_confluence:\nMPV ~= SMV + SV\n\nsingle-task PVP regression\nno extra prediction heads",
     )
 
     arrow(505, 560, 575, 590)
@@ -217,28 +217,28 @@ def draw_architecture() -> Path:
     )
 
     round_rect(1090, 1405, 1990, 1660, "#ffffff", colors["gray_line"], radius=28, line_width=3)
-    draw.text((1120, 1435), "2026-06-09 reference", font=f_box, fill=colors["ink"])
+    draw.text((1120, 1435), "2026-06-10 final", font=f_box, fill=colors["ink"])
     text_left(
         1120,
         1495,
-        "8 vessels + organ global features\nL2 + core_confluence shunt loss\nSubject-level 5-fold:\nMAE 3.153, RMSE 3.986, R2 0.585\nOOF bias -0.002 mmHg",
+        "8 vessels + organ global features\none PVP head, no physics residual\nL2 + light core shunt loss\nSubject-level 5-fold:\nMAE 2.685, RMSE 3.605, R2 0.643",
         f_small,
         fill=colors["muted"],
     )
 
     round_rect(2060, 1405, 3280, 1660, "#ffffff", colors["gray_line"], radius=28, line_width=3)
-    draw.text((2090, 1435), "2026-06-09 ablation takeaways", font=f_box, fill=colors["ink"])
+    draw.text((2090, 1435), "2026-06-10 ablation takeaways", font=f_box, fill=colors["ink"])
     text_left(
         2090,
         1495,
-        "GlobalFlowCorrector and FlowGraphRefiner help the reference.\nFixed physics parameters, L2-only, and full shunt loss score better in this rerun.\nBest baseline: geometry/extra_trees, MAE 3.685, RMSE 4.550, R2 0.472.",
+        "GlobalFlowCorrector, FlowGraphRefiner, organ context, and dropout regularization help.\nPhysics residual is disabled: enabling it worsens MAE to 2.809.\nBest traditional baseline: physics/adaboost, MAE 3.420.",
         f_small,
         fill=colors["muted"],
     )
 
     draw.text(
         (120, 1785),
-        "PVP_predictor architecture figure | regenerated from 2026-06-09 experiments",
+        "PVP_predictor architecture figure | regenerated from 2026-06-10 experiments",
         font=f_tiny,
         fill="#8994a3",
     )

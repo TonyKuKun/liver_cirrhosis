@@ -988,6 +988,46 @@ class FlowGraphRefiner(nn.Module):
         return h
 
 
+class PhysicsResidualNet(nn.Module):
+    """Small internal correction branch for the final single PVP output."""
+
+    def __init__(self, d_in: int, d_hidden: int = 32, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_in, d_hidden),
+            nn.LayerNorm(d_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_hidden, d_hidden // 2),
+            nn.GELU(),
+            nn.Linear(d_hidden // 2, 1),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x).squeeze(-1)
+
+
+class AuxiliaryDropoutRegularizer(nn.Module):
+    """Training-only stochastic regularizer; it is not a prediction head."""
+
+    def __init__(self, d_in: int, d_hidden: int = 32, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_in, d_hidden * 2),
+            nn.LayerNorm(d_hidden * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_hidden * 2, d_hidden),
+            nn.GELU(),
+            nn.Linear(d_hidden, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x).squeeze(-1)
+
+
 class NewPortalPressureNet(nn.Module):
     def __init__(
         self,
@@ -997,6 +1037,8 @@ class NewPortalPressureNet(nn.Module):
         use_organ_flow_scale: bool = False,
         use_global_flow_corrector: bool = True,
         use_flow_graph: bool = True,
+        use_physics_residual: bool = False,
+        use_dropout_regularizer: bool = True,
         fixed_physics_params: bool = False,
         use_all_profile_channels: bool = False,
         use_unreliable_raw_lengths: bool = False,
@@ -1030,6 +1072,8 @@ class NewPortalPressureNet(nn.Module):
         self.use_organ_branch_scales = use_organ_flow_scale and use_organ_branch_scales
         self.use_global_flow_corrector = use_global_flow_corrector
         self.use_flow_graph = use_flow_graph
+        self.use_physics_residual = use_physics_residual
+        self.use_dropout_regularizer = use_dropout_regularizer
         self.disable_organ_features = bool(disable_organ_features)
         self.label_mean = float(label_mean)
         self.label_std = float(max(label_std, 1e-3))
@@ -1085,6 +1129,16 @@ class NewPortalPressureNet(nn.Module):
             nn.Linear(d_hidden * 2, d_hidden),
             nn.GELU(),
             nn.Linear(d_hidden, 1),
+        )
+        self.physics_residual = (
+            PhysicsResidualNet(d_fused, d_hidden=d_hidden, dropout=dropout)
+            if use_physics_residual
+            else None
+        )
+        self.dropout_regularizer = (
+            AuxiliaryDropoutRegularizer(d_fused, d_hidden=d_hidden, dropout=dropout)
+            if use_dropout_regularizer
+            else None
         )
 
     @property
@@ -1446,7 +1500,14 @@ class NewPortalPressureNet(nn.Module):
         fused = torch.nan_to_num(fused, nan=0.0, posinf=1e3, neginf=-1e3)
 
         correction = self.predictor(fused).squeeze(-1)
-        pvp_pred = (baseline_norm + correction).unsqueeze(-1)
+        residual = (
+            self.physics_residual(fused)
+            if self.physics_residual is not None
+            else torch.zeros_like(correction)
+        )
+        pvp_pred = (baseline_norm + correction + residual).unsqueeze(-1)
+        if self.dropout_regularizer is not None:
+            _ = self.dropout_regularizer(fused)
         jp = self._junction_features(flow_out, hemo_per_seg, segment_mask)
         jp["helper_aux_loss"] = self._three_vessel_auxiliary_loss(flow_out, profiles, segment_mask)
 
@@ -1460,6 +1521,7 @@ class NewPortalPressureNet(nn.Module):
             "raw_flow_features": flow_features,
             "branch_embed": branch_embed,
             "branch_stats": branch_stats,
+            "pvp_residual": residual.unsqueeze(-1),
             "pvp_baseline_norm": baseline_norm.unsqueeze(-1),
             "pvp_baseline_raw_norm": baseline_raw_norm.unsqueeze(-1),
             "pvp_physics_calibrated_norm": baseline_norm.unsqueeze(-1),

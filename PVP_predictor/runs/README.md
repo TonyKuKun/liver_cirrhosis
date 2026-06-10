@@ -1,15 +1,15 @@
 # PVP Predictor Runs
 
-当前保留结果：
+Current retained run:
 
-- `final_20260609_pvp_l2_shunt`
+- `final_20260610_pvp_l2_shunt`
 
-## 指标
+## Metrics
 
-- 5-fold：MAE 3.153 +/- 0.540, RMSE 3.986, R2 0.585
-- OOF：MAE 3.169, RMSE 4.051, bias -0.002
+- 5-fold: MAE 2.685 +/- 0.746, RMSE 3.605, R2 0.643.
+- OOF: MAE 2.704, RMSE 3.800, bias 0.256, n=72.
 
-## 文件
+## Files
 
 - `summary.json`
 - `splits.json`
@@ -17,4 +17,4 @@
 - `oof_predictions.csv`
 - `oof_predictions.xlsx`
 
-CSV 和 XLSX 使用同一字段，便于直接对照。
+CSV and XLSX are generated from the same row objects and use the same columns.
