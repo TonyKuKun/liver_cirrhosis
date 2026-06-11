@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PortaFlow · 门静脉压力分析工作台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=5" />
+  <script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+  </script>
+</head>
+<body>
+  <!-- ───────────────────────── Top bar ───────────────────────── -->
+  <header class="topbar">
+    <a class="brand" href="index.html" title="返回首页">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div class="brand-text">
+        <span class="brand-name">PortaFlow</span>
+        <span class="brand-sub">门静脉压力分析工作台</span>
+      </div>
+    </a>
+
+    <nav class="stepper" id="stepper" aria-label="工作流阶段">
+      <button class="step" data-stage="1">
+        <span class="step-idx">1</span>
+        <span class="step-body"><b>分割</b><small>CT → STL</small></span>
+      </button>
+      <span class="step-link"></span>
+      <button class="step" data-stage="2">
+        <span class="step-idx">2</span>
+        <span class="step-body"><b>几何</b><small>STL → 特征</small></span>
+      </button>
+      <span class="step-link"></span>
+      <button class="step" data-stage="3">
+        <span class="step-idx">3</span>
+        <span class="step-body"><b>预测</b><small>特征 → PVP</small></span>
+      </button>
+    </nav>
+
+    <div class="topbar-right">
+      <div class="patient-chip" id="patientChip">
+        <span class="dot"></span>
+        <span id="patientChipName">未选择病例</span>
+      </div>
+      <div class="env-chip" title="离线原型 · 演示数据">demo</div>
+    </div>
+  </header>
+
+  <!-- ───────────────────────── Main grid ───────────────────────── -->
+  <main class="layout">
+    <!-- Left rail -->
+    <aside class="rail rail-left">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>病例列表</h2>
+          <span class="badge" id="patientCount">0</span>
+        </div>
+        <div class="rail-search">
+          <input id="patientSearch" type="text" placeholder="搜索姓名 / 编号…" />
+        </div>
+        <ul class="patient-list" id="patientList"></ul>
+      </section>
+
+      <section class="panel panel-grow">
+        <div class="panel-head">
+          <h2>任务历史</h2>
+        </div>
+        <ul class="task-list" id="taskList">
+          <li class="task-empty">尚无运行任务</li>
+        </ul>
+      </section>
+    </aside>
+
+    <!-- Center viewport -->
+    <section class="viewport">
+      <div class="viewport-head">
+        <div class="vp-title" id="vpTitle">3D 重建视图</div>
+        <div class="vp-tools" id="vpTools"></div>
+      </div>
+
+      <div class="vp-stage" id="vpStage">
+        <!-- 3D canvas host -->
+        <div class="canvas-host" id="canvasHost">
+          <div class="canvas-fallback" id="canvasFallback" hidden></div>
+        </div>
+
+        <!-- MPR thumbnails (stage 1) -->
+        <div class="mpr-strip" id="mprStrip">
+          <div class="mpr-cell"><canvas data-axis="axial"></canvas><span>Axial</span></div>
+          <div class="mpr-cell"><canvas data-axis="coronal"></canvas><span>Coronal</span></div>
+          <div class="mpr-cell"><canvas data-axis="sagittal"></canvas><span>Sagittal</span></div>
+        </div>
+
+        <!-- Pseudocolor legend (stage 3) -->
+        <div class="legend" id="legend" hidden>
+          <div class="legend-title">局部门静脉压 (mmHg)</div>
+          <div class="legend-bar"></div>
+          <div class="legend-scale"><span id="legLow">10</span><span id="legThresh"></span><span id="legHigh">40</span></div>
+        </div>
+
+        <div class="vp-hint" id="vpHint"></div>
+      </div>
+
+      <div class="vp-foot" id="vpFoot"></div>
+    </section>
+
+    <!-- Right panel -->
+    <aside class="rail rail-right" id="rightPanel"></aside>
+  </main>
+
+  <script type="module" src="app.js?v=5"></script>
+</body>
+</html>
