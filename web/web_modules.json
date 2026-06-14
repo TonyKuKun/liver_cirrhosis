@@ -1,0 +1,38 @@
+{
+  "integrated": {
+    "name": "PortaFlow integrated workbench",
+    "static_root": "web",
+    "entry": "integrated_web_frontend.py",
+    "host": "127.0.0.1",
+    "port": 8788
+  },
+  "stages": {
+    "segmentation": {
+      "name": "CT segmentation",
+      "root": "VKAN_segementation",
+      "backend": "VKAN_segementation/web_frontend.py",
+      "standalone_web": "VKAN_segementation/web",
+      "port": 8775,
+      "default_checkpoint": "VKAN_segementation/refinement/VKAN_segementation/runs/nnVnet2/last.pt",
+      "notes": "Standalone segmentation web remains under VKAN_segementation/web. The integrated workbench only embeds it."
+    },
+    "features": {
+      "name": "Centerline and geometry features",
+      "root": "E:/pycharm_code/liver_pre_process/zxx_stl",
+      "backend": "E:/pycharm_code/liver_pre_process/zxx_stl/web_frontend.py",
+      "standalone_web": "E:/pycharm_code/liver_pre_process/zxx_stl/web",
+      "port": 8765,
+      "notes": "Standalone centerline web remains in the liver_pre_process project."
+    },
+    "pvp": {
+      "name": "PVP prediction",
+      "root": "PVP_predictor",
+      "python": "D:/anaconda3/envs/pytorch/python.exe",
+      "infer": "PVP_predictor/infer.py",
+      "dataset": "PVP_predictor/dataset.py",
+      "runs": "PVP_predictor/runs",
+      "default_model_dir": "PVP_predictor/runs/full_model",
+      "notes": "PVP inference is called by the integrated backend; the PVP UI currently lives in web/app.js."
+    }
+  }
+}

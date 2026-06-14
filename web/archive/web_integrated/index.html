@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>门静脉 PVP 一体化工作台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <header class="brand">
+        <div class="brand-mark">PVP</div>
+        <div>
+          <h1>门静脉 PVP 工作台</h1>
+          <p id="serverState">正在连接本地服务</p>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="panel-title">输入</div>
+        <label class="field">
+          <span>病人根目录</span>
+          <input id="rootFolder" type="text" placeholder="F:\PCG data\dataset\test4all_sample" />
+        </label>
+        <label class="field">
+          <span>PVP 模型目录</span>
+          <input id="modelDir" type="text" placeholder="留空则自动选择可推理模型" />
+        </label>
+        <button id="loadBtn" class="primary-btn" type="button">加载病人</button>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">病人</div>
+        <label class="field compact">
+          <span>当前病人</span>
+          <select id="patientSelect"></select>
+        </label>
+        <div class="button-row">
+          <button id="prevPatientBtn" type="button" disabled>上一例</button>
+          <button id="nextPatientBtn" type="button" disabled>下一例</button>
+        </div>
+        <div id="patientMeta" class="patient-meta">尚未加载</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">运行</div>
+        <div class="button-grid">
+          <button data-run-stage="segmentation" type="button">CT分割</button>
+          <button data-run-stage="features" type="button">几何特征</button>
+          <button data-run-stage="pvp" type="button">PVP预测</button>
+          <button data-run-stage="all" class="primary-btn" type="button">全流程</button>
+        </div>
+        <label class="toggle-line">
+          <input id="runAllPatients" type="checkbox" />
+          <span>对全部病人运行</span>
+        </label>
+        <label class="toggle-line">
+          <input id="forceRun" type="checkbox" />
+          <span>强制重算已有结果</span>
+        </label>
+        <label class="field compact">
+          <span>运行设备</span>
+          <select id="deviceSelect">
+            <option value="auto">auto</option>
+            <option value="cpu">cpu</option>
+            <option value="cuda">cuda</option>
+            <option value="gpu">gpu</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="panel-title">任务日志</div>
+        <div id="jobStatus" class="job-status">空闲</div>
+        <pre id="logs"></pre>
+      </section>
+    </aside>
+
+    <main class="workspace">
+      <section class="topbar">
+        <div>
+          <h2 id="workspaceTitle">等待载入病人</h2>
+          <p id="workspaceSubtitle">输入目录后选择病人，按阶段运行和查看结果。</p>
+        </div>
+        <div class="top-actions">
+          <button id="refreshBtn" type="button">刷新</button>
+          <button id="downloadBtn" type="button">下载结果</button>
+        </div>
+      </section>
+
+      <section id="timeline" class="timeline"></section>
+
+      <section class="stage-grid">
+        <article class="stage-card" data-stage-card="segmentation">
+          <div class="stage-head">
+            <span class="stage-index">1</span>
+            <div>
+              <h3>CT 分割</h3>
+              <p>从 CT/DICOM 提取门静脉 STL，并保留肝脾器官 STL。</p>
+            </div>
+          </div>
+          <div id="segmentationFiles" class="file-list"></div>
+        </article>
+
+        <article class="stage-card" data-stage-card="features">
+          <div class="stage-head">
+            <span class="stage-index">2</span>
+            <div>
+              <h3>中心线与几何特征</h3>
+              <p>中心线、血管分段、截面 profile、统一特征 JSON。</p>
+            </div>
+          </div>
+          <div id="featureFiles" class="file-list"></div>
+        </article>
+
+        <article class="stage-card" data-stage-card="pvp">
+          <div class="stage-head">
+            <span class="stage-index">3</span>
+            <div>
+              <h3>PVP 预测</h3>
+              <p>使用 fold checkpoint 集成推理，输出均值和折间稳定性。</p>
+            </div>
+          </div>
+          <div id="pvpResult" class="pvp-result"></div>
+        </article>
+      </section>
+
+      <section class="details-grid">
+        <article class="panel details-panel">
+          <div class="panel-title">关键几何特征</div>
+          <div id="featureSummary" class="feature-summary"></div>
+        </article>
+
+        <article class="panel details-panel">
+          <div class="panel-title">分割与器官状态</div>
+          <div id="organSummary" class="organ-summary"></div>
+        </article>
+      </section>
+
+      <section class="preview-panel">
+        <div class="preview-head">
+          <div>
+            <div class="panel-title">交互预览</div>
+            <p>几何阶段完成后会显示中心线/分段/截面导出的 HTML。</p>
+          </div>
+          <button id="openPreviewBtn" type="button">打开预览</button>
+        </div>
+        <iframe id="featurePreview" title="geometry preview"></iframe>
+        <div id="previewEmpty" class="preview-empty">暂无可视化文件</div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

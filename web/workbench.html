@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PortaFlow - 门静脉 PVP 工作台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=11" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="index.html" title="返回首页">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div class="brand-text">
+        <span class="brand-name">PortaFlow</span>
+        <span class="brand-sub">门静脉 PVP 一体化工作台</span>
+      </div>
+    </a>
+
+    <nav class="stepper" id="stepper" aria-label="工作流阶段">
+      <button class="step active" data-stage="segmentation">
+        <span class="step-idx">1</span>
+        <span class="step-body"><b>CT 分割</b><small>CT -> STL</small></span>
+      </button>
+      <span class="step-link"></span>
+      <button class="step" data-stage="features">
+        <span class="step-idx">2</span>
+        <span class="step-body"><b>几何特征</b><small>STL -> 特征</small></span>
+      </button>
+      <span class="step-link"></span>
+      <button class="step" data-stage="pvp">
+        <span class="step-idx">3</span>
+        <span class="step-body"><b>PVP 预测</b><small>特征 -> PVP</small></span>
+      </button>
+    </nav>
+
+    <div class="topbar-right">
+      <div class="patient-chip" id="patientChip">
+        <span class="dot"></span>
+        <span id="patientChipName">未选择病人</span>
+      </div>
+      <div class="env-chip" id="healthChip" title="后端连接状态">checking</div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="rail rail-left">
+      <section class="panel patient-workbench">
+        <div class="panel-head">
+          <h2>数据与病人</h2>
+          <span class="badge" id="sessionBadge">未加载</span>
+        </div>
+        <div class="session-form">
+          <label>数据根目录</label>
+          <input id="rootFolder" class="primary-input" type="text" placeholder="例如 E:\data\portal_vein_cases" />
+          <input id="modelDir" type="hidden" value="" />
+          <button class="btn-run" id="loadBtn">加载病人目录</button>
+          <div class="form-note" id="loadNote">输入根目录后，会自动扫描可用病人并判断三阶段状态。</div>
+        </div>
+        <div class="patient-list-head">
+          <h3>病人列表</h3>
+          <span class="badge" id="patientCount">0</span>
+        </div>
+        <div class="rail-search patient-search">
+          <input id="patientSearch" type="text" placeholder="搜索病人编号" />
+        </div>
+        <ul class="patient-list" id="patientList">
+          <li class="list-empty">请先加载数据根目录</li>
+        </ul>
+      </section>
+
+      <section class="panel task-panel">
+        <div class="panel-head">
+          <h2>任务日志</h2>
+          <span class="badge" id="jobBadge">idle</span>
+        </div>
+        <ul class="task-list" id="taskList">
+          <li class="task-empty">暂无运行任务</li>
+        </ul>
+      </section>
+    </aside>
+
+    <section class="viewport">
+      <div class="viewport-head">
+        <div class="vp-title" id="vpTitle">CT 分割 - CT 到门静脉 STL</div>
+        <div class="vp-tools" id="vpTools"></div>
+      </div>
+
+      <div class="vp-stage" id="vpStage">
+        <div class="stage-body" id="stageBody">
+          <div class="empty-state">
+            <div class="es-mark">PortaFlow</div>
+            <p>请输入数据根目录并加载病人。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="vp-foot" id="vpFoot">后端 API: /api/session · /api/run-stage · /api/job</div>
+    </section>
+
+    <aside class="rail rail-right" id="rightPanel">
+      <div class="section">
+        <h3>工作台说明 <span class="h-line"></span></h3>
+        <p class="note">左侧输入数据根目录，选择病人后使用顶部三阶段切换。每个阶段右侧会显示可运行命令、真实输出文件和结果摘要。</p>
+      </div>
+    </aside>
+  </main>
+
+  <script src="app.js?v=13" defer></script>
+</body>
+</html>
