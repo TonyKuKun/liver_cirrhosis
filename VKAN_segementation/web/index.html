@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VKAN Portal Vein Segmentation Workbench</title>
+  <link rel="stylesheet" href="/styles.css?v=7" />
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <script>
+    window.__vkanErrors = [];
+    if (new URLSearchParams(window.location.search).get("embed") === "1") {
+      document.documentElement.classList.add("embed");
+    }
+    window.addEventListener("error", (event) => {
+      window.__vkanErrors.push(event.message || String(event.error || event));
+    });
+  </script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <header class="brand">
+        <div class="brand-mark">PV</div>
+        <div>
+          <h1>门静脉分割工作台</h1>
+          <p id="serverState">正在连接本地服务...</p>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="panel-title">输入</div>
+        <label class="field">
+          <span>patient 根目录或批量目录</span>
+          <input id="rootFolder" type="text" placeholder="E:\data\portal_vein_cases" />
+        </label>
+        <div class="run-row">
+          <button id="loadBtn" class="primary-btn" type="button">载入病例</button>
+          <button id="nextPatientBtn" type="button">下一个病人</button>
+        </div>
+        <label class="field">
+          <span>当前病例</span>
+          <select id="patientSelect"></select>
+        </label>
+        <div id="patientSummary" class="picked-info">尚未加载</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">流水线</div>
+        <div id="stepButtons" class="step-list"></div>
+        <div class="run-row">
+          <button id="runAllBtn" class="primary-btn" type="button">运行全流程</button>
+          <button id="refreshBtn" type="button">刷新</button>
+        </div>
+        <div class="run-row">
+          <button id="downloadBtn" type="button">下载结果</button>
+          <button id="toggleSettingsBtn" type="button">设置</button>
+        </div>
+        <label class="toggle-line">
+          <input id="forceRun" type="checkbox" />
+          <span>强制重算已有结果</span>
+        </label>
+        <label class="toggle-line">
+          <input id="fastTotalSeg" type="checkbox" checked />
+          <span>快速器官分割</span>
+        </label>
+      </section>
+
+      <section id="settingsPanel" class="panel hidden">
+        <div class="panel-title">运行设置</div>
+        <label class="field">
+          <span>checkpoint</span>
+          <input id="checkpointPath" type="text" placeholder="自动使用默认 checkpoint" />
+        </label>
+        <label class="field">
+          <span>最大面数</span>
+          <select id="maxFaces">
+            <option value="40000">40k</option>
+            <option value="80000" selected>80k</option>
+            <option value="120000">120k</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>mesh 透明度</span>
+          <input id="meshOpacity" type="range" min="8" max="100" value="92" />
+        </label>
+        <label class="toggle-line">
+          <input id="showCtPanel" type="checkbox" checked />
+          <span>显示 CT 三视图</span>
+        </label>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="panel-title">任务日志</div>
+        <div id="jobStatus" class="job-status">空闲</div>
+        <pre id="logs"></pre>
+      </section>
+    </aside>
+
+    <main class="workspace">
+      <section id="viewGrid" class="view-grid ct-enabled">
+        <div class="viewer-card mesh-card">
+          <div class="viewer-head">
+            <strong>STL / Mesh</strong>
+            <span>predict / smooth / manual</span>
+          </div>
+          <div class="scene-toggle-bar" aria-label="模型显示选项">
+            <button id="toggleSceneAxesBtn" class="scene-toggle active" type="button">坐标</button>
+            <button id="togglePickedMarkerBtn" class="scene-toggle active" type="button">红点</button>
+          </div>
+          <div id="viewer" class="mesh-viewer"></div>
+          <div id="emptyState" class="empty-state">载入 CT/STL 后显示三维视图</div>
+          <div id="canvasFallback" class="empty-state" hidden></div>
+        </div>
+
+        <div class="ct-stack">
+          <div class="ct-card">
+            <div class="viewer-head"><strong>Axial</strong><input data-axis="axial" type="range" min="0" max="0" value="0" /></div>
+            <canvas id="ctAxial" data-axis-canvas="axial"></canvas>
+          </div>
+          <div class="ct-card">
+            <div class="viewer-head"><strong>Coronal</strong><input data-axis="coronal" type="range" min="0" max="0" value="0" /></div>
+            <canvas id="ctCoronal" data-axis-canvas="coronal"></canvas>
+          </div>
+          <div class="ct-card">
+            <div class="viewer-head"><strong>Sagittal</strong><input data-axis="sagittal" type="range" min="0" max="0" value="0" /></div>
+            <canvas id="ctSagittal" data-axis-canvas="sagittal"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <section class="inspector-grid">
+        <div class="panel embed-pipeline">
+          <div class="panel-title">流水线</div>
+          <div id="embedStepButtons" class="step-list"></div>
+          <div class="run-row">
+            <button id="embedRunAllBtn" class="primary-btn" type="button">运行全流程</button>
+            <button id="embedRefreshBtn" type="button">刷新</button>
+          </div>
+          <div class="run-row single-action">
+            <button id="embedToggleSettingsBtn" type="button">参数</button>
+          </div>
+          <label class="toggle-line">
+            <input id="embedForceRun" type="checkbox" />
+            <span>强制重算已有结果</span>
+          </label>
+          <div id="embedSettingsPanel" class="embed-settings hidden">
+            <label class="toggle-line setting-toggle">
+              <input id="embedFastTotalSeg" type="checkbox" checked />
+              <span>快速器官分割</span>
+            </label>
+            <label class="field">
+              <span>VKAN checkpoint</span>
+              <input id="embedCheckpointPath" type="text" placeholder="自动使用默认 checkpoint" />
+            </label>
+          </div>
+        </div>
+        <div class="panel layer-control-panel">
+          <div class="panel-title">模型 / 器官层</div>
+          <div class="layer-opacity-control">
+            <div class="layer-control-head">
+              <span class="opacity-title">透明度 · <span id="selectedLayerName">未选择图层</span></span>
+              <strong id="selectedLayerOpacity">--</strong>
+            </div>
+            <input id="selectedLayerOpacitySlider" type="range" min="5" max="100" value="92" />
+          </div>
+          <div class="layer-subtitle">模型层</div>
+          <div id="modelLayers" class="layer-list"></div>
+          <div class="layer-subtitle">器官层</div>
+          <div id="organLayers" class="layer-list"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">Mask 层</div>
+          <div id="maskLayers" class="layer-list"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">病例检查</div>
+          <div id="fileList" class="feature-table"></div>
+          <div id="inspector" class="feature-table"></div>
+          <div class="panel-title picked-title">选点信息</div>
+          <div id="pickedPoint" class="picked-info">未选择</div>
+          <div id="selectionBox" class="picked-info">未选择</div>
+        </div>
+      </section>
+    </main>
+
+    <div class="tool-strip">
+      <button data-tool="paint" type="button">画刷</button>
+      <button data-tool="mask" type="button">新建 mask</button>
+      <button data-tool="threshold" type="button">阈值</button>
+      <button data-tool="region" type="button">区域生长</button>
+      <button data-tool="boolean" type="button">布尔</button>
+      <button data-tool="smooth" type="button">平滑/填洞</button>
+    </div>
+
+    <aside id="toolTray" class="tool-tray hidden">
+      <div class="tray-head">
+        <strong>Mask / 编辑工具</strong>
+        <button id="closeToolTray" type="button">关闭</button>
+      </div>
+
+      <div data-tool-panel="paint" class="tool-panel hidden">
+        <label class="field"><span>画刷半径</span><input id="brushRadius" type="range" min="1" max="15" value="4" /></label>
+        <label class="toggle-line"><input id="paintMaskToggle" type="checkbox" checked /><span>写入 mask</span></label>
+        <label class="toggle-line"><input id="predictCheckBox" type="checkbox" checked /><span>显示 predict</span></label>
+        <input id="ctBrushRadius" type="hidden" value="4" />
+        <input id="paintMode" type="hidden" value="overwrite" />
+        <input id="editSource" type="hidden" value="" />
+        <input id="editTarget" type="hidden" value="" />
+        <div class="run-row">
+          <button id="deleteBrushBtn" class="danger-btn" type="button">删除区域</button>
+          <button id="keepBrushBtn" class="primary-btn" type="button">保留区域</button>
+        </div>
+      </div>
+
+      <div data-tool-panel="mask" class="tool-panel hidden">
+        <label class="field"><span>mask 名称</span><input id="newMaskName" type="text" placeholder="mask_1" /></label>
+        <input id="newMaskSource" type="hidden" value="predict_mask.nii.gz" />
+        <button id="newMaskBtn" class="primary-btn" type="button">新建 mask</button>
+      </div>
+
+      <div data-tool-panel="threshold" class="tool-panel hidden">
+        <label class="field"><span>低阈值</span><input id="thresholdLow" type="number" value="80" /></label>
+        <label class="field"><span>高阈值</span><input id="thresholdHigh" type="number" value="320" /></label>
+        <input id="threshold" type="hidden" value="180" />
+        <input id="maskLower" type="hidden" value="80" />
+        <input id="maskUpper" type="hidden" value="320" />
+        <input id="thresholdTarget" type="hidden" value="" />
+        <input id="thresholdWriteMode" type="hidden" value="replace" />
+        <button id="thresholdMaskBtn" class="primary-btn" type="button">应用阈值</button>
+      </div>
+
+      <div data-tool-panel="region" class="tool-panel hidden">
+        <label class="field"><span>容差</span><input id="regionTolerance" type="number" value="80" /></label>
+        <input id="growTolerance" type="hidden" value="80" />
+        <input id="growLower" type="hidden" value="0" />
+        <input id="growUpper" type="hidden" value="400" />
+        <input id="regionTarget" type="hidden" value="" />
+        <input id="regionWriteMode" type="hidden" value="replace" />
+        <button id="regionGrowBtn" class="primary-btn" type="button">区域生长</button>
+      </div>
+
+      <div data-tool-panel="boolean" class="tool-panel hidden">
+        <label class="field"><span>布尔操作</span><select id="booleanOp"><option value="union">Union</option><option value="subtract">Subtract</option><option value="intersect">Intersect</option></select></label>
+        <input id="maskA" type="hidden" value="" />
+        <input id="maskB" type="hidden" value="" />
+        <input id="maskBooleanOp" type="hidden" value="union" />
+        <input id="maskBooleanTarget" type="hidden" value="" />
+        <button id="applyBooleanBtn" class="primary-btn" type="button">应用布尔</button>
+      </div>
+
+      <div data-tool-panel="smooth" class="tool-panel hidden">
+        <label class="field"><span>平滑迭代</span><input id="smoothIterations" type="number" value="2" /></label>
+        <input id="maskSmoothIterations" type="hidden" value="2" />
+        <input id="smoothTarget" type="hidden" value="" />
+        <input id="smoothMode" type="hidden" value="smooth" />
+        <input id="fillTarget" type="hidden" value="" />
+        <button id="smoothMaskBtn" class="primary-btn" type="button">平滑 mask</button>
+        <button id="fillMaskBtn" type="button">填洞</button>
+      </div>
+
+      <input id="device" type="hidden" value="auto" />
+    </aside>
+  </div>
+
+  <script src="/app.js?v=6"></script>
+  <script>
+    window.addEventListener("DOMContentLoaded", () => {
+      window.setTimeout(() => {
+        const params = new URLSearchParams(window.location.search);
+        const root = params.get("root");
+        const input = document.getElementById("rootFolder");
+        if (root && input) input.value = root;
+        if (root && params.get("autoload") === "1" && typeof window.createSession === "function") {
+          window.createSession();
+        }
+      }, 500);
+    });
+  </script>
+</body>
+</html>
