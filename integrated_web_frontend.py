@@ -82,6 +82,18 @@ OUTPUTS = [
     "pvp_prediction.json",
 ]
 
+FILE_ALIASES = {
+    "pretrain.stl": [
+        "pretrain.stl",
+        "pre.stl",
+        "vkan_work/pretrain_round1.stl",
+        "vkan_work/pretrain_round0.stl",
+    ],
+    "predict.stl": ["predict.stl"],
+    "predict_smooth.stl": ["predict_smooth.stl", "predict_smoothed.stl", "smooth_predict.stl"],
+    "vessel.stl": ["vessel.stl", "segmentation/portal_vein.stl"],
+}
+
 SESSIONS: dict[str, dict] = {}
 JOBS: dict[str, dict] = {}
 LEGACY_PROCS: dict[str, subprocess.Popen] = {}
@@ -308,15 +320,74 @@ def _file_info(path: Path) -> dict:
         "path": str(path),
         "size": path.stat().st_size if path.exists() else 0,
         "modified": path.stat().st_mtime if path.exists() else None,
+        "is_dir": path.is_dir() if path.exists() else False,
     }
+
+
+def _inside(root: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_patient_file(patient: Path, rel: str) -> Path | None:
+    patient = patient.resolve()
+    normalized = str(rel or "").replace("\\", "/").strip("/")
+    if not normalized:
+        return None
+    direct = (patient / normalized).resolve()
+    if _inside(patient, direct) and direct.exists():
+        return direct
+
+    aliases = FILE_ALIASES.get(normalized.lower(), [normalized])
+    for alias in aliases:
+        candidate = (patient / alias).resolve()
+        if _inside(patient, candidate) and candidate.exists():
+            return candidate
+
+    if "/" in normalized:
+        return None
+    target = Path(normalized).name.lower()
+    matches = [
+        path for path in patient.rglob("*")
+        if path.name.lower() == target and path.exists()
+    ]
+    if not matches:
+        return None
+
+    def priority(path: Path) -> tuple[int, int, str]:
+        rel_path = path.relative_to(patient)
+        parts = [part.lower() for part in rel_path.parts]
+        if len(parts) == 1:
+            group = 0
+        elif parts[0] == "vkan_work":
+            group = 1
+        elif parts[0] == "segmentation":
+            group = 2
+        else:
+            group = 3
+        return (group, len(parts), str(rel_path).lower())
+
+    return sorted(matches, key=priority)[0]
+
+
+def _patient_file_info(patient: Path, rel: str) -> dict:
+    path = _resolve_patient_file(patient, rel) or (patient / rel)
+    info = _file_info(path)
+    info["requested"] = rel
+    return info
 
 
 def _looks_like_patient(path: Path) -> bool:
     return any([
         (path / "dcm").is_dir(),
         (path / "orig.nii.gz").exists(),
-        (path / "predict_smooth.stl").exists(),
-        (path / "vessel.stl").exists(),
+        _resolve_patient_file(path, "pretrain.stl") is not None,
+        _resolve_patient_file(path, "predict.stl") is not None,
+        _resolve_patient_file(path, "predict_smooth.stl") is not None,
+        _resolve_patient_file(path, "vessel.stl") is not None,
         (path / "unified_features.json").exists(),
     ])
 
@@ -435,10 +506,10 @@ def _ensure_legacy_workbench(stage: str) -> dict:
 def _stage_status(patient: Path, stage: str, model_dir: Path | None) -> dict:
     if stage == "segmentation":
         ready = (patient / "dcm").is_dir() or (patient / "orig.nii.gz").exists()
-        done = (patient / "predict_smooth.stl").exists()
+        done = _resolve_patient_file(patient, "predict_smooth.stl") is not None
         outputs = ["pretrain.stl", "predict.stl", "predict_smooth.stl", "segmentation/liver.stl", "segmentation/spleen.stl"]
     elif stage == "features":
-        ready = (patient / "predict_smooth.stl").exists() or (patient / "vessel.stl").exists()
+        ready = _resolve_patient_file(patient, "predict_smooth.stl") is not None or _resolve_patient_file(patient, "vessel.stl") is not None
         done = (patient / "unified_features.json").exists()
         outputs = ["CenterlinePoints.txt", "centerline_profiles.json", "centerline_pointwise_profiles.json", "unified_features.json", "vis_interactive.html"]
     elif stage == "pvp":
@@ -451,7 +522,7 @@ def _stage_status(patient: Path, stage: str, model_dir: Path | None) -> dict:
         "status": "done" if done else "ready" if ready else "missing",
         "ready": ready,
         "done": done,
-        "outputs": {name: _file_info(patient / name) for name in outputs},
+        "outputs": {name: _patient_file_info(patient, name) for name in outputs},
     }
 
 
@@ -510,9 +581,15 @@ def _patient_status(patient: Path, model_dir: Path | None, root: Path | None = N
             organs[stl.stem] = _file_info(stl)
     features = _read_json(patient / "unified_features.json")
     prediction = _read_json(patient / "pvp_prediction.json")
+    preview_stl = (
+        _resolve_patient_file(patient, "predict_smooth.stl")
+        or _resolve_patient_file(patient, "predict.stl")
+        or _resolve_patient_file(patient, "pretrain.stl")
+        or _resolve_patient_file(patient, "vessel.stl")
+    )
     return {
         "folder": str(patient),
-        "files": {name: _file_info(patient / name) for name in OUTPUTS},
+        "files": {name: _patient_file_info(patient, name) for name in OUTPUTS},
         "organs": organs,
         "stages": {stage: _stage_status(patient, stage, model_dir) for stage in STAGES},
         "features_summary": _feature_summary(features),
@@ -521,7 +598,7 @@ def _patient_status(patient: Path, model_dir: Path | None, root: Path | None = N
         "preview": {
             "vis_html": (patient / "vis_interactive.html").exists(),
             "vis_png": _file_info(patient / "vis_overview.png"),
-            "stl": _file_info(patient / "predict_smooth.stl") if (patient / "predict_smooth.stl").exists() else _file_info(patient / "vessel.stl"),
+            "stl": _file_info(preview_stl) if preview_stl else _file_info(patient / "predict_smooth.stl"),
         },
     }
 
@@ -634,11 +711,11 @@ def _run_segmentation(patient_dir: Path, session: dict, payload: dict, job: dict
 
 
 def _feature_stl(patient_dir: Path) -> Path:
-    if (patient_dir / "predict_smooth.stl").exists():
-        return patient_dir / "predict_smooth.stl"
-    if (patient_dir / "vessel.stl").exists():
-        return patient_dir / "vessel.stl"
-    raise FileNotFoundError("Need predict_smooth.stl or vessel.stl for geometry extraction.")
+    for name in ["predict_smooth.stl", "predict.stl", "vessel.stl", "pretrain.stl"]:
+        path = _resolve_patient_file(patient_dir, name)
+        if path and path.is_file():
+            return path
+    raise FileNotFoundError("Need predict_smooth.stl, predict.stl, vessel.stl, or pretrain.stl for geometry extraction.")
 
 
 def _run_features(patient_dir: Path, job: dict):
@@ -726,7 +803,7 @@ def _run_job(job_id: str):
                 started = time.time()
                 try:
                     if stage == "segmentation":
-                        if (patient_dir / "predict_smooth.stl").exists() and not payload.get("force"):
+                        if _resolve_patient_file(patient_dir, "predict_smooth.stl") and not payload.get("force"):
                             _append(job, f"[skip] {patient['id']} segmentation outputs already exist")
                         else:
                             _run_segmentation(patient_dir, session, payload, job)
@@ -784,8 +861,8 @@ def _zip_outputs(patients: list[dict]) -> bytes:
             root = Path(patient["folder"])
             prefix = patient["id"]
             for rel in OUTPUTS:
-                path = root / rel
-                if path.exists() and path.is_file():
+                path = _resolve_patient_file(root, rel)
+                if path and path.exists() and path.is_file():
                     zf.write(path, f"{prefix}/{rel}")
             seg_dir = root / "segmentation"
             if seg_dir.exists():
@@ -962,7 +1039,9 @@ class Handler(BaseHTTPRequestHandler):
         if not patient or not rel:
             raise ValueError("patient and file are required")
         root = Path(patient["folder"]).resolve()
-        file_path = (root / rel).resolve()
+        file_path = _resolve_patient_file(root, rel)
+        if not file_path:
+            file_path = (root / rel).resolve()
         if not str(file_path).startswith(str(root)) or not file_path.exists() or not file_path.is_file():
             self._json({"error": "Not found"}, status=404)
             return

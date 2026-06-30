@@ -25,6 +25,8 @@ const state = {
   jobs: [],
   legacy: {},
   pollTimer: null,
+  segmentationViewer: null,
+  viewerToken: 0,
   centerlineLayers: Object.fromEntries(CENTERLINE_LAYER_CONTROLS.map(([key, , checked]) => [key, checked])),
 };
 
@@ -138,7 +140,7 @@ function setStage(stageKey) {
 }
 
 function renderAll() {
-  document.body.classList.toggle("legacy-active", ["segmentation", "features"].includes(state.stage));
+  document.body.classList.toggle("legacy-active", state.stage === "features");
   renderTopbar();
   renderTools();
   renderStage();
@@ -220,14 +222,7 @@ function renderTools() {
   const patient = state.currentPatient;
   const stage = state.stage;
   const status = patient?.status?.stages?.[stage]?.status || "missing";
-  const segmentationTools = stage === "segmentation" ? `
-    <span class="seg-tool-group" aria-label="分割编辑工具">
-      ${["paint:画刷", "mask:新建 mask", "threshold:阈值", "region:区域生长", "boolean:布尔", "smooth:平滑/填洞"].map((item) => {
-        const [key, label] = item.split(":");
-        return `<button class="seg-tool-btn" type="button" data-seg-tool="${key}">${label}</button>`;
-      }).join("")}
-    </span>
-  ` : "";
+  const segmentationTools = "";
   const centerlineLayerTools = stage === "features" ? `
     <span class="centerline-layer-tools" aria-label="中心线图层显示">
       ${CENTERLINE_LAYER_CONTROLS.map(([key, label]) => `
@@ -296,9 +291,8 @@ function renderStage() {
     return;
   }
   if (state.stage === "segmentation") {
-    host.innerHTML = legacyStage(patient, "segmentation");
-    bindLegacyControls();
-    ensureLegacyStage("segmentation");
+    host.innerHTML = segmentationStage(patient);
+    initSegmentationViewer(patient);
   }
   if (state.stage === "features") {
     host.innerHTML = legacyStage(patient, "features");
@@ -365,34 +359,48 @@ async function ensureLegacyStage(stageKey) {
 
 function segmentationStage(patient) {
   const files = patient.status.files || {};
-  const organs = Object.keys(patient.status.organs || {});
-  return `<div class="stage-grid">
-    <div class="stage-card stage-image-card">
-      <img class="stage-image" src="assets/portal-vein-hero.png" alt="腹部 CT 与门静脉三维重建" />
-      <div class="stage-overlay">
-        <b>CT 分割质控</b>
-        <span>真实结果会写入病人目录，优先使用 predict_smooth.stl。</span>
+  const primary = bestSegmentationFile(files);
+  const layerCount = segmentationLayers(patient).filter((layer) => layer.exists).length;
+  return `<div class="seg-workspace">
+    <div class="seg-viewer-card">
+      <div class="seg-viewer-head">
+        <div>
+          <h3>CT 分割 - STL 三维质控</h3>
+          <p>${escapeHtml(patient.id)} · ${primary ? `当前显示 ${escapeHtml(primary.label)}` : "未找到 STL"}</p>
+        </div>
+        <div class="seg-viewer-stats">
+          <span>${layerCount} 个 STL 图层</span>
+          <span>${statusLabel(patient.status.stages.segmentation.status)}</span>
+        </div>
       </div>
-    </div>
-    <div class="stage-card">
-      <h3>输入与输出</h3>
-      <div class="file-list">
-        ${fileRow("DICOM 目录", files["dcm"] || dirInfo(patient, "dcm"))}
-        ${fileRow("orig.nii.gz", files["orig.nii.gz"])}
-        ${fileRow("pretrain.stl", files["pretrain.stl"])}
-        ${fileRow("predict.stl", files["predict.stl"])}
-        ${fileRow("predict_smooth.stl", files["predict_smooth.stl"])}
+      <div class="seg-viewer" id="segViewer">
+        <canvas id="segStlCanvas"></canvas>
+        <div class="seg-viewer-empty" id="segViewerEmpty">正在加载 STL 模型...</div>
+        <div class="seg-viewer-legend">
+          <b>图层</b>
+          <span><i style="background:#10a66a"></i>Predict</span>
+          <span><i style="background:#38bdf8"></i>Pretrain</span>
+          <span><i style="background:#9ca3af"></i>器官</span>
+        </div>
       </div>
-      <p class="note">器官层 STL：${organs.length ? organs.map(escapeHtml).join(" / ") : "暂无"}</p>
-    </div>
-    <div class="stage-card">
-      <h3>CT 三视图与 STL</h3>
-      <div class="mini-mpr">
-        <div><span>Axial</span></div><div><span>Coronal</span></div><div><span>Sagittal</span></div>
+      <div class="seg-viewer-foot">
+        <span>拖拽旋转</span>
+        <span>滚轮缩放</span>
+        <span>右侧切换 pretrain / predict / 器官层</span>
       </div>
-      <p class="note">这里保留原分割模块的 CT 三视图/mesh 质控入口；当前总控根据病人目录文件状态展示，运行后刷新即可看到输出。</p>
     </div>
   </div>`;
+}
+
+function bestSegmentationFile(files) {
+  const candidates = [
+    ["predict_smooth.stl", "Predict smooth"],
+    ["predict.stl", "Predict"],
+    ["pretrain.stl", "Pretrain"],
+    ["vessel.stl", "Vessel"],
+  ];
+  const found = candidates.find(([name]) => files[name]?.exists);
+  return found ? { file: found[0], label: found[1] } : null;
 }
 
 function featuresStage(patient) {
@@ -558,7 +566,7 @@ function pvpStage(patient) {
 
 function renderRightPanel() {
   const patient = state.currentPatient;
-  if (["segmentation", "features"].includes(state.stage)) {
+  if (state.stage === "features") {
     $("rightPanel").innerHTML = "";
     return;
   }
@@ -576,22 +584,115 @@ function renderRightPanel() {
   host.querySelectorAll("[data-file]").forEach((button) => {
     button.addEventListener("click", () => openPatientFile(button.dataset.file));
   });
+  host.querySelectorAll("[data-seg-layer]").forEach((input) => {
+    input.addEventListener("change", () => {
+      state.segmentationViewer?.setVisible(input.dataset.segLayer, input.checked);
+    });
+  });
+  host.querySelectorAll("[data-seg-opacity]").forEach((input) => {
+    input.addEventListener("input", () => {
+      state.segmentationViewer?.setOpacity(Number(input.value) / 100);
+    });
+  });
 }
 
 function segmentationPanel(patient) {
   const stage = patient.status.stages.segmentation;
+  const files = patient.status.files || {};
+  const layers = segmentationLayers(patient);
   return `<div class="section">
     <h3>CT 分割流水线 <span class="h-line"></span></h3>
     <div class="kv"><span class="k">阶段状态</span><span class="v">${statusLabel(stage.status)}</span></div>
     <div class="kv"><span class="k">病人目录</span><span class="v wrap-value">${escapeHtml(patient.folder)}</span></div>
     <button class="btn-run" data-run-stage="segmentation">运行 CT -> STL</button>
+    <button class="btn-ghost" data-file="pretrain.stl">打开 pretrain.stl</button>
+    <button class="btn-ghost" data-file="predict.stl">打开 predict.stl</button>
     <button class="btn-ghost" data-file="predict_smooth.stl">打开 predict_smooth.stl</button>
-    <p class="note">复用 VKAN_segementation 的 TotalSegmentator、nnVnet 精修、平滑与质检流程。</p>
+    <p class="note">优先显示 <code>predict_smooth.stl</code>，没有时回退到 <code>predict.stl</code>、<code>pretrain.stl</code> 或 <code>vessel.stl</code>。</p>
+  </div>
+  <div class="section">
+    <h3>模型 / 器官图层 <span class="h-line"></span></h3>
+    <div class="layer-list">
+      ${layers.map((layer) => layerControl(layer)).join("")}
+    </div>
+    <label class="opacity-control">
+      <span>器官透明度</span>
+      <input data-seg-opacity type="range" min="8" max="55" value="24" />
+    </label>
   </div>
   <div class="section">
     <h3>关键文件 <span class="h-line"></span></h3>
-    <div class="file-list compact">${Object.entries(stage.outputs || {}).map(([name, info]) => fileRow(name, info)).join("")}</div>
+    <div class="file-list compact">
+      ${fileRow("DICOM 目录", files["dcm"] || dirInfo(patient, "dcm"))}
+      ${fileRow("orig.nii.gz", files["orig.nii.gz"])}
+      ${Object.entries(stage.outputs || {}).map(([name, info]) => fileRow(name, info)).join("")}
+    </div>
   </div>`;
+}
+
+function layerControl(layer) {
+  const disabled = layer.exists ? "" : "disabled";
+  const checked = layer.visible && layer.exists ? "checked" : "";
+  const status = layer.exists ? "已找到" : "缺失";
+  return `<label class="layer-row ${layer.exists ? "" : "missing"}">
+    <input data-seg-layer="${escapeAttr(layer.id)}" type="checkbox" ${checked} ${disabled} />
+    <span class="layer-swatch" style="background:${escapeAttr(layer.color)}"></span>
+    <span class="layer-name">${escapeHtml(layer.label)}</span>
+    <b>${status}</b>
+  </label>`;
+}
+
+function segmentationLayers(patient) {
+  const files = patient.status.files || {};
+  const organs = patient.status.organs || {};
+  const layers = [
+    { id: "pretrain", label: "Pretrain", file: "pretrain.stl", color: "#38bdf8", opacity: .76, visible: Boolean(files["pretrain.stl"]?.exists), exists: Boolean(files["pretrain.stl"]?.exists), kind: "vessel" },
+    { id: "predict", label: files["predict_smooth.stl"]?.exists ? "Predict smooth" : "Predict", file: files["predict_smooth.stl"]?.exists ? "predict_smooth.stl" : "predict.stl", color: "#10a66a", opacity: .95, visible: Boolean(files["predict_smooth.stl"]?.exists || files["predict.stl"]?.exists), exists: Boolean(files["predict_smooth.stl"]?.exists || files["predict.stl"]?.exists), kind: "vessel" },
+    { id: "vessel", label: "Vessel label", file: "vessel.stl", color: "#047857", opacity: .58, visible: !files["predict_smooth.stl"]?.exists && !files["predict.stl"]?.exists && Boolean(files["vessel.stl"]?.exists), exists: Boolean(files["vessel.stl"]?.exists), kind: "vessel" },
+  ];
+  const organColors = {
+    liver: "#a7c957",
+    spleen: "#a78bfa",
+    kidney: "#93c5fd",
+    kidney_left: "#93c5fd",
+    kidney_right: "#60a5fa",
+    aorta: "#ef4444",
+    inferior_vena_cava: "#60a5fa",
+    bone: "#cbd5e1",
+    bone_all: "#cbd5e1",
+    portal_vein: "#16a34a",
+  };
+  Object.entries(organs).forEach(([name, info]) => {
+    const key = String(name).toLowerCase();
+    layers.push({
+      id: `organ-${key}`,
+      label: organLabel(key),
+      file: `segmentation/${name}.stl`,
+      color: organColors[key] || "#9ca3af",
+      opacity: key === "portal_vein" ? .72 : .22,
+      visible: ["liver", "spleen", "kidney", "kidney_left", "kidney_right", "aorta", "inferior_vena_cava", "portal_vein"].includes(key),
+      exists: Boolean(info?.exists),
+      kind: "organ",
+    });
+  });
+  return layers;
+}
+
+function organLabel(key) {
+  return {
+    liver: "Liver",
+    liver_left: "Liver L",
+    liver_right: "Liver R",
+    spleen: "Spleen",
+    kidney: "Kidney",
+    kidney_left: "Kidney L",
+    kidney_right: "Kidney R",
+    aorta: "Aorta",
+    inferior_vena_cava: "IVC",
+    bone: "Bone",
+    bone_all: "Bone all",
+    portal_vein: "Portal vein",
+  }[key] || key;
 }
 
 function featuresPanel(patient) {
@@ -831,6 +932,262 @@ function pvpSegmentTable(segments) {
       <td>${formatNum(seg.max_curvature, 3)}</td>
     </tr>`).join("")}</tbody>
   </table>`;
+}
+
+async function initSegmentationViewer(patient) {
+  const canvas = $("segStlCanvas");
+  const empty = $("segViewerEmpty");
+  if (!canvas || !patient) return;
+  const token = ++state.viewerToken;
+  const ctx = canvas.getContext("2d");
+  const rawLayers = segmentationLayers(patient).filter((layer) => layer.exists);
+  const model = {
+    layers: [],
+    center: [0, 0, 0],
+    radius: 1,
+    rx: -0.28,
+    ry: 0.62,
+    zoom: 1,
+    dragging: false,
+    last: [0, 0],
+    raf: 0,
+    organOpacity: .24,
+  };
+
+  state.segmentationViewer = {
+    setVisible(id, visible) {
+      const layer = model.layers.find((item) => item.id === id);
+      if (layer) {
+        layer.visible = visible;
+        drawSegmentationViewer(canvas, ctx, model);
+      }
+    },
+    setOpacity(value) {
+      model.organOpacity = Number.isFinite(value) ? value : .24;
+      drawSegmentationViewer(canvas, ctx, model);
+    },
+  };
+
+  bindSegmentationCanvas(canvas, ctx, model);
+  resizeSegmentationCanvas(canvas, ctx, model);
+
+  if (!rawLayers.length) {
+    empty.textContent = "未找到 pretrain / predict / 器官 STL，请确认病人目录。";
+    empty.hidden = false;
+    drawSegmentationViewer(canvas, ctx, model);
+    return;
+  }
+
+  empty.hidden = false;
+  empty.textContent = "正在加载 STL 模型...";
+  try {
+    const loaded = [];
+    for (const layer of rawLayers) {
+      if (token !== state.viewerToken) return;
+      const response = await fetch(patientFileUrl(layer.file));
+      if (!response.ok) continue;
+      const triangles = parseStl(await response.arrayBuffer(), layer.kind === "organ" ? 12000 : 22000);
+      if (triangles.length) loaded.push({ ...layer, triangles });
+    }
+    if (token !== state.viewerToken) return;
+    model.layers = loaded;
+    fitSegmentationModel(model);
+    empty.hidden = loaded.length > 0;
+    if (!loaded.length) empty.textContent = "STL 文件存在，但未能解析出三角面。";
+    drawSegmentationViewer(canvas, ctx, model);
+    startSegmentationSpin(canvas, ctx, model, token);
+  } catch (error) {
+    if (token !== state.viewerToken) return;
+    empty.textContent = `STL 加载失败：${error.message}`;
+    empty.hidden = false;
+  }
+}
+
+function bindSegmentationCanvas(canvas, ctx, model) {
+  if (canvas.dataset.bound === "1") return;
+  canvas.dataset.bound = "1";
+  window.addEventListener("resize", () => {
+    if (canvas.isConnected) resizeSegmentationCanvas(canvas, ctx, model);
+  });
+  canvas.addEventListener("pointerdown", (event) => {
+    model.dragging = true;
+    model.last = [event.clientX, event.clientY];
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!model.dragging) return;
+    const dx = event.clientX - model.last[0];
+    const dy = event.clientY - model.last[1];
+    model.last = [event.clientX, event.clientY];
+    model.ry += dx * 0.01;
+    model.rx += dy * 0.01;
+    drawSegmentationViewer(canvas, ctx, model);
+  });
+  canvas.addEventListener("pointerup", () => {
+    model.dragging = false;
+  });
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    model.zoom = clamp(model.zoom * (event.deltaY > 0 ? .92 : 1.08), .35, 4);
+    drawSegmentationViewer(canvas, ctx, model);
+  }, { passive: false });
+}
+
+function resizeSegmentationCanvas(canvas, ctx, model) {
+  const rect = canvas.getBoundingClientRect();
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+  canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  drawSegmentationViewer(canvas, ctx, model);
+}
+
+function startSegmentationSpin(canvas, ctx, model, token) {
+  const tick = () => {
+    if (token !== state.viewerToken || !canvas.isConnected) return;
+    if (!model.dragging) {
+      model.ry += 0.0022;
+      drawSegmentationViewer(canvas, ctx, model);
+    }
+    model.raf = requestAnimationFrame(tick);
+  };
+  cancelAnimationFrame(model.raf);
+  model.raf = requestAnimationFrame(tick);
+}
+
+function fitSegmentationModel(model) {
+  const bounds = [[Infinity, Infinity, Infinity], [-Infinity, -Infinity, -Infinity]];
+  model.layers.forEach((layer) => {
+    layer.triangles.forEach((tri) => tri.forEach((p) => {
+      for (let i = 0; i < 3; i += 1) {
+        bounds[0][i] = Math.min(bounds[0][i], p[i]);
+        bounds[1][i] = Math.max(bounds[1][i], p[i]);
+      }
+    }));
+  });
+  if (!Number.isFinite(bounds[0][0])) return;
+  model.center = [0, 1, 2].map((i) => (bounds[0][i] + bounds[1][i]) / 2);
+  model.radius = Math.max(...[0, 1, 2].map((i) => bounds[1][i] - bounds[0][i])) || 1;
+}
+
+function drawSegmentationViewer(canvas, ctx, model) {
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width || 1;
+  const h = rect.height || 1;
+  ctx.clearRect(0, 0, w, h);
+  drawViewerGrid(ctx, w, h);
+  if (!model.layers.length) return;
+  const faces = [];
+  model.layers.forEach((layer) => {
+    if (!layer.visible) return;
+    const opacity = layer.kind === "organ" ? model.organOpacity : layer.opacity;
+    layer.triangles.forEach((tri) => {
+      const projected = tri.map((p) => projectPoint(p, model, w, h));
+      const z = (projected[0].z + projected[1].z + projected[2].z) / 3;
+      faces.push({ layer, projected, z, opacity });
+    });
+  });
+  faces.sort((a, b) => a.z - b.z);
+  faces.forEach((face) => {
+    const [a, b, c] = face.projected;
+    const shade = clamp(.62 + face.z * .0009, .38, 1);
+    ctx.globalAlpha = face.opacity;
+    ctx.fillStyle = tintColor(face.layer.color, shade);
+    ctx.strokeStyle = face.layer.kind === "vessel" ? tintColor(face.layer.color, 1.08) : "rgba(80,92,110,.18)";
+    ctx.lineWidth = face.layer.kind === "vessel" ? 0.8 : 0.35;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineTo(c.x, c.y);
+    ctx.closePath();
+    ctx.fill();
+    if (face.layer.kind === "vessel") ctx.stroke();
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawViewerGrid(ctx, w, h) {
+  ctx.fillStyle = "#fbfdff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = "#e5ebf3";
+  ctx.lineWidth = 1;
+  const step = Math.max(72, Math.min(w, h) / 7);
+  for (let x = w / 2 % step; x < w; x += step) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  }
+  for (let y = h / 2 % step; y < h; y += step) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = "#2f3746";
+  ctx.beginPath();
+  ctx.moveTo(w / 2, 0);
+  ctx.lineTo(w / 2, h);
+  ctx.moveTo(0, h / 2);
+  ctx.lineTo(w, h / 2);
+  ctx.stroke();
+}
+
+function projectPoint(point, model, w, h) {
+  const x0 = point[0] - model.center[0];
+  const y0 = point[1] - model.center[1];
+  const z0 = point[2] - model.center[2];
+  const cy = Math.cos(model.ry);
+  const sy = Math.sin(model.ry);
+  const cx = Math.cos(model.rx);
+  const sx = Math.sin(model.rx);
+  const x1 = x0 * cy + z0 * sy;
+  const z1 = -x0 * sy + z0 * cy;
+  const y1 = y0 * cx - z1 * sx;
+  const z2 = y0 * sx + z1 * cx;
+  const scale = Math.min(w, h) * .72 * model.zoom / model.radius;
+  return { x: w / 2 + x1 * scale, y: h / 2 - y1 * scale, z: z2 };
+}
+
+function parseStl(buffer, maxTriangles) {
+  const view = new DataView(buffer);
+  const binaryCount = buffer.byteLength >= 84 ? view.getUint32(80, true) : 0;
+  const expected = 84 + binaryCount * 50;
+  if (binaryCount > 0 && expected <= buffer.byteLength) {
+    const stride = Math.max(1, Math.ceil(binaryCount / maxTriangles));
+    const triangles = [];
+    for (let i = 0; i < binaryCount; i += stride) {
+      const offset = 84 + i * 50 + 12;
+      triangles.push([
+        [view.getFloat32(offset, true), view.getFloat32(offset + 4, true), view.getFloat32(offset + 8, true)],
+        [view.getFloat32(offset + 12, true), view.getFloat32(offset + 16, true), view.getFloat32(offset + 20, true)],
+        [view.getFloat32(offset + 24, true), view.getFloat32(offset + 28, true), view.getFloat32(offset + 32, true)],
+      ]);
+    }
+    return triangles;
+  }
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(buffer);
+  const vertices = [...text.matchAll(/vertex\s+([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s+([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s+([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/gi)]
+    .map((match) => [Number(match[1]), Number(match[2]), Number(match[3])]);
+  const total = Math.floor(vertices.length / 3);
+  const stride = Math.max(1, Math.ceil(total / maxTriangles));
+  const triangles = [];
+  for (let i = 0; i < total; i += stride) {
+    triangles.push([vertices[i * 3], vertices[i * 3 + 1], vertices[i * 3 + 2]]);
+  }
+  return triangles.filter((tri) => tri.every((p) => p && p.every(Number.isFinite)));
+}
+
+function tintColor(hex, factor) {
+  const value = hex.replace("#", "");
+  const r = clamp(parseInt(value.slice(0, 2), 16) * factor, 0, 255);
+  const g = clamp(parseInt(value.slice(2, 4), 16) * factor, 0, 255);
+  const b = clamp(parseInt(value.slice(4, 6), 16) * factor, 0, 255);
+  return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function renderFoot() {
