@@ -376,17 +376,11 @@ function segmentationStage(patient) {
       <div class="seg-viewer" id="segViewer">
         <canvas id="segStlCanvas"></canvas>
         <div class="seg-viewer-empty" id="segViewerEmpty">正在加载 STL 模型...</div>
-        <div class="seg-viewer-legend">
-          <b>图层</b>
-          <span><i style="background:#10a66a"></i>Predict</span>
-          <span><i style="background:#38bdf8"></i>Pretrain</span>
-          <span><i style="background:#9ca3af"></i>器官</span>
-        </div>
       </div>
       <div class="seg-viewer-foot">
         <span>拖拽旋转</span>
         <span>滚轮缩放</span>
-        <span>右侧切换 pretrain / predict / 器官层</span>
+        <span>右侧切换模型层与器官层</span>
       </div>
     </div>
   </div>`;
@@ -584,6 +578,9 @@ function renderRightPanel() {
   host.querySelectorAll("[data-file]").forEach((button) => {
     button.addEventListener("click", () => openPatientFile(button.dataset.file));
   });
+  host.querySelectorAll("[data-refresh-patient]").forEach((button) => {
+    button.addEventListener("click", () => refreshPatients(patient?.id));
+  });
   host.querySelectorAll("[data-seg-layer]").forEach((input) => {
     input.addEventListener("change", () => {
       state.segmentationViewer?.setVisible(input.dataset.segLayer, input.checked);
@@ -594,31 +591,72 @@ function renderRightPanel() {
       state.segmentationViewer?.setOpacity(Number(input.value) / 100);
     });
   });
+  host.querySelectorAll("[data-seg-param='display_model']").forEach((select) => {
+    select.addEventListener("change", () => applySegmentationDisplayMode(select.value));
+  });
 }
 
 function segmentationPanel(patient) {
   const stage = patient.status.stages.segmentation;
   const files = patient.status.files || {};
   const layers = segmentationLayers(patient);
+  const forceId = `force-${patient.id.replace(/[^a-z0-9_-]/gi, "")}`;
   return `<div class="section">
     <h3>CT 分割流水线 <span class="h-line"></span></h3>
-    <div class="kv"><span class="k">阶段状态</span><span class="v">${statusLabel(stage.status)}</span></div>
-    <div class="kv"><span class="k">病人目录</span><span class="v wrap-value">${escapeHtml(patient.folder)}</span></div>
-    <button class="btn-run" data-run-stage="segmentation">运行 CT -> STL</button>
-    <button class="btn-ghost" data-file="pretrain.stl">打开 pretrain.stl</button>
-    <button class="btn-ghost" data-file="predict.stl">打开 predict.stl</button>
-    <button class="btn-ghost" data-file="predict_smooth.stl">打开 predict_smooth.stl</button>
-    <p class="note">优先显示 <code>predict_smooth.stl</code>，没有时回退到 <code>predict.stl</code>、<code>pretrain.stl</code> 或 <code>vessel.stl</code>。</p>
+    <div class="seg-action-row">
+      <button class="btn-run" data-run-stage="segmentation">运行全流程</button>
+      <button class="btn-ghost compact" data-refresh-patient>刷新</button>
+    </div>
+    <button class="btn-ghost" type="button">参数</button>
+    <label class="check-row">
+      <input id="${escapeAttr(forceId)}" type="checkbox" data-run-force />
+      <span>强制重算已有结果</span>
+    </label>
+    <div class="pipeline-steps">
+      ${pipelineStep(1, "TotalSegmentator 粗分割", files["orig.nii.gz"]?.exists || files["dcm"]?.exists, files["pretrain.stl"]?.exists)}
+      ${pipelineStep(2, "nnVnet 门静脉精修", files["pretrain.stl"]?.exists, files["predict.stl"]?.exists)}
+      ${pipelineStep(3, "平滑 / 填洞 / STL 质控", files["predict.stl"]?.exists, files["predict_smooth.stl"]?.exists)}
+    </div>
+  </div>
+  <div class="section">
+    <h3>参数调节 <span class="h-line"></span></h3>
+    <label class="param-row">
+      <span>运行模式</span>
+      <select data-seg-param="mode">
+        <option value="auto">自动选择已有输入</option>
+        <option value="pretrain">仅生成 pretrain</option>
+        <option value="predict">从 pretrain 精修</option>
+        <option value="smooth">仅平滑 / 填洞</option>
+      </select>
+    </label>
+    <label class="param-row">
+      <span>平滑迭代</span>
+      <input data-seg-param="smooth_iterations" type="number" min="0" max="30" value="8" />
+    </label>
+    <label class="param-row">
+      <span>显示模型</span>
+      <select data-seg-param="display_model">
+        <option value="predict_smooth">优先 Predict smooth</option>
+        <option value="predict">Predict</option>
+        <option value="pretrain">Pretrain</option>
+        <option value="vessel">Vessel label</option>
+      </select>
+    </label>
   </div>
   <div class="section">
     <h3>模型 / 器官图层 <span class="h-line"></span></h3>
-    <div class="layer-list">
-      ${layers.map((layer) => layerControl(layer)).join("")}
-    </div>
     <label class="opacity-control">
-      <span>器官透明度</span>
+      <span>透明度 · 器官层</span>
       <input data-seg-opacity type="range" min="8" max="55" value="24" />
     </label>
+    <h4 class="layer-group-title">模型层</h4>
+    <div class="layer-list">
+      ${layers.filter((layer) => layer.kind === "vessel").map((layer) => layerControl(layer)).join("")}
+    </div>
+    <h4 class="layer-group-title">器官层</h4>
+    <div class="layer-list">
+      ${layers.filter((layer) => layer.kind === "organ").map((layer) => layerControl(layer)).join("")}
+    </div>
   </div>
   <div class="section">
     <h3>关键文件 <span class="h-line"></span></h3>
@@ -627,6 +665,16 @@ function segmentationPanel(patient) {
       ${fileRow("orig.nii.gz", files["orig.nii.gz"])}
       ${Object.entries(stage.outputs || {}).map(([name, info]) => fileRow(name, info)).join("")}
     </div>
+  </div>`;
+}
+
+function pipelineStep(index, label, ready, done) {
+  const stateClass = done ? "done" : ready ? "ready" : "missing";
+  const text = done ? "完成" : ready ? "可运行" : "等待输入";
+  return `<div class="pipeline-step ${stateClass}">
+    <span>${index}</span>
+    <b>${escapeHtml(label)}</b>
+    <em>${text}</em>
   </div>`;
 }
 
@@ -1204,6 +1252,7 @@ function renderFoot() {
 async function runStage(stageKey) {
   if (!state.session || !state.currentPatient) return;
   const root = state.session.root || $("rootFolder").value.trim();
+  const segmentationOptions = stageKey === "segmentation" ? collectSegmentationOptions() : {};
   const runButtons = document.querySelectorAll("#runStageBtn, [data-run-stage]");
   runButtons.forEach((button) => button.disabled = true);
   try {
@@ -1216,6 +1265,7 @@ async function runStage(stageKey) {
         patient_id: state.currentPatient.id,
         model_dir: $("modelDir").value.trim() || undefined,
         device: "auto",
+        ...segmentationOptions,
       },
     });
     if (data.session) {
@@ -1231,6 +1281,35 @@ async function runStage(stageKey) {
   } finally {
     runButtons.forEach((button) => button.disabled = false);
   }
+}
+
+function collectSegmentationOptions() {
+  const mode = document.querySelector("[data-seg-param='mode']")?.value || "auto";
+  const smoothIterations = Number(document.querySelector("[data-seg-param='smooth_iterations']")?.value || 8);
+  const force = Boolean(document.querySelector("[data-run-force]")?.checked);
+  return {
+    force,
+    segmentation: {
+      mode,
+      smooth_iterations: Number.isFinite(smoothIterations) ? smoothIterations : 8,
+    },
+  };
+}
+
+function applySegmentationDisplayMode(mode) {
+  const map = {
+    predict_smooth: "predict",
+    predict: "predict",
+    pretrain: "pretrain",
+    vessel: "vessel",
+  };
+  const target = map[mode] || "predict";
+  document.querySelectorAll("[data-seg-layer]").forEach((input) => {
+    if (!["pretrain", "predict", "vessel"].includes(input.dataset.segLayer)) return;
+    const shouldShow = input.dataset.segLayer === target;
+    input.checked = shouldShow;
+    state.segmentationViewer?.setVisible(input.dataset.segLayer, shouldShow);
+  });
 }
 
 async function pollJob(jobId) {

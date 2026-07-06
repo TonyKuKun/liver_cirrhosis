@@ -676,38 +676,50 @@ def _run_command(cmd: list[str], cwd: Path, job: dict):
 
 
 def _run_segmentation(patient_dir: Path, session: dict, payload: dict, job: dict):
+    seg_params = payload.get("segmentation") if isinstance(payload.get("segmentation"), dict) else {}
+    mode = str(seg_params.get("mode") or "auto").lower()
+    if mode not in {"auto", "pretrain", "predict", "smooth"}:
+        mode = "auto"
+    try:
+        smooth_iterations = int(seg_params.get("smooth_iterations") or 8)
+    except (TypeError, ValueError):
+        smooth_iterations = 8
+    smooth_iterations = max(0, min(30, smooth_iterations))
     checkpoint = Path(str(payload.get("checkpoint") or session.get("vkan_checkpoint") or ""))
-    if not checkpoint.exists():
+    if mode in {"auto", "predict"} and not checkpoint.exists():
         raise FileNotFoundError(f"VKAN checkpoint not found: {checkpoint}")
     py = sys.executable
-    _run_command([
-        py, str(VKAN_ROOT / "totalseg.py"), "--data_root", str(patient_dir),
-        "--patient", patient_dir.name, "--device", str(payload.get("device") or "gpu"),
-        "--structures", "bone_all", "spleen", "liver", "kidney_left", "kidney_right",
-        "inferior_vena_cava", "aorta", "portal_vein", "--resume", "--fast",
-    ], VKAN_ROOT, job)
-    script = (
-        "from pathlib import Path; from types import SimpleNamespace; "
-        "from pretrain.preprocess import pretrain_patient; "
-        f"p=Path(r'''{patient_dir}'''); "
-        "case=SimpleNamespace(name=p.name,path=p,dcm_dir=p/'dcm',label_stl=p/'vessel.stl',"
-        "pretrain_stl=p/'pretrain.stl',predict_stl=p/'predict.stl',is_post_tips='#' in p.name); "
-        "print(pretrain_patient(case, force=False))"
-    )
-    _run_command([py, "-c", script], VKAN_ROOT, job)
-    _run_command([
-        py, str(VKAN_ROOT / "refinement" / "predict.py"), "--data_root", str(patient_dir),
-        "--patient", patient_dir.name, "--checkpoint", str(checkpoint), "--threshold", "0.5",
-    ], VKAN_ROOT, job)
-    smooth = (
-        "from pathlib import Path; from types import SimpleNamespace; "
-        "from postprocess.check_and_smooth import check_and_smooth_case; "
-        f"p=Path(r'''{patient_dir}'''); "
-        "case=SimpleNamespace(name=p.name,path=p,dcm_dir=p/'dcm',label_stl=p/'vessel.stl',"
-        "pretrain_stl=p/'pretrain.stl',predict_stl=p/'predict.stl',is_post_tips='#' in p.name); "
-        "print(check_and_smooth_case(case, iterations=8, force=True))"
-    )
-    _run_command([py, "-c", smooth], VKAN_ROOT, job)
+    if mode in {"auto", "pretrain"}:
+        _run_command([
+            py, str(VKAN_ROOT / "totalseg.py"), "--data_root", str(patient_dir),
+            "--patient", patient_dir.name, "--device", str(payload.get("device") or "gpu"),
+            "--structures", "bone_all", "spleen", "liver", "kidney_left", "kidney_right",
+            "inferior_vena_cava", "aorta", "portal_vein", "--resume", "--fast",
+        ], VKAN_ROOT, job)
+        script = (
+            "from pathlib import Path; from types import SimpleNamespace; "
+            "from pretrain.preprocess import pretrain_patient; "
+            f"p=Path(r'''{patient_dir}'''); "
+            "case=SimpleNamespace(name=p.name,path=p,dcm_dir=p/'dcm',label_stl=p/'vessel.stl',"
+            "pretrain_stl=p/'pretrain.stl',predict_stl=p/'predict.stl',is_post_tips='#' in p.name); "
+            f"print(pretrain_patient(case, force={bool(payload.get('force'))}))"
+        )
+        _run_command([py, "-c", script], VKAN_ROOT, job)
+    if mode in {"auto", "predict"}:
+        _run_command([
+            py, str(VKAN_ROOT / "refinement" / "predict.py"), "--data_root", str(patient_dir),
+            "--patient", patient_dir.name, "--checkpoint", str(checkpoint), "--threshold", "0.5",
+        ], VKAN_ROOT, job)
+    if mode in {"auto", "predict", "smooth"}:
+        smooth = (
+            "from pathlib import Path; from types import SimpleNamespace; "
+            "from postprocess.check_and_smooth import check_and_smooth_case; "
+            f"p=Path(r'''{patient_dir}'''); "
+            "case=SimpleNamespace(name=p.name,path=p,dcm_dir=p/'dcm',label_stl=p/'vessel.stl',"
+            "pretrain_stl=p/'pretrain.stl',predict_stl=p/'predict.stl',is_post_tips='#' in p.name); "
+            f"print(check_and_smooth_case(case, iterations={smooth_iterations}, force=True))"
+        )
+        _run_command([py, "-c", smooth], VKAN_ROOT, job)
 
 
 def _feature_stl(patient_dir: Path) -> Path:
