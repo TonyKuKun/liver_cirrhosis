@@ -332,7 +332,7 @@ def _inside(root: Path, path: Path) -> bool:
         return False
 
 
-def _resolve_patient_file(patient: Path, rel: str) -> Path | None:
+def _resolve_patient_file(patient: Path, rel: str, recursive: bool = True) -> Path | None:
     patient = patient.resolve()
     normalized = str(rel or "").replace("\\", "/").strip("/")
     if not normalized:
@@ -347,7 +347,7 @@ def _resolve_patient_file(patient: Path, rel: str) -> Path | None:
         if _inside(patient, candidate) and candidate.exists():
             return candidate
 
-    if "/" in normalized:
+    if "/" in normalized or not recursive:
         return None
     target = Path(normalized).name.lower()
     matches = [
@@ -384,10 +384,10 @@ def _looks_like_patient(path: Path) -> bool:
     return any([
         (path / "dcm").is_dir(),
         (path / "orig.nii.gz").exists(),
-        _resolve_patient_file(path, "pretrain.stl") is not None,
-        _resolve_patient_file(path, "predict.stl") is not None,
-        _resolve_patient_file(path, "predict_smooth.stl") is not None,
-        _resolve_patient_file(path, "vessel.stl") is not None,
+        _resolve_patient_file(path, "pretrain.stl", recursive=False) is not None,
+        _resolve_patient_file(path, "predict.stl", recursive=False) is not None,
+        _resolve_patient_file(path, "predict_smooth.stl", recursive=False) is not None,
+        _resolve_patient_file(path, "vessel.stl", recursive=False) is not None,
         (path / "unified_features.json").exists(),
     ])
 
