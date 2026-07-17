@@ -26,6 +26,9 @@ const state = {
   legacy: {},
   pollTimer: null,
   segmentationViewer: null,
+  segmentationParamsOpen: false,
+  segmentationOpacityTarget: "",
+  segmentationLayerOpacity: {},
   viewerToken: 0,
   centerlineLayers: Object.fromEntries(CENTERLINE_LAYER_CONTROLS.map(([key, , checked]) => [key, checked])),
 };
@@ -91,7 +94,9 @@ async function loadSession() {
     $("sessionBadge").textContent = state.session.id.split("-").slice(0, 2).join("-");
     setLoadNote("");
     await refreshPatients();
-    selectPatient(state.patients[0]?.id);
+    const firstPatientId = state.patients[0]?.id;
+    selectPatient(firstPatientId);
+    if (firstPatientId) await refreshPatients(firstPatientId);
   } catch (error) {
     setLoadNote(error.message, true);
   } finally {
@@ -362,25 +367,15 @@ function segmentationStage(patient) {
   const primary = bestSegmentationFile(files);
   const layerCount = segmentationLayers(patient).filter((layer) => layer.exists).length;
   return `<div class="seg-workspace">
-    <div class="seg-viewer-card">
-      <div class="seg-viewer-head">
-        <div>
-          <h3>CT 分割 - STL 三维质控</h3>
-          <p>${escapeHtml(patient.id)} · ${primary ? `当前显示 ${escapeHtml(primary.label)}` : "未找到 STL"}</p>
-        </div>
-        <div class="seg-viewer-stats">
-          <span>${layerCount} 个 STL 图层</span>
-          <span>${statusLabel(patient.status.stages.segmentation.status)}</span>
-        </div>
-      </div>
+    <div class="seg-viewer-card compact">
       <div class="seg-viewer" id="segViewer">
         <canvas id="segStlCanvas"></canvas>
+        <div class="seg-viewer-hud">
+          <span>${escapeHtml(patient.id)}</span>
+          <b>${primary ? escapeHtml(primary.label) : "未找到 STL"}</b>
+          <em>${layerCount} 个 STL 图层 · ${statusLabel(patient.status.stages.segmentation.status)}</em>
+        </div>
         <div class="seg-viewer-empty" id="segViewerEmpty">正在加载 STL 模型...</div>
-      </div>
-      <div class="seg-viewer-foot">
-        <span>拖拽旋转</span>
-        <span>滚轮缩放</span>
-        <span>右侧切换模型层与器官层</span>
       </div>
     </div>
   </div>`;
@@ -581,18 +576,33 @@ function renderRightPanel() {
   host.querySelectorAll("[data-refresh-patient]").forEach((button) => {
     button.addEventListener("click", () => refreshPatients(patient?.id));
   });
+  host.querySelectorAll("[data-seg-params-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.segmentationParamsOpen = !state.segmentationParamsOpen;
+      renderRightPanel();
+    });
+  });
   host.querySelectorAll("[data-seg-layer]").forEach((input) => {
+    input.addEventListener("click", (event) => event.stopPropagation());
     input.addEventListener("change", () => {
       state.segmentationViewer?.setVisible(input.dataset.segLayer, input.checked);
     });
   });
-  host.querySelectorAll("[data-seg-opacity]").forEach((input) => {
-    input.addEventListener("input", () => {
-      state.segmentationViewer?.setOpacity(Number(input.value) / 100);
+  host.querySelectorAll("[data-opacity-layer]").forEach((row) => {
+    row.addEventListener("click", () => {
+      if (row.classList.contains("missing")) return;
+      state.segmentationOpacityTarget = row.dataset.opacityLayer;
+      renderRightPanel();
     });
   });
-  host.querySelectorAll("[data-seg-param='display_model']").forEach((select) => {
-    select.addEventListener("change", () => applySegmentationDisplayMode(select.value));
+  host.querySelectorAll("[data-seg-opacity]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const layerId = state.segmentationOpacityTarget;
+      const opacity = Number(input.value) / 100;
+      if (!layerId || !Number.isFinite(opacity)) return;
+      state.segmentationLayerOpacity[layerId] = opacity;
+      state.segmentationViewer?.setOpacity(layerId, opacity);
+    });
   });
 }
 
@@ -600,14 +610,23 @@ function segmentationPanel(patient) {
   const stage = patient.status.stages.segmentation;
   const files = patient.status.files || {};
   const layers = segmentationLayers(patient);
+  const opacityLayers = layers.filter((layer) => layer.kind === "organ" && layer.exists);
+  const opacityTarget = state.segmentationOpacityTarget && opacityLayers.some((layer) => layer.id === state.segmentationOpacityTarget)
+    ? state.segmentationOpacityTarget
+    : opacityLayers[0]?.id || "";
+  state.segmentationOpacityTarget = opacityTarget;
+  const opacityLayer = opacityLayers.find((layer) => layer.id === opacityTarget);
+  const opacityValue = Math.round((state.segmentationLayerOpacity[opacityTarget] ?? opacityLayer?.opacity ?? .24) * 100);
   const forceId = `force-${patient.id.replace(/[^a-z0-9_-]/gi, "")}`;
+  const modelPath = state.session?.vkan_checkpoint || "未配置";
+  const paramsHidden = state.segmentationParamsOpen ? "" : "hidden";
+  const paramsToggleLabel = state.segmentationParamsOpen ? "收起参数" : "参数";
   return `<div class="section">
     <h3>CT 分割流水线 <span class="h-line"></span></h3>
     <div class="seg-action-row">
       <button class="btn-run" data-run-stage="segmentation">运行全流程</button>
       <button class="btn-ghost compact" data-refresh-patient>刷新</button>
     </div>
-    <button class="btn-ghost" type="button">参数</button>
     <label class="check-row">
       <input id="${escapeAttr(forceId)}" type="checkbox" data-run-force />
       <span>强制重算已有结果</span>
@@ -617,38 +636,35 @@ function segmentationPanel(patient) {
       ${pipelineStep(2, "nnVnet 门静脉精修", files["pretrain.stl"]?.exists, files["predict.stl"]?.exists)}
       ${pipelineStep(3, "平滑 / 填洞 / STL 质控", files["predict.stl"]?.exists, files["predict_smooth.stl"]?.exists)}
     </div>
-  </div>
-  <div class="section">
-    <h3>参数调节 <span class="h-line"></span></h3>
-    <label class="param-row">
-      <span>运行模式</span>
-      <select data-seg-param="mode">
-        <option value="auto">自动选择已有输入</option>
-        <option value="pretrain">仅生成 pretrain</option>
-        <option value="predict">从 pretrain 精修</option>
-        <option value="smooth">仅平滑 / 填洞</option>
-      </select>
-    </label>
-    <label class="param-row">
-      <span>平滑迭代</span>
-      <input data-seg-param="smooth_iterations" type="number" min="0" max="30" value="8" />
-    </label>
-    <label class="param-row">
-      <span>显示模型</span>
-      <select data-seg-param="display_model">
-        <option value="predict_smooth">优先 Predict smooth</option>
-        <option value="predict">Predict</option>
-        <option value="pretrain">Pretrain</option>
-        <option value="vessel">Vessel label</option>
-      </select>
-    </label>
+    <button class="btn-ghost seg-param-toggle ${state.segmentationParamsOpen ? "active" : ""}" type="button" data-seg-params-toggle>${paramsToggleLabel}</button>
+    <div class="seg-params-section" ${paramsHidden}>
+      <label class="param-row">
+        <span>运行模式</span>
+        <select data-seg-param="mode">
+          <option value="auto">自动选择已有输入</option>
+          <option value="pretrain">仅生成 pretrain</option>
+          <option value="predict">从 pretrain 精修</option>
+          <option value="smooth">仅平滑 / 填洞</option>
+        </select>
+      </label>
+      <label class="param-row">
+        <span>平滑迭代</span>
+        <input data-seg-param="smooth_iterations" type="number" min="0" max="30" value="8" />
+      </label>
+      <label class="param-row">
+        <span>模型参数位置</span>
+        <input type="text" readonly value="${escapeAttr(modelPath)}" />
+      </label>
+    </div>
   </div>
   <div class="section">
     <h3>模型 / 器官图层 <span class="h-line"></span></h3>
-    <label class="opacity-control">
-      <span>透明度 · 器官层</span>
-      <input data-seg-opacity type="range" min="8" max="55" value="24" />
-    </label>
+    <div class="opacity-control">
+      <label>
+        <span>透明度 · ${opacityLayer ? escapeHtml(opacityLayer.label) : "未选择"}</span>
+        <input data-seg-opacity type="range" min="5" max="80" value="${opacityValue}" ${opacityTarget ? "" : "disabled"} />
+      </label>
+    </div>
     <h4 class="layer-group-title">模型层</h4>
     <div class="layer-list">
       ${layers.filter((layer) => layer.kind === "vessel").map((layer) => layerControl(layer)).join("")}
@@ -656,14 +672,6 @@ function segmentationPanel(patient) {
     <h4 class="layer-group-title">器官层</h4>
     <div class="layer-list">
       ${layers.filter((layer) => layer.kind === "organ").map((layer) => layerControl(layer)).join("")}
-    </div>
-  </div>
-  <div class="section">
-    <h3>关键文件 <span class="h-line"></span></h3>
-    <div class="file-list compact">
-      ${fileRow("DICOM 目录", files["dcm"] || dirInfo(patient, "dcm"))}
-      ${fileRow("orig.nii.gz", files["orig.nii.gz"])}
-      ${Object.entries(stage.outputs || {}).map(([name, info]) => fileRow(name, info)).join("")}
     </div>
   </div>`;
 }
@@ -682,12 +690,16 @@ function layerControl(layer) {
   const disabled = layer.exists ? "" : "disabled";
   const checked = layer.visible && layer.exists ? "checked" : "";
   const status = layer.exists ? "已找到" : "缺失";
-  return `<label class="layer-row ${layer.exists ? "" : "missing"}">
+  const canTuneOpacity = layer.kind === "organ" && layer.exists;
+  const selected = canTuneOpacity && state.segmentationOpacityTarget === layer.id ? " selected" : "";
+  const selectableClass = canTuneOpacity ? " selectable" : "";
+  const opacityAttr = canTuneOpacity ? ` data-opacity-layer="${escapeAttr(layer.id)}"` : "";
+  return `<div class="layer-row ${layer.exists ? "" : "missing"}${selected}${selectableClass}"${opacityAttr}>
     <input data-seg-layer="${escapeAttr(layer.id)}" type="checkbox" ${checked} ${disabled} />
     <span class="layer-swatch" style="background:${escapeAttr(layer.color)}"></span>
     <span class="layer-name">${escapeHtml(layer.label)}</span>
     <b>${status}</b>
-  </label>`;
+  </div>`;
 }
 
 function segmentationLayers(patient) {
@@ -989,6 +1001,8 @@ async function initSegmentationViewer(patient) {
   const token = ++state.viewerToken;
   const ctx = canvas.getContext("2d");
   const rawLayers = segmentationLayers(patient).filter((layer) => layer.exists);
+  const initialLayers = rawLayers.filter((layer) => layer.visible);
+  const loadingLayers = new Set();
   const model = {
     layers: [],
     center: [0, 0, 0],
@@ -999,7 +1013,7 @@ async function initSegmentationViewer(patient) {
     dragging: false,
     last: [0, 0],
     raf: 0,
-    organOpacity: .24,
+    drawRaf: 0,
   };
 
   state.segmentationViewer = {
@@ -1007,12 +1021,29 @@ async function initSegmentationViewer(patient) {
       const layer = model.layers.find((item) => item.id === id);
       if (layer) {
         layer.visible = visible;
-        drawSegmentationViewer(canvas, ctx, model);
+        scheduleSegmentationDraw(canvas, ctx, model);
+        return;
+      }
+      const layerDef = rawLayers.find((item) => item.id === id);
+      if (visible && layerDef && !loadingLayers.has(id)) {
+        loadingLayers.add(id);
+        empty.hidden = false;
+        empty.textContent = "正在加载所选 STL 图层...";
+        loadSegmentationLayer(layerDef, token).then((loadedLayer) => {
+          if (!loadedLayer || token !== state.viewerToken) return;
+          model.layers.push(layerWithStoredOpacity({ ...loadedLayer, visible: true }));
+          fitSegmentationModel(model);
+          empty.hidden = model.layers.length > 0;
+          scheduleSegmentationDraw(canvas, ctx, model);
+        }).finally(() => loadingLayers.delete(id));
       }
     },
-    setOpacity(value) {
-      model.organOpacity = Number.isFinite(value) ? value : .24;
-      drawSegmentationViewer(canvas, ctx, model);
+    setOpacity(id, value) {
+      const layer = model.layers.find((item) => item.id === id);
+      if (layer && Number.isFinite(value)) {
+        layer.opacity = value;
+        scheduleSegmentationDraw(canvas, ctx, model);
+      }
     },
   };
 
@@ -1022,7 +1053,7 @@ async function initSegmentationViewer(patient) {
   if (!rawLayers.length) {
     empty.textContent = "未找到 pretrain / predict / 器官 STL，请确认病人目录。";
     empty.hidden = false;
-    drawSegmentationViewer(canvas, ctx, model);
+    scheduleSegmentationDraw(canvas, ctx, model);
     return;
   }
 
@@ -1030,25 +1061,38 @@ async function initSegmentationViewer(patient) {
   empty.textContent = "正在加载 STL 模型...";
   try {
     const loaded = [];
-    for (const layer of rawLayers) {
+    for (const layer of initialLayers) {
       if (token !== state.viewerToken) return;
-      const response = await fetch(patientFileUrl(layer.file));
-      if (!response.ok) continue;
-      const triangles = parseStl(await response.arrayBuffer(), layer.kind === "organ" ? 12000 : 22000);
-      if (triangles.length) loaded.push({ ...layer, triangles });
+      const loadedLayer = await loadSegmentationLayer(layer, token);
+      if (loadedLayer) loaded.push(layerWithStoredOpacity(loadedLayer));
     }
     if (token !== state.viewerToken) return;
     model.layers = loaded;
     fitSegmentationModel(model);
     empty.hidden = loaded.length > 0;
     if (!loaded.length) empty.textContent = "STL 文件存在，但未能解析出三角面。";
-    drawSegmentationViewer(canvas, ctx, model);
-    startSegmentationSpin(canvas, ctx, model, token);
+    scheduleSegmentationDraw(canvas, ctx, model);
   } catch (error) {
     if (token !== state.viewerToken) return;
     empty.textContent = `STL 加载失败：${error.message}`;
     empty.hidden = false;
   }
+}
+
+async function loadSegmentationLayer(layer, token) {
+  if (token !== state.viewerToken) return null;
+  const response = await fetch(patientFileUrl(layer.file));
+  if (!response.ok || token !== state.viewerToken) return null;
+  const triangles = parseStl(await response.arrayBuffer(), layer.kind === "organ" ? 3500 : 14000);
+  return triangles.length ? { ...layer, triangles } : null;
+}
+
+function layerWithStoredOpacity(layer) {
+  const stored = state.segmentationLayerOpacity[layer.id];
+  return {
+    ...layer,
+    opacity: Number.isFinite(stored) ? stored : layer.opacity,
+  };
 }
 
 function bindSegmentationCanvas(canvas, ctx, model) {
@@ -1069,15 +1113,20 @@ function bindSegmentationCanvas(canvas, ctx, model) {
     model.last = [event.clientX, event.clientY];
     model.ry += dx * 0.01;
     model.rx += dy * 0.01;
-    drawSegmentationViewer(canvas, ctx, model);
+    scheduleSegmentationDraw(canvas, ctx, model);
   });
   canvas.addEventListener("pointerup", () => {
     model.dragging = false;
+    scheduleSegmentationDraw(canvas, ctx, model);
+  });
+  canvas.addEventListener("pointercancel", () => {
+    model.dragging = false;
+    scheduleSegmentationDraw(canvas, ctx, model);
   });
   canvas.addEventListener("wheel", (event) => {
     event.preventDefault();
     model.zoom = clamp(model.zoom * (event.deltaY > 0 ? .92 : 1.08), .35, 4);
-    drawSegmentationViewer(canvas, ctx, model);
+    scheduleSegmentationDraw(canvas, ctx, model);
   }, { passive: false });
 }
 
@@ -1087,20 +1136,15 @@ function resizeSegmentationCanvas(canvas, ctx, model) {
   canvas.width = Math.max(1, Math.floor(rect.width * ratio));
   canvas.height = Math.max(1, Math.floor(rect.height * ratio));
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  drawSegmentationViewer(canvas, ctx, model);
+  scheduleSegmentationDraw(canvas, ctx, model);
 }
 
-function startSegmentationSpin(canvas, ctx, model, token) {
-  const tick = () => {
-    if (token !== state.viewerToken || !canvas.isConnected) return;
-    if (!model.dragging) {
-      model.ry += 0.0022;
-      drawSegmentationViewer(canvas, ctx, model);
-    }
-    model.raf = requestAnimationFrame(tick);
-  };
-  cancelAnimationFrame(model.raf);
-  model.raf = requestAnimationFrame(tick);
+function scheduleSegmentationDraw(canvas, ctx, model) {
+  if (model.drawRaf) return;
+  model.drawRaf = requestAnimationFrame(() => {
+    model.drawRaf = 0;
+    drawSegmentationViewer(canvas, ctx, model);
+  });
 }
 
 function fitSegmentationModel(model) {
@@ -1123,12 +1167,12 @@ function drawSegmentationViewer(canvas, ctx, model) {
   const w = rect.width || 1;
   const h = rect.height || 1;
   ctx.clearRect(0, 0, w, h);
-  drawViewerGrid(ctx, w, h);
+  drawViewerScene(ctx, w, h);
   if (!model.layers.length) return;
   const faces = [];
   model.layers.forEach((layer) => {
     if (!layer.visible) return;
-    const opacity = layer.kind === "organ" ? model.organOpacity : layer.opacity;
+    const opacity = layer.opacity;
     layer.triangles.forEach((tri) => {
       const projected = tri.map((p) => projectPoint(p, model, w, h));
       const z = (projected[0].z + projected[1].z + projected[2].z) / 3;
@@ -1154,31 +1198,62 @@ function drawSegmentationViewer(canvas, ctx, model) {
   ctx.globalAlpha = 1;
 }
 
-function drawViewerGrid(ctx, w, h) {
-  ctx.fillStyle = "#fbfdff";
+function drawViewerScene(ctx, w, h) {
+  const bg = ctx.createLinearGradient(0, 0, 0, h);
+  bg.addColorStop(0, "#f8fbff");
+  bg.addColorStop(0.48, "#eef5fb");
+  bg.addColorStop(1, "#dfe8f1");
+  ctx.fillStyle = bg;
   ctx.fillRect(0, 0, w, h);
-  ctx.strokeStyle = "#e5ebf3";
-  ctx.lineWidth = 1;
-  const step = Math.max(72, Math.min(w, h) / 7);
-  for (let x = w / 2 % step; x < w; x += step) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
-    ctx.stroke();
-  }
-  for (let y = h / 2 % step; y < h; y += step) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
-    ctx.stroke();
-  }
-  ctx.strokeStyle = "#2f3746";
+
+  const glow = ctx.createRadialGradient(w * 0.48, h * 0.36, 20, w * 0.48, h * 0.36, Math.max(w, h) * 0.58);
+  glow.addColorStop(0, "rgba(255,255,255,.95)");
+  glow.addColorStop(0.55, "rgba(238,246,255,.58)");
+  glow.addColorStop(1, "rgba(210,222,234,0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.save();
+  ctx.translate(w / 2, h * 0.72);
+  ctx.scale(1, 0.28);
+  const floor = ctx.createRadialGradient(0, 0, 20, 0, 0, Math.min(w, h) * 0.42);
+  floor.addColorStop(0, "rgba(41,56,76,.18)");
+  floor.addColorStop(0.58, "rgba(71,88,112,.08)");
+  floor.addColorStop(1, "rgba(71,88,112,0)");
+  ctx.fillStyle = floor;
   ctx.beginPath();
-  ctx.moveTo(w / 2, 0);
-  ctx.lineTo(w / 2, h);
-  ctx.moveTo(0, h / 2);
-  ctx.lineTo(w, h / 2);
-  ctx.stroke();
+  ctx.arc(0, 0, Math.min(w, h) * 0.42, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  drawViewerAxis(ctx, w, h);
+}
+
+function drawViewerAxis(ctx, w, h) {
+  const x0 = 26;
+  const y0 = h - 34;
+  const axes = [
+    ["#ef4444", 34, 0, "X"],
+    ["#22c55e", 0, -34, "Y"],
+    ["#3b82f6", 24, -21, "Z"],
+  ];
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.textBaseline = "middle";
+  axes.forEach(([color, dx, dy, label]) => {
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x0 + dx, y0 + dy);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x0 + dx, y0 + dy, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillText(label, x0 + dx + 6, y0 + dy);
+  });
+  ctx.restore();
 }
 
 function projectPoint(point, model, w, h) {
@@ -1294,22 +1369,6 @@ function collectSegmentationOptions() {
       smooth_iterations: Number.isFinite(smoothIterations) ? smoothIterations : 8,
     },
   };
-}
-
-function applySegmentationDisplayMode(mode) {
-  const map = {
-    predict_smooth: "predict",
-    predict: "predict",
-    pretrain: "pretrain",
-    vessel: "vessel",
-  };
-  const target = map[mode] || "predict";
-  document.querySelectorAll("[data-seg-layer]").forEach((input) => {
-    if (!["pretrain", "predict", "vessel"].includes(input.dataset.segLayer)) return;
-    const shouldShow = input.dataset.segLayer === target;
-    input.checked = shouldShow;
-    state.segmentationViewer?.setVisible(input.dataset.segLayer, shouldShow);
-  });
 }
 
 async function pollJob(jobId) {

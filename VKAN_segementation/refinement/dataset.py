@@ -110,7 +110,7 @@ def discover_nii_cases(
     pretrain_name: str = "pretrain.nii.gz",
     pretrain_stl_name: str = "pretrain.stl",
     label_name: str = "auto",
-    require_pretrain_stl: bool = True,
+    require_pretrain_stl: bool = False,
     include_invalid: bool = False,
 ) -> list[NiiCase]:
     root = Path(root)
@@ -154,7 +154,7 @@ class VesselNiiDataset(Dataset):
         label_threshold: float = 0.5,
         roi_margin: int = 16,
         crop_source: str = "union",
-        require_pretrain_stl: bool = True,
+        require_pretrain_stl: bool = False,
         include_invalid: bool = False,
     ) -> None:
         self.data_root = Path(data_root)
@@ -171,7 +171,7 @@ class VesselNiiDataset(Dataset):
             include_invalid=include_invalid,
         )
         if not self.cases:
-            raise RuntimeError("No usable NIfTI cases found. Need pretrain.nii.gz, pretrain.stl, and a label NIfTI.")
+            raise RuntimeError("No usable NIfTI cases found. Need pretrain.nii.gz and a label NIfTI.")
 
     def __len__(self) -> int:
         return len(self.cases)

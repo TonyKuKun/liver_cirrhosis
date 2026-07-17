@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PPG Vessel Workbench</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="/assets/plotly.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <header class="brand">
+        <div class="brand-mark">PPG</div>
+        <div>
+          <h1>血管处理工作台</h1>
+          <p id="serverState">本地服务已连接</p>
+        </div>
+      </header>
+
+      <section class="panel">
+        <div class="panel-title">输入</div>
+        <form id="batchForm" class="input-form">
+          <label class="field">
+            <span>patient 根目录或批量目录</span>
+            <input id="batchRoot" type="text" placeholder="F:\PCG data\dataset\test4all_sample" />
+          </label>
+          <input id="stlName" type="hidden" value="vessel.stl" />
+        </form>
+
+        <div class="input-actions">
+          <button id="createSessionBtn" class="primary-btn" type="button">载入病例</button>
+          <button id="nextPatientBtn" type="button" disabled>下一个病人</button>
+        </div>
+        <label class="field">
+          <span>当前病例</span>
+          <select id="patientSelect"></select>
+        </label>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">流程</div>
+        <div class="run-row">
+          <button id="runAllBtn" class="primary-btn" type="button">自动全流程</button>
+          <button id="refreshBtn" type="button">刷新</button>
+        </div>
+        <div id="stepButtons" class="step-list"></div>
+        <div class="run-row">
+          <button id="paramsBtn" type="button">参数</button>
+          <button id="downloadBtn" type="button">下载结果</button>
+        </div>
+        <label class="toggle-line">
+          <input id="exportPng" type="checkbox" />
+          <span>导出 PNG</span>
+        </label>
+        <label class="field">
+          <span>TIPS 类型</span>
+          <select id="postTipsMode">
+            <option value="auto">按文件夹名</option>
+            <option value="pre">术前</option>
+            <option value="post">术后</option>
+          </select>
+        </label>
+      </section>
+
+      <section id="paramsPanel" class="panel params-panel hidden">
+        <div class="panel-title">参数配置</div>
+        <div id="paramGrid" class="param-grid"></div>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="panel-title">任务日志</div>
+        <div id="jobStatus" class="job-status">空闲</div>
+        <pre id="logs"></pre>
+      </section>
+    </aside>
+
+    <main class="workspace">
+      <div class="toolbar">
+        <div class="layer-group">
+          <label><input class="layer-toggle" data-layer="mesh" type="checkbox" checked />模型</label>
+          <label><input class="layer-toggle" data-layer="rawCenterline" type="checkbox" />原始线</label>
+          <label><input class="layer-toggle" data-layer="smoothCenterline" type="checkbox" checked />平滑线</label>
+          <label><input class="layer-toggle" data-layer="segments" type="checkbox" checked />分段</label>
+          <label><input class="layer-toggle" data-layer="branchPoints" type="checkbox" />分叉点</label>
+          <label><input class="layer-toggle" data-layer="featurePoints" type="checkbox" checked />特征点</label>
+          <label><input class="layer-toggle" data-layer="sampledSections" type="checkbox" checked />间隔截面</label>
+          <label><input class="layer-toggle" data-layer="surfaceSections" type="checkbox" />表面相交截面</label>
+          <label><input class="layer-toggle" data-layer="maxSections" type="checkbox" checked />最大截面</label>
+          <label><input class="layer-toggle" data-layer="meanSections" type="checkbox" checked />平均截面</label>
+          <label><input class="layer-toggle" data-layer="labels" type="checkbox" checked />标签</label>
+        </div>
+        <div class="slider-group">
+          <label>截面间隔 <input id="sectionStride" type="range" min="2" max="30" value="10" /></label>
+          <span id="sectionStrideValue">10</span>
+          <label>模型透明度 <input id="meshOpacity" type="range" min="0" max="80" value="22" /></label>
+        </div>
+        <div class="edit-group">
+          <button id="centerlineEditBtn" type="button">编辑原始线</button>
+          <select id="centerlineBranchSelect" disabled>
+            <option value="">无可删分支</option>
+          </select>
+          <button id="centerlinePickBtn" type="button" disabled>选择删除</button>
+          <button id="centerlineUndoBtn" type="button" disabled>撤销选择</button>
+          <button id="centerlineSaveBtn" class="danger-btn" type="button" disabled>保存删除</button>
+          <span id="centerlineEditStatus">可删 0 段</span>
+        </div>
+        <div class="manual-group">
+          <button id="manualSegmentBtn" type="button">人工分段</button>
+          <select id="manualAtomicSelect" disabled>
+            <option value="">无原子段</option>
+          </select>
+          <label class="manual-keep"><input id="manualKeep" type="checkbox" disabled />保留</label>
+          <select id="manualVesselSelect" disabled>
+            <option value="">选择血管</option>
+          </select>
+          <button id="manualResetBtn" type="button" disabled>撤销修改</button>
+          <button id="manualSaveBtn" class="primary-btn" type="button" disabled>保存人工分段</button>
+          <span id="manualStatus">原子段 0</span>
+        </div>
+        <div class="analysis-group">
+          <button id="analysisRangeBtn" type="button">有效分析区</button>
+          <select id="analysisVesselSelect" disabled>
+            <option value="">无血管</option>
+          </select>
+          <button id="analysisSuggestBtn" type="button" disabled>自动建议</button>
+          <label class="analysis-slider">起点
+            <input id="analysisStart" type="range" min="0" max="100" value="0" disabled />
+            <span id="analysisStartValue">0%</span>
+          </label>
+          <label class="analysis-slider">终点
+            <input id="analysisEnd" type="range" min="0" max="100" value="100" disabled />
+            <span id="analysisEndValue">100%</span>
+          </label>
+          <button id="analysisResetBtn" type="button" disabled>撤销修改</button>
+          <button id="analysisSaveBtn" class="primary-btn" type="button" disabled>保存分析区</button>
+          <span id="analysisStatus">未设置</span>
+        </div>
+      </div>
+
+      <section class="viewer-wrap">
+        <div id="viewer"></div>
+        <div id="emptyState" class="empty-state">载入 STL 后显示 3D 视图</div>
+      </section>
+
+      <section class="inspector">
+        <div>
+          <div class="panel-title">分段特征</div>
+          <div id="segmentCards" class="cards"></div>
+        </div>
+        <div>
+          <div class="panel-title">系统特征</div>
+          <div id="systemFeatures" class="feature-table"></div>
+        </div>
+        <div>
+          <div class="panel-title">点选信息</div>
+          <div id="pickedInfo" class="picked-info">未选择</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -373,8 +373,8 @@ def _resolve_patient_file(patient: Path, rel: str, recursive: bool = True) -> Pa
     return sorted(matches, key=priority)[0]
 
 
-def _patient_file_info(patient: Path, rel: str) -> dict:
-    path = _resolve_patient_file(patient, rel) or (patient / rel)
+def _patient_file_info(patient: Path, rel: str, recursive: bool = False) -> dict:
+    path = _resolve_patient_file(patient, rel, recursive=recursive) or (patient / rel)
     info = _file_info(path)
     info["requested"] = rel
     return info
@@ -503,13 +503,16 @@ def _ensure_legacy_workbench(stage: str) -> dict:
     raise RuntimeError(f"Could not start {cfg['label']} on port {port}")
 
 
-def _stage_status(patient: Path, stage: str, model_dir: Path | None) -> dict:
+def _stage_status(patient: Path, stage: str, model_dir: Path | None, include_outputs: bool = True) -> dict:
     if stage == "segmentation":
         ready = (patient / "dcm").is_dir() or (patient / "orig.nii.gz").exists()
-        done = _resolve_patient_file(patient, "predict_smooth.stl") is not None
+        done = _resolve_patient_file(patient, "predict_smooth.stl", recursive=False) is not None
         outputs = ["pretrain.stl", "predict.stl", "predict_smooth.stl", "segmentation/liver.stl", "segmentation/spleen.stl"]
     elif stage == "features":
-        ready = _resolve_patient_file(patient, "predict_smooth.stl") is not None or _resolve_patient_file(patient, "vessel.stl") is not None
+        ready = (
+            _resolve_patient_file(patient, "predict_smooth.stl", recursive=False) is not None
+            or _resolve_patient_file(patient, "vessel.stl", recursive=False) is not None
+        )
         done = (patient / "unified_features.json").exists()
         outputs = ["CenterlinePoints.txt", "centerline_profiles.json", "centerline_pointwise_profiles.json", "unified_features.json", "vis_interactive.html"]
     elif stage == "pvp":
@@ -522,12 +525,25 @@ def _stage_status(patient: Path, stage: str, model_dir: Path | None) -> dict:
         "status": "done" if done else "ready" if ready else "missing",
         "ready": ready,
         "done": done,
-        "outputs": {name: _patient_file_info(patient, name) for name in outputs},
+        "outputs": {name: _patient_file_info(patient, name, recursive=False) for name in outputs} if include_outputs else {},
     }
 
 
 def _stage_state(patient: Path, stage: str, model_dir: Path | None) -> dict:
     return _stage_status(patient, stage, model_dir)
+
+
+def _patient_organs(patient: Path) -> dict:
+    seg_dir = patient / "segmentation"
+    organs = {}
+    if seg_dir.exists():
+        for stl in sorted(seg_dir.glob("*.stl")):
+            organs[stl.stem] = _file_info(stl)
+    return organs
+
+
+def _patient_output_files(patient: Path) -> dict:
+    return {name: _patient_file_info(patient, name, recursive=False) for name in OUTPUTS}
 
 
 def _feature_summary(features: dict | None) -> dict:
@@ -573,25 +589,34 @@ def _feature_summary(features: dict | None) -> dict:
     }
 
 
-def _patient_status(patient: Path, model_dir: Path | None, root: Path | None = None) -> dict:
-    seg_dir = patient / "segmentation"
-    organs = {}
-    if seg_dir.exists():
-        for stl in sorted(seg_dir.glob("*.stl")):
-            organs[stl.stem] = _file_info(stl)
+def _patient_status(patient: Path, model_dir: Path | None, root: Path | None = None, detailed: bool = True) -> dict:
+    stages = {stage: _stage_status(patient, stage, model_dir, include_outputs=detailed) for stage in STAGES}
+    if not detailed:
+        return {
+            "folder": str(patient),
+            "files": _patient_output_files(patient),
+            "organs": _patient_organs(patient),
+            "stages": stages,
+            "features_summary": {},
+            "prediction": _read_json(patient / "pvp_prediction.json"),
+            "clinical": {},
+            "preview": {},
+        }
+
+    organs = _patient_organs(patient)
     features = _read_json(patient / "unified_features.json")
     prediction = _read_json(patient / "pvp_prediction.json")
     preview_stl = (
-        _resolve_patient_file(patient, "predict_smooth.stl")
-        or _resolve_patient_file(patient, "predict.stl")
-        or _resolve_patient_file(patient, "pretrain.stl")
-        or _resolve_patient_file(patient, "vessel.stl")
+        _resolve_patient_file(patient, "predict_smooth.stl", recursive=False)
+        or _resolve_patient_file(patient, "predict.stl", recursive=False)
+        or _resolve_patient_file(patient, "pretrain.stl", recursive=False)
+        or _resolve_patient_file(patient, "vessel.stl", recursive=False)
     )
     return {
         "folder": str(patient),
-        "files": {name: _patient_file_info(patient, name) for name in OUTPUTS},
+        "files": _patient_output_files(patient),
         "organs": organs,
-        "stages": {stage: _stage_status(patient, stage, model_dir) for stage in STAGES},
+        "stages": stages,
         "features_summary": _feature_summary(features),
         "prediction": prediction,
         "clinical": _clinical_context(patient, root),
@@ -886,6 +911,21 @@ def _zip_outputs(patients: list[dict]) -> bytes:
 class Handler(BaseHTTPRequestHandler):
     server_version = "PortaFlowIntegrated/1.0"
 
+    def do_HEAD(self):
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        try:
+            if path == "/api/health":
+                self._json({"ok": True, "time": _now(), "runtime": _runtime()}, head_only=True)
+            elif path == "/favicon.ico":
+                self._bytes(b"", "image/x-icon", status=204, head_only=True)
+            elif path.startswith("/api/"):
+                self._json({"error": "Not found"}, status=404, head_only=True)
+            else:
+                self._static(path, head_only=True)
+        except Exception as exc:
+            self._json({"error": f"{type(exc).__name__}: {exc}"}, status=500, head_only=True)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
@@ -922,43 +962,48 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(exc).__name__}: {exc}"}, status=400)
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
+        try:
+            sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
+        except Exception:
+            pass
 
     def _body_json(self):
         length = int(self.headers.get("Content-Length") or "0")
         body = self.rfile.read(length) if length else b"{}"
         return json.loads(body.decode("utf-8"))
 
-    def _json(self, data, status=200):
+    def _json(self, data, status=200, head_only=False):
         payload = json.dumps(data, ensure_ascii=False, default=_json_default).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(payload)
+        if not head_only:
+            self.wfile.write(payload)
 
-    def _bytes(self, data: bytes, content_type: str, status=200, headers: dict | None = None):
+    def _bytes(self, data: bytes, content_type: str, status=200, headers: dict | None = None, head_only=False):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(data)
+        if not head_only:
+            self.wfile.write(data)
 
-    def _static(self, path: str):
+    def _static(self, path: str, head_only=False):
         if path in ("", "/"):
             file_path = STATIC_ROOT / "index.html"
         else:
             file_path = (STATIC_ROOT / Path(path.lstrip("/"))).resolve()
         if not str(file_path).startswith(str(STATIC_ROOT.resolve())):
-            self._json({"error": "Forbidden"}, status=403)
+            self._json({"error": "Forbidden"}, status=403, head_only=head_only)
             return
         if not file_path.exists() or not file_path.is_file():
-            self._json({"error": "Not found"}, status=404)
+            self._json({"error": "Not found"}, status=404, head_only=head_only)
             return
         ctype = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-        self._bytes(file_path.read_bytes(), ctype, headers={"Cache-Control": "no-store"})
+        self._bytes(file_path.read_bytes(), ctype, headers={"Cache-Control": "no-store"}, head_only=head_only)
 
     def _session(self, session_id: str) -> dict:
         with LOCK:
@@ -990,6 +1035,7 @@ class Handler(BaseHTTPRequestHandler):
         session = self._session(path.split("/")[3])
         qs = parse_qs(query)
         patient_id = (qs.get("patient") or [None])[0]
+        detailed = (qs.get("detail") or [""])[0] == "1" or bool(patient_id and patient_id != "all")
         model = Path(session["model_dir"]) if session.get("model_dir") else None
         root = Path(session["root"]) if session.get("root") else None
         patients = session.get("patients") or []
@@ -999,7 +1045,7 @@ class Handler(BaseHTTPRequestHandler):
         data = []
         for patient in patients:
             item = dict(patient)
-            item["status"] = _patient_status(Path(patient["folder"]), model, root)
+            item["status"] = _patient_status(Path(patient["folder"]), model, root, detailed=detailed)
             data.append(item)
         self._json({"session": session, "patients": data, "stage_labels": STAGE_LABELS})
 

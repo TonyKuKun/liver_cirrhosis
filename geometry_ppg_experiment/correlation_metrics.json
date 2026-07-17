@@ -1,0 +1,87 @@
+{
+  "features": "E:\\pycharm_code\\liver_cirrhosis\\geometry_ppg_experiment\\features.csv",
+  "n_samples_with_pvp": 85,
+  "target_column": "y_true_mmHg",
+  "feature_columns": [
+    "R_total",
+    "D_Murray",
+    "R_collateral",
+    "Ratio_SMV_SV",
+    "theta_SMV_SV",
+    "Ratio_LPV_RPV"
+  ],
+  "correlations": [
+    {
+      "feature": "R_total",
+      "n": 83,
+      "missing": 2,
+      "feature_mean": 2.1333522318358433,
+      "feature_std": 2.5383973393134265,
+      "pvp_mean": 26.904591734939753,
+      "pearson_r": 0.1752534005249835,
+      "pearson_p": 0.11303184731079247,
+      "spearman_r": -0.11760507193021898,
+      "spearman_p": 0.28966175975164155
+    },
+    {
+      "feature": "D_Murray",
+      "n": 85,
+      "missing": 0,
+      "feature_mean": 0.6903649514123731,
+      "feature_std": 0.7972347230733039,
+      "pvp_mean": 27.059023329411758,
+      "pearson_r": 0.11619658586497184,
+      "pearson_p": 0.2895952299070207,
+      "spearman_r": 0.05795812723325409,
+      "spearman_p": 0.598277607984266
+    },
+    {
+      "feature": "R_collateral",
+      "n": 37,
+      "missing": 48,
+      "feature_mean": 7.626348319146328,
+      "feature_std": 15.999771719719895,
+      "pvp_mean": 29.69563445945945,
+      "pearson_r": -0.010250310448138802,
+      "pearson_p": 0.9519870377570896,
+      "spearman_r": -0.1466366622634795,
+      "spearman_p": 0.3864699464509106
+    },
+    {
+      "feature": "Ratio_SMV_SV",
+      "n": 83,
+      "missing": 2,
+      "feature_mean": 1.0618824560582167,
+      "feature_std": 0.3702567222840633,
+      "pvp_mean": 26.904591734939753,
+      "pearson_r": 0.03997011566383424,
+      "pearson_p": 0.7197701444773111,
+      "spearman_r": 0.0738850898288502,
+      "spearman_p": 0.5068023211573118
+    },
+    {
+      "feature": "theta_SMV_SV",
+      "n": 85,
+      "missing": 0,
+      "feature_mean": 100.87,
+      "feature_std": 22.494295043939683,
+      "pvp_mean": 27.059023329411758,
+      "pearson_r": 0.05780483486599348,
+      "pearson_p": 0.5992473696589051,
+      "spearman_r": 0.0483051922737689,
+      "spearman_p": 0.6606512055765215
+    },
+    {
+      "feature": "Ratio_LPV_RPV",
+      "n": 69,
+      "missing": 16,
+      "feature_mean": 1.110416581857261,
+      "feature_std": 0.42929178488668046,
+      "pvp_mean": 27.854505753623187,
+      "pearson_r": 0.13710086559544976,
+      "pearson_p": 0.26128708139905965,
+      "spearman_r": 0.1249760254161825,
+      "spearman_p": 0.3062219449425996
+    }
+  ]
+}

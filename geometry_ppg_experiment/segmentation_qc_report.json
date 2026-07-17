@@ -1,0 +1,4839 @@
+[
+  {
+    "sample": "0008589640LuoYuCai@@@@",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 237,
+      "smv": 165,
+      "sv": 512,
+      "lpv": 141,
+      "rpv": 120,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 204
+    },
+    "length_mm": {
+      "mpv": 46.439284469710046,
+      "smv": 29.644192281572707,
+      "sv": 106.69327574742792,
+      "lpv": 26.234708795354884,
+      "rpv": 25.60926564153715,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 36.7019643815749
+    },
+    "diameter_mm": {
+      "mpv": 16.948788949822106,
+      "smv": 12.470301169377917,
+      "sv": 19.019332304396375,
+      "lpv": 13.405534955662924,
+      "rpv": 12.27375191838652,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 7.765724018846999
+    },
+    "issues": []
+  },
+  {
+    "sample": "0013996314YangTingFu",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 348,
+      "smv": 330,
+      "sv": 915,
+      "lpv": 192,
+      "rpv": 207,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 68.37614243739003,
+      "smv": 57.11594213046649,
+      "sv": 189.91748472344818,
+      "lpv": 39.16209173873148,
+      "rpv": 44.66783335150304,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 21.449010013283022,
+      "smv": 17.42922944505279,
+      "sv": 17.39577293283787,
+      "lpv": 18.09923405183106,
+      "rpv": 14.884703815694843,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0017704479ZouQiNan",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 369,
+      "smv": 381,
+      "sv": 600,
+      "lpv": 309,
+      "rpv": 189,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 69.28775663521905,
+      "smv": 68.30282308223788,
+      "sv": 118.9151771856041,
+      "lpv": 61.54981594329419,
+      "rpv": 42.722979243976894,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 18.707759312630568,
+      "smv": 11.035443440495603,
+      "sv": 17.354746780389764,
+      "lpv": 10.384730184446248,
+      "rpv": 7.328504240109622,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0017989647TaQing",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 393,
+      "smv": 129,
+      "sv": 600,
+      "lpv": 189,
+      "rpv": 141,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 78.86451034877884,
+      "smv": 23.94791276067441,
+      "sv": 115.60824669567161,
+      "lpv": 34.19931208637959,
+      "rpv": 32.059579261039275,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.512304805556147,
+      "smv": 8.870252570013259,
+      "sv": 13.831518020782305,
+      "lpv": 11.383438852636903,
+      "rpv": NaN,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0018424767LiXiuFang@@@@",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 279,
+      "smv": 147,
+      "sv": 711,
+      "lpv": 237,
+      "rpv": 147,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 52.55504061721669,
+      "smv": 31.286885162891814,
+      "sv": 146.21435589705916,
+      "lpv": 45.16149741485006,
+      "rpv": 31.205743294071098,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 12.723484928668434,
+      "smv": 9.03272772980293,
+      "sv": 10.986765929645104,
+      "lpv": 9.436740178879681,
+      "rpv": 10.82444900618453,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0019523677LiuTaiBo",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 216,
+      "smv": 174,
+      "sv": 711,
+      "lpv": 174,
+      "rpv": 108,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 47.32148671994182,
+      "smv": 30.0309779979667,
+      "sv": 141.6870988820975,
+      "lpv": 35.6225955791423,
+      "rpv": 23.422982663033952,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 11.786986535406232,
+      "smv": 10.147004797937285,
+      "sv": 8.660996228780045,
+      "lpv": 8.56825215794858,
+      "rpv": 8.240978200500281,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0019770006DuoJiZhanDui",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 224,
+      "smv": 207,
+      "sv": 771,
+      "lpv": 231,
+      "rpv": 117,
+      "tips": 0,
+      "lgv": 333,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 49.10807163927072,
+      "smv": 36.58071645377847,
+      "sv": 153.20573255291987,
+      "lpv": 46.860938198797854,
+      "rpv": 22.61966791303628,
+      "tips": NaN,
+      "lgv": 65.4534806229392,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 16.736728842337264,
+      "smv": 8.965534891437603,
+      "sv": 10.249099705920063,
+      "lpv": 10.663969768345314,
+      "rpv": 9.54312320566687,
+      "tips": NaN,
+      "lgv": 3.2309314186671525,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0019784257TangShiBing",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 353,
+      "smv": 207,
+      "sv": 879,
+      "lpv": 267,
+      "rpv": 189,
+      "tips": 0,
+      "lgv": 327,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 68.82173783479098,
+      "smv": 39.1118352130832,
+      "sv": 178.60253957507538,
+      "lpv": 50.35426903520337,
+      "rpv": 42.0436538022288,
+      "tips": NaN,
+      "lgv": 61.999989052393985,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 17.625154598457883,
+      "smv": 11.267115022671499,
+      "sv": 16.435711004942508,
+      "lpv": 12.25351023120612,
+      "rpv": 14.180067401555833,
+      "tips": NaN,
+      "lgv": 3.148373367241202,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0019864392GuChangChun",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 347,
+      "smv": 114,
+      "sv": 591,
+      "lpv": 216,
+      "rpv": 132,
+      "tips": 0,
+      "lgv": 198,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 70.05400216003869,
+      "smv": 19.181814088878234,
+      "sv": 124.59986010785124,
+      "lpv": 42.143253136459535,
+      "rpv": 24.084717091523842,
+      "tips": NaN,
+      "lgv": 39.270270599306315,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": 13.525621500668327,
+      "sv": 11.188159082946747,
+      "lpv": 8.747455903863592,
+      "rpv": NaN,
+      "tips": NaN,
+      "lgv": 3.8885983987892088,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0019886208HuangMing",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 366,
+      "smv": 261,
+      "sv": 480,
+      "lpv": 228,
+      "rpv": 132,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 66.00690320401603,
+      "smv": 47.81101686573822,
+      "sv": 100.24416946919246,
+      "lpv": 43.09011757979357,
+      "rpv": 25.083566353852017,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.971174213967657,
+      "smv": 11.314339343093872,
+      "sv": 12.756439453586776,
+      "lpv": 10.382159237736545,
+      "rpv": 8.18776190443106,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0019894555ChenLiShun",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 237,
+      "smv": 81,
+      "sv": 506,
+      "lpv": 222,
+      "rpv": 111,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 156
+    },
+    "length_mm": {
+      "mpv": 53.42310490152611,
+      "smv": 14.453217840455762,
+      "sv": 102.43114658312945,
+      "lpv": 43.84000898456236,
+      "rpv": 22.490259803817438,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 29.284804978828873
+    },
+    "diameter_mm": {
+      "mpv": 12.553450858564847,
+      "smv": 12.517874110990132,
+      "sv": 9.077265841349694,
+      "lpv": 7.22407880726585,
+      "rpv": 6.848961692298293,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 4.396764669833397
+    },
+    "issues": []
+  },
+  {
+    "sample": "0019931025LaJi",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 267,
+      "smv": 201,
+      "sv": 489,
+      "lpv": 126,
+      "rpv": 105,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 58.31262976870026,
+      "smv": 35.46678869983319,
+      "sv": 93.95555959082554,
+      "lpv": 28.3653041579142,
+      "rpv": 19.019565381806544,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 12.118695217735421,
+      "smv": 11.967207680179976,
+      "sv": 8.107276092134157,
+      "lpv": 9.366068866151952,
+      "rpv": 7.206423754296732,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0020022521HouZhengXu",
+    "is_post_tips_by_name": false,
+    "status": "warning",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 360,
+      "smv": 207,
+      "sv": 728,
+      "lpv": 24,
+      "rpv": 54,
+      "tips": 54,
+      "lgv": 0,
+      "pgv": 195
+    },
+    "length_mm": {
+      "mpv": 73.85458414131483,
+      "smv": 37.32973021989344,
+      "sv": 143.89896903699474,
+      "lpv": 6.571755940202884,
+      "rpv": 9.81158761146214,
+      "tips": 11.464861892157453,
+      "lgv": NaN,
+      "pgv": 34.490636140797235
+    },
+    "diameter_mm": {
+      "mpv": 16.031646260057244,
+      "smv": 11.548802905744207,
+      "sv": 14.187965985702036,
+      "lpv": NaN,
+      "rpv": 29.498600182497068,
+      "tips": 16.120832813314927,
+      "lgv": NaN,
+      "pgv": 3.309316385558101
+    },
+    "issues": [
+      {
+        "severity": "warning",
+        "code": "pre_tips_has_tips",
+        "detail": "样本名不含 #，但检测到 tips 分段，请确认是否命名或分段有误"
+      }
+    ]
+  },
+  {
+    "sample": "0020070936LiaoYuanPing@@@@",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 291,
+      "smv": 114,
+      "sv": 662,
+      "lpv": 141,
+      "rpv": 57,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 168
+    },
+    "length_mm": {
+      "mpv": 63.06721445937053,
+      "smv": 21.711487952923004,
+      "sv": 136.77158514553005,
+      "lpv": 24.903626613603578,
+      "rpv": 11.529742870518769,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 31.785306939205714
+    },
+    "diameter_mm": {
+      "mpv": 13.418368353217325,
+      "smv": 7.648135504709287,
+      "sv": 10.928920365477406,
+      "lpv": 9.711946035268475,
+      "rpv": 13.652843137148853,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 8.004791409196015
+    },
+    "issues": []
+  },
+  {
+    "sample": "0020120779FuXiuQiong",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 260,
+      "smv": 81,
+      "sv": 666,
+      "lpv": 162,
+      "rpv": 75,
+      "tips": 0,
+      "lgv": 267,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 52.794689278964256,
+      "smv": 13.488771405369029,
+      "sv": 132.4775061086697,
+      "lpv": 33.85252839529251,
+      "rpv": 14.702594792923694,
+      "tips": NaN,
+      "lgv": 51.92841959749699,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 12.191213959044035,
+      "smv": 11.893727888103982,
+      "sv": 7.987297704446579,
+      "lpv": 11.017754104234573,
+      "rpv": 9.07400903949856,
+      "tips": NaN,
+      "lgv": 2.2978687849553454,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0020327676HeGuangYong",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 314,
+      "smv": 357,
+      "sv": 702,
+      "lpv": 144,
+      "rpv": 111,
+      "tips": 0,
+      "lgv": 234,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 62.96649352914434,
+      "smv": 62.806884811240096,
+      "sv": 137.30378656180363,
+      "lpv": 29.97650508505663,
+      "rpv": 24.823258694185974,
+      "tips": NaN,
+      "lgv": 47.28665515310847,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.991570109175166,
+      "smv": 11.969984981026004,
+      "sv": 13.150440068336767,
+      "lpv": 11.11136629063346,
+      "rpv": 12.220895646218235,
+      "tips": NaN,
+      "lgv": 3.7981193829637867,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "0020393936LanShuRong",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 234,
+      "smv": 321,
+      "sv": 656,
+      "lpv": 198,
+      "rpv": 180,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 162
+    },
+    "length_mm": {
+      "mpv": 47.533117837915384,
+      "smv": 56.271464180401225,
+      "sv": 130.49794988047634,
+      "lpv": 37.08453239818363,
+      "rpv": 37.48335943577223,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 28.449252705874486
+    },
+    "diameter_mm": {
+      "mpv": 17.105800750815483,
+      "smv": 11.183922041045683,
+      "sv": 10.53194798248558,
+      "lpv": 9.668490674872674,
+      "rpv": 9.479159473650721,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 4.646647333703402
+    },
+    "issues": []
+  },
+  {
+    "sample": "20201207XuErMin@@@@",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 251,
+      "smv": 357,
+      "sv": 519,
+      "lpv": 24,
+      "rpv": 225,
+      "tips": 0,
+      "lgv": 252,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 55.74436841007133,
+      "smv": 61.18131345287233,
+      "sv": 102.00553525312147,
+      "lpv": 4.630026975017817,
+      "rpv": 47.530768777027134,
+      "tips": NaN,
+      "lgv": 52.50794927407358,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 16.24677353634253,
+      "smv": 10.756089778971615,
+      "sv": 16.01082500623653,
+      "lpv": NaN,
+      "rpv": 8.211414460825358,
+      "tips": NaN,
+      "lgv": 9.349229371841838,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20201224WangMingLian#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 413,
+      "smv": 237,
+      "sv": 681,
+      "lpv": 141,
+      "rpv": 90,
+      "tips": 204,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 80.57224277452559,
+      "smv": 46.609613151299,
+      "sv": 137.2877502404953,
+      "lpv": 27.769204323201144,
+      "rpv": 18.678300094465516,
+      "tips": 41.98464696505776,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.426067451085675,
+      "smv": 9.472726213604329,
+      "sv": 12.440053555402812,
+      "lpv": 11.006241659950417,
+      "rpv": 14.154612370622598,
+      "tips": 8.950526795116959,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210120ZhangXiaoNi",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 251,
+      "smv": 321,
+      "sv": 567,
+      "lpv": 126,
+      "rpv": 201,
+      "tips": 0,
+      "lgv": 564,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 56.47020044352742,
+      "smv": 53.66110419953553,
+      "sv": 119.19091871323889,
+      "lpv": 21.951408578438826,
+      "rpv": 37.18433701138255,
+      "tips": NaN,
+      "lgv": 109.16788217368202,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 19.23786534830988,
+      "smv": 12.27075007183444,
+      "sv": 16.012744595783705,
+      "lpv": 15.927964719460306,
+      "rpv": 11.520202707477653,
+      "tips": NaN,
+      "lgv": 7.560927418610686,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210208ZhangXiaoNi#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 305,
+      "smv": 216,
+      "sv": 465,
+      "lpv": 81,
+      "rpv": 99,
+      "tips": 246,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 65.62658339358325,
+      "smv": 39.574363494308095,
+      "sv": 97.25397801052574,
+      "lpv": 15.75291987758921,
+      "rpv": 17.841310229868768,
+      "tips": 51.135208213498174,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 14.695170584670093,
+      "smv": 10.385359204756625,
+      "sv": 10.83404427333764,
+      "lpv": 10.619326475592336,
+      "rpv": 6.265611433571123,
+      "tips": 8.592336335536093,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210209WangPeng",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 216,
+      "smv": 231,
+      "sv": 488,
+      "lpv": 228,
+      "rpv": 162,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 216
+    },
+    "length_mm": {
+      "mpv": 41.75774016840805,
+      "smv": 40.384259803219344,
+      "sv": 91.43721294635665,
+      "lpv": 41.37603129200933,
+      "rpv": 31.48100435102359,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 38.93764982607769
+    },
+    "diameter_mm": {
+      "mpv": 13.819085075552637,
+      "smv": 10.152753080334673,
+      "sv": 10.979048196369181,
+      "lpv": 8.442602211218517,
+      "rpv": 11.73653756623104,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 4.616289511701783
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210220GaoXia#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 314,
+      "smv": 249,
+      "sv": 576,
+      "lpv": 147,
+      "rpv": 51,
+      "tips": 243,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 64.4917900442448,
+      "smv": 45.19405808375582,
+      "sv": 115.87526314045508,
+      "lpv": 29.123288551460192,
+      "rpv": 9.787426366265102,
+      "tips": 51.36314134486997,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.204994190916043,
+      "smv": 11.18087010283433,
+      "sv": 12.814637306925423,
+      "lpv": 10.44670796198416,
+      "rpv": 14.717470640478535,
+      "tips": 9.02293583439404,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210302HeHuanTao",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 273,
+      "smv": 228,
+      "sv": 617,
+      "lpv": 186,
+      "rpv": 201,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 564
+    },
+    "length_mm": {
+      "mpv": 53.35607473058437,
+      "smv": 42.438463517624214,
+      "sv": 116.9027067058627,
+      "lpv": 40.60329840024794,
+      "rpv": 41.02031319300955,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 106.99177365404577
+    },
+    "diameter_mm": {
+      "mpv": 15.552678541699423,
+      "smv": 14.167656708366568,
+      "sv": 17.126908602658503,
+      "lpv": 11.360689489147621,
+      "rpv": 8.231980309568735,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 24.06163965120316
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210305XuErMin@@@@",
+    "is_post_tips_by_name": false,
+    "status": "warning",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 222,
+      "smv": 366,
+      "sv": 528,
+      "lpv": 30,
+      "rpv": 81,
+      "tips": 126,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 56.4827271017306,
+      "smv": 62.55106741163613,
+      "sv": 105.91988718488345,
+      "lpv": 5.7790437376298,
+      "rpv": 19.836959597918963,
+      "tips": 25.956569176977794,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 9.101820189132557,
+      "smv": 9.196978143886087,
+      "sv": 14.813264242901468,
+      "lpv": NaN,
+      "rpv": 4.644987980105058,
+      "tips": 6.187828530341397,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": [
+      {
+        "severity": "warning",
+        "code": "pre_tips_has_tips",
+        "detail": "样本名不含 #，但检测到 tips 分段，请确认是否命名或分段有误"
+      }
+    ]
+  },
+  {
+    "sample": "20210312HeHuanTao#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 314,
+      "smv": 225,
+      "sv": 708,
+      "lpv": 111,
+      "rpv": 126,
+      "tips": 237,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 62.18883881904772,
+      "smv": 43.284165042580824,
+      "sv": 135.22581858803744,
+      "lpv": 24.5583336788326,
+      "rpv": 24.970680658749185,
+      "tips": 45.0617079361223,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.849991212763193,
+      "smv": 9.076303657522255,
+      "sv": 15.614896864772959,
+      "lpv": 9.30636384370045,
+      "rpv": 6.908206085909804,
+      "tips": 9.560213297315403,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210331ZhangJun",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 252,
+      "smv": 285,
+      "sv": 476,
+      "lpv": 117,
+      "rpv": 102,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 624
+    },
+    "length_mm": {
+      "mpv": 50.848348817376234,
+      "smv": 47.886764372998314,
+      "sv": 91.25725169947111,
+      "lpv": 24.793135074619467,
+      "rpv": 21.337446379248426,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 122.49136604415595
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": 11.452338860283605,
+      "sv": 12.727300203844699,
+      "lpv": NaN,
+      "rpv": 8.103728425747342,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 9.72703582113452
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210411ZhangJun#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 302,
+      "smv": 255,
+      "sv": 498,
+      "lpv": 108,
+      "rpv": 66,
+      "tips": 324,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 60.06048533686132,
+      "smv": 43.09322369528347,
+      "sv": 97.65328055442684,
+      "lpv": 22.134661346154424,
+      "rpv": 14.32136811699482,
+      "tips": 66.16626352297132,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 16.34621639522831,
+      "smv": 11.202709236188529,
+      "sv": 15.11595375361976,
+      "lpv": 13.138794514283427,
+      "rpv": 15.140397678407048,
+      "tips": 9.42388052284144,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210412FanYuYing@xueshuan",
+    "is_post_tips_by_name": false,
+    "status": "warning",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 121,
+      "smv": 714,
+      "sv": 21,
+      "lpv": 30,
+      "rpv": 30,
+      "tips": 695,
+      "lgv": 72,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 32.60900009977148,
+      "smv": 143.76044282426847,
+      "sv": 3.5195682259416454,
+      "lpv": 9.234624044171891,
+      "rpv": 5.682482665444847,
+      "tips": 139.64385184923864,
+      "lgv": 12.80487543537297,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 20.012617586571697,
+      "smv": 15.89159870216298,
+      "sv": NaN,
+      "lpv": NaN,
+      "rpv": NaN,
+      "tips": 5.779167795064841,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": [
+      {
+        "severity": "warning",
+        "code": "pre_tips_has_tips",
+        "detail": "样本名不含 #，但检测到 tips 分段，请确认是否命名或分段有误"
+      }
+    ]
+  },
+  {
+    "sample": "20210426ZhiXianCheng@@@@",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 251,
+      "smv": 321,
+      "sv": 567,
+      "lpv": 126,
+      "rpv": 201,
+      "tips": 0,
+      "lgv": 564,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 56.47020044352742,
+      "smv": 53.66110419953553,
+      "sv": 119.19091871323889,
+      "lpv": 21.951408578438826,
+      "rpv": 37.18433701138255,
+      "tips": NaN,
+      "lgv": 109.16788217368202,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 19.23786534830988,
+      "smv": 12.27075007183444,
+      "sv": 16.012744595783705,
+      "lpv": 15.927964719460306,
+      "rpv": 11.520202707477653,
+      "tips": NaN,
+      "lgv": 7.560927418610686,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210428HanShengLi",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 383,
+      "smv": 120,
+      "sv": 528,
+      "lpv": 165,
+      "rpv": 141,
+      "tips": 0,
+      "lgv": 321,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 68.21022996568983,
+      "smv": 20.751282528224475,
+      "sv": 109.6985219146455,
+      "lpv": 29.982126724952074,
+      "rpv": 30.23513054371474,
+      "tips": NaN,
+      "lgv": 64.07467280408981,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 11.57023808059224,
+      "smv": 10.509516553750059,
+      "sv": 5.14661925832889,
+      "lpv": 9.699912181096733,
+      "rpv": 7.273017815045232,
+      "tips": NaN,
+      "lgv": 7.543652408159662,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210503QiuHong#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 305,
+      "smv": 336,
+      "sv": 576,
+      "lpv": 159,
+      "rpv": 138,
+      "tips": 369,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 58.66281416224721,
+      "smv": 58.355517816013965,
+      "sv": 112.14829001133894,
+      "lpv": 34.996654408664014,
+      "rpv": 24.900798730686233,
+      "tips": 74.0358806411642,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 16.736216513020803,
+      "smv": 8.797125705811627,
+      "sv": 26.88823362650949,
+      "lpv": 5.833314041447588,
+      "rpv": 8.030923570365767,
+      "tips": 9.294411442713253,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210504FanYuYing#@xueshuan",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 370,
+      "smv": 168,
+      "sv": 736,
+      "lpv": 168,
+      "rpv": 129,
+      "tips": 300,
+      "lgv": 66,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 71.74343475661212,
+      "smv": 28.2820853837798,
+      "sv": 149.4728879493588,
+      "lpv": 37.00222132655982,
+      "rpv": 25.243662594386386,
+      "tips": 68.73771861193839,
+      "lgv": 13.598468007939974,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 10.075855756040006,
+      "smv": 16.492086803015297,
+      "sv": 10.862642014499393,
+      "lpv": 8.858809101241857,
+      "rpv": 8.86716943568335,
+      "tips": 9.061842646349664,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210510HanShengLi#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 365,
+      "smv": 162,
+      "sv": 465,
+      "lpv": 75,
+      "rpv": 96,
+      "tips": 186,
+      "lgv": 15,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 71.55147966216234,
+      "smv": 27.033024606591624,
+      "sv": 93.5550098582975,
+      "lpv": 16.94352660387984,
+      "rpv": 16.361226914547295,
+      "tips": 38.283715834324774,
+      "lgv": 3.186090167738794,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.167962243913806,
+      "smv": 10.431125733220208,
+      "sv": 8.4757537378715,
+      "lpv": 8.87394505900458,
+      "rpv": 9.264196032244843,
+      "tips": 9.755192158390713,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210603LiQin",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 248,
+      "smv": 312,
+      "sv": 18,
+      "lpv": 138,
+      "rpv": 69,
+      "tips": 0,
+      "lgv": 723,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 49.39728828801274,
+      "smv": 56.106390910075326,
+      "sv": 3.261113781531753,
+      "lpv": 24.31266489231769,
+      "rpv": 14.545628324097356,
+      "tips": NaN,
+      "lgv": 142.24280762442453,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 8.028928276723985,
+      "smv": 11.39933957178488,
+      "sv": NaN,
+      "lpv": 4.659081256308836,
+      "rpv": 3.294451310923171,
+      "tips": NaN,
+      "lgv": 7.106896203803669,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210616LiQin#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 242,
+      "smv": 363,
+      "sv": 552,
+      "lpv": 135,
+      "rpv": 0,
+      "tips": 375,
+      "lgv": 18,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 49.55784557938671,
+      "smv": 65.7634037923759,
+      "sv": 107.13452289983292,
+      "lpv": 25.484606863226276,
+      "rpv": NaN,
+      "tips": 72.84336746508217,
+      "lgv": 2.947125998509753,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 10.387327102339146,
+      "smv": 10.200255995044811,
+      "sv": 7.732485780283586,
+      "lpv": 3.319280664566132,
+      "rpv": NaN,
+      "tips": 10.058108258231385,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210702WangTuanJie",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 122,
+      "smv": 234,
+      "sv": 747,
+      "lpv": 24,
+      "rpv": 250,
+      "tips": 0,
+      "lgv": 555,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 24.168683451837303,
+      "smv": 40.94705851459643,
+      "sv": 150.16543952342997,
+      "lpv": 4.001108389025966,
+      "rpv": 54.1370255219648,
+      "tips": NaN,
+      "lgv": 113.9742520832332,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 11.212556726532897,
+      "smv": 9.34453963842168,
+      "sv": 11.354847949570313,
+      "lpv": NaN,
+      "rpv": 7.410903216732738,
+      "tips": NaN,
+      "lgv": 4.650495617830147,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210719LiJinFeng",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 309,
+      "smv": 270,
+      "sv": 638,
+      "lpv": 246,
+      "rpv": 126,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 288
+    },
+    "length_mm": {
+      "mpv": 64.7952977591585,
+      "smv": 47.8417480486599,
+      "sv": 130.45772140871009,
+      "lpv": 49.35753726678712,
+      "rpv": 27.655040761138594,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 59.36815773362815
+    },
+    "diameter_mm": {
+      "mpv": 13.939412760640934,
+      "smv": 10.083495375707981,
+      "sv": 10.236227958319263,
+      "lpv": 9.655371279083809,
+      "rpv": 10.252434506102901,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 2.744823566509744
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210731XuHaiZhen$seg",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 278,
+      "smv": 246,
+      "sv": 990,
+      "lpv": 123,
+      "rpv": 111,
+      "tips": 0,
+      "lgv": 450,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 56.450514807693395,
+      "smv": 52.364081219116144,
+      "sv": 197.76866525640048,
+      "lpv": 26.150284002584936,
+      "rpv": 20.08490888157753,
+      "tips": NaN,
+      "lgv": 83.87378976107388,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 11.831148097430937,
+      "smv": 5.507392656670586,
+      "sv": 7.849333197244253,
+      "lpv": 11.998085075972716,
+      "rpv": 7.547480532652511,
+      "tips": NaN,
+      "lgv": 5.3115896696131255,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210909WuJinHeng",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 216,
+      "smv": 216,
+      "sv": 416,
+      "lpv": 159,
+      "rpv": 99,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 234
+    },
+    "length_mm": {
+      "mpv": 47.49520619636508,
+      "smv": 36.18929467113448,
+      "sv": 83.10259519566017,
+      "lpv": 31.845315516980882,
+      "rpv": 19.59339105993785,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 44.93331493052472
+    },
+    "diameter_mm": {
+      "mpv": 11.418330327300563,
+      "smv": 9.041374392196747,
+      "sv": 8.531470485948944,
+      "lpv": 7.5909696934410675,
+      "rpv": NaN,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 3.2490525590633927
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210921WuJinHeng#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 317,
+      "smv": 321,
+      "sv": 375,
+      "lpv": 81,
+      "rpv": 111,
+      "tips": 261,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 66.86663569657901,
+      "smv": 53.67474045075487,
+      "sv": 76.11549203650107,
+      "lpv": 16.37512767985607,
+      "rpv": 21.818593427586688,
+      "tips": 51.2602829157257,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 11.871419057154988,
+      "smv": 7.4086939089756925,
+      "sv": 8.02209493329707,
+      "lpv": 7.847122402549298,
+      "rpv": 8.029864801918102,
+      "tips": 9.774896225942218,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20210930XieFengE",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 221,
+      "smv": 165,
+      "sv": 432,
+      "lpv": 27,
+      "rpv": 197,
+      "tips": 0,
+      "lgv": 216,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 45.42738613640704,
+      "smv": 31.34125641898609,
+      "sv": 85.00520458927595,
+      "lpv": 4.831731089084098,
+      "rpv": 38.63141609084781,
+      "tips": NaN,
+      "lgv": 47.92025095194276,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 7.354132745895626,
+      "smv": 11.046277000085844,
+      "sv": 10.463182512333042,
+      "lpv": NaN,
+      "rpv": 6.3084699504184645,
+      "tips": NaN,
+      "lgv": 9.001905703071222,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20211002WangTuanJie#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 285,
+      "smv": 228,
+      "sv": 699,
+      "lpv": 27,
+      "rpv": 57,
+      "tips": 336,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 61.60183769435109,
+      "smv": 39.388746537128306,
+      "sv": 146.2455741985487,
+      "lpv": 4.520563216212242,
+      "rpv": 10.08654552552997,
+      "tips": 68.16959104084714,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.562840414529084,
+      "smv": 9.736218525195005,
+      "sv": 12.567799949054937,
+      "lpv": NaN,
+      "rpv": 19.905935180194,
+      "tips": 9.595750788581398,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20211006ZhaoShuangYing@centerline",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 207,
+      "smv": 615,
+      "sv": 450,
+      "lpv": 225,
+      "rpv": 129,
+      "tips": 0,
+      "lgv": 192,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 42.635718567525146,
+      "smv": 126.24149995004578,
+      "sv": 94.83291615453524,
+      "lpv": 46.89131926867282,
+      "rpv": 26.521684471631726,
+      "tips": NaN,
+      "lgv": 35.75600906163665,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": 14.606009103093175,
+      "sv": 4.886466602484356,
+      "lpv": 7.827071197295175,
+      "rpv": 8.083457789637016,
+      "tips": NaN,
+      "lgv": 8.028351205597898,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20211011XieFengE#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 275,
+      "smv": 159,
+      "sv": 519,
+      "lpv": 162,
+      "rpv": 123,
+      "tips": 255,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 50.18007674191254,
+      "smv": 27.125055639331634,
+      "sv": 106.13755124832866,
+      "lpv": 32.000911414222216,
+      "rpv": 22.592539338339407,
+      "tips": 45.65483762476079,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.522375779402362,
+      "smv": 9.09078697052594,
+      "sv": 8.865740499136036,
+      "lpv": 4.326223415608081,
+      "rpv": 5.072602801473367,
+      "tips": 9.064535694016033,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20211022ZhaoShuangYing#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 284,
+      "smv": 204,
+      "sv": 564,
+      "lpv": 84,
+      "rpv": 144,
+      "tips": 246,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 56.718522884863674,
+      "smv": 34.7002992946459,
+      "sv": 114.21379706663038,
+      "lpv": 18.475679783595368,
+      "rpv": 28.57767489271427,
+      "tips": 54.35897923221059,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.474893693914876,
+      "smv": 11.922950606173536,
+      "sv": 12.75352288158184,
+      "lpv": 10.570470606638162,
+      "rpv": 5.748152498521524,
+      "tips": 8.579791464633104,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20211208DuanXiuXia",
+    "is_post_tips_by_name": false,
+    "status": "warning",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 222,
+      "smv": 30,
+      "sv": 246,
+      "lpv": 68,
+      "rpv": 33,
+      "tips": 33,
+      "lgv": 24,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 45.708899133754834,
+      "smv": 5.690331837056346,
+      "sv": 44.991327400852754,
+      "lpv": 14.846871468632365,
+      "rpv": 6.188246971072331,
+      "tips": 10.79817472297852,
+      "lgv": 4.107815854218071,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 9.268223355656872,
+      "smv": NaN,
+      "sv": 8.480222685182573,
+      "lpv": NaN,
+      "rpv": NaN,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": [
+      {
+        "severity": "warning",
+        "code": "pre_tips_has_tips",
+        "detail": "样本名不含 #，但检测到 tips 分段，请确认是否命名或分段有误"
+      }
+    ]
+  },
+  {
+    "sample": "20211212MaXiangQian@centerline",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 288,
+      "smv": 555,
+      "sv": 531,
+      "lpv": 195,
+      "rpv": 156,
+      "tips": 0,
+      "lgv": 201,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 56.4366975409384,
+      "smv": 114.53765581659974,
+      "sv": 104.33417141772352,
+      "lpv": 39.250574293714905,
+      "rpv": 29.41308304419904,
+      "tips": NaN,
+      "lgv": 39.07384971826153,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 12.33138162632477,
+      "smv": 10.390835670950489,
+      "sv": 4.653172726275427,
+      "lpv": 13.005333064368942,
+      "rpv": 6.826177486317546,
+      "tips": NaN,
+      "lgv": 11.563217959305748,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20211215ZhangLinFu",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 252,
+      "smv": 102,
+      "sv": 539,
+      "lpv": 138,
+      "rpv": 120,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 222
+    },
+    "length_mm": {
+      "mpv": 53.72795748393155,
+      "smv": 19.56995939320769,
+      "sv": 106.09734077857615,
+      "lpv": 28.255315305471512,
+      "rpv": 21.03401183525456,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 42.15764145711145
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": 12.11372579589793,
+      "sv": 9.237562775147211,
+      "lpv": NaN,
+      "rpv": NaN,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 3.5136762992967423
+    },
+    "issues": []
+  },
+  {
+    "sample": "20211217DuanXiuXia#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 302,
+      "smv": 150,
+      "sv": 154,
+      "lpv": 84,
+      "rpv": 150,
+      "tips": 171,
+      "lgv": 0,
+      "pgv": 639
+    },
+    "length_mm": {
+      "mpv": 60.45031272048203,
+      "smv": 27.470020523747333,
+      "sv": 37.34925502516479,
+      "lpv": 17.975308366406367,
+      "rpv": 31.10879324716381,
+      "tips": 35.865496394694915,
+      "lgv": NaN,
+      "pgv": 135.82141019185477
+    },
+    "diameter_mm": {
+      "mpv": 12.455814181671261,
+      "smv": 12.83328417039577,
+      "sv": 13.769060483086704,
+      "lpv": 8.231738163123213,
+      "rpv": 8.790576108377588,
+      "tips": 10.198053038350812,
+      "lgv": NaN,
+      "pgv": 11.616440919364592
+    },
+    "issues": []
+  },
+  {
+    "sample": "20220317HuangGongLing#$seg@重提",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 338,
+      "smv": 279,
+      "sv": 294,
+      "lpv": 138,
+      "rpv": 114,
+      "tips": 144,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 74.66134206764335,
+      "smv": 47.94154036416883,
+      "sv": 62.40213647077968,
+      "lpv": 24.556756223683806,
+      "rpv": 21.94476923049723,
+      "tips": 27.193183604947585,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.433778023426214,
+      "smv": 11.519039524358528,
+      "sv": 9.975030444991667,
+      "lpv": 6.495562948773723,
+      "rpv": 4.315040856436019,
+      "tips": 8.18387004710872,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20220906ZhuChao#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 350,
+      "smv": 288,
+      "sv": 1035,
+      "lpv": 138,
+      "rpv": 177,
+      "tips": 267,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 75.63252236316836,
+      "smv": 51.15347449385875,
+      "sv": 202.23382168478793,
+      "lpv": 25.52432088988523,
+      "rpv": 34.60464082810801,
+      "tips": 52.163583153153816,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 19.49608780062136,
+      "smv": 10.04705191929142,
+      "sv": 21.014733274469872,
+      "lpv": 15.79960672039534,
+      "rpv": 7.68890231177419,
+      "tips": 10.186876291850602,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20220919LiuGuoQing",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 276,
+      "smv": 204,
+      "sv": 545,
+      "lpv": 189,
+      "rpv": 93,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 345
+    },
+    "length_mm": {
+      "mpv": 61.262791737931224,
+      "smv": 38.01607616538388,
+      "sv": 101.80442373514919,
+      "lpv": 38.668770217647086,
+      "rpv": 18.40934317781972,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 67.92146848335824
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": 13.212779510549929,
+      "sv": 7.18574605339313,
+      "lpv": 12.657530192462483,
+      "rpv": 7.939468758477856,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 5.112490387050482
+    },
+    "issues": []
+  },
+  {
+    "sample": "20220930JinJunTing",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 185,
+      "smv": 57,
+      "sv": 411,
+      "lpv": 521,
+      "rpv": 282,
+      "tips": 0,
+      "lgv": 33,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 52.49983170800425,
+      "smv": 10.453810151964325,
+      "sv": 90.55840527909918,
+      "lpv": 99.69918186977395,
+      "rpv": 50.751717455586636,
+      "tips": NaN,
+      "lgv": 14.147094439390292,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.530736451088188,
+      "smv": NaN,
+      "sv": NaN,
+      "lpv": 6.638285736038983,
+      "rpv": 6.562895633493035,
+      "tips": NaN,
+      "lgv": 13.99185979700803,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20221003JiZhangKui",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 107,
+      "smv": 36,
+      "sv": 471,
+      "lpv": 294,
+      "rpv": 425,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 24.380528217145027,
+      "smv": 8.315875315432905,
+      "sv": 90.65652876963446,
+      "lpv": 59.309302360415224,
+      "rpv": 86.26616311706788,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": NaN,
+      "sv": 12.878509392129029,
+      "lpv": 10.18977785114595,
+      "rpv": 13.013465946351838,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20221008LiHuaMin",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 382,
+      "smv": 321,
+      "sv": 1020,
+      "lpv": 201,
+      "rpv": 66,
+      "tips": 0,
+      "lgv": 24,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 79.16833923867554,
+      "smv": 58.58877705156994,
+      "sv": 204.72287191042057,
+      "lpv": 41.1053151388763,
+      "rpv": 13.30181792695346,
+      "tips": NaN,
+      "lgv": 4.909756768275357,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 12.617683253143124,
+      "smv": 8.996255483942079,
+      "sv": 14.18403448868483,
+      "lpv": 12.579058189884297,
+      "rpv": 17.586361053543197,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20221010YangXing",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 300,
+      "smv": 294,
+      "sv": 671,
+      "lpv": 147,
+      "rpv": 102,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 333
+    },
+    "length_mm": {
+      "mpv": 61.451803234986585,
+      "smv": 49.89114255074313,
+      "sv": 140.61081420306078,
+      "lpv": 28.76050763442506,
+      "rpv": 19.53012070336541,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 70.96444904852281
+    },
+    "diameter_mm": {
+      "mpv": 14.696027573523507,
+      "smv": 14.440092273942778,
+      "sv": 6.959255173592975,
+      "lpv": 10.401327042674673,
+      "rpv": 12.218247158959066,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 4.102056767549776
+    },
+    "issues": []
+  },
+  {
+    "sample": "20221017LiHuaMin#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 339,
+      "smv": 183,
+      "sv": 621,
+      "lpv": 129,
+      "rpv": 105,
+      "tips": 306,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 75.52651143019212,
+      "smv": 34.75005128288548,
+      "sv": 133.40525487884963,
+      "lpv": 23.517801994527805,
+      "rpv": 21.419421691148074,
+      "tips": 65.15492420522253,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 18.95363541285831,
+      "smv": 8.081136308995207,
+      "sv": 15.11749482639148,
+      "lpv": 12.22709944474236,
+      "rpv": 16.578267878724137,
+      "tips": 9.566581830325616,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20221116WangJiuCen#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 329,
+      "smv": 294,
+      "sv": 573,
+      "lpv": 39,
+      "rpv": 114,
+      "tips": 225,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 64.63620673292935,
+      "smv": 51.82665285639411,
+      "sv": 112.60305253681565,
+      "lpv": 8.071799077322769,
+      "rpv": 20.944037480835725,
+      "tips": 41.32396701494875,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.027688621333168,
+      "smv": 10.405577778252546,
+      "sv": 12.547642982498598,
+      "lpv": NaN,
+      "rpv": 14.662679826169143,
+      "tips": 10.042635727807404,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20221227JinJunTing#",
+    "is_post_tips_by_name": true,
+    "status": "warning",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 421,
+      "smv": 129,
+      "sv": 318,
+      "lpv": 51,
+      "rpv": 189,
+      "tips": 453,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 90.07724970152763,
+      "smv": 27.880871445245493,
+      "sv": 62.225131785745035,
+      "lpv": 8.635187522295803,
+      "rpv": 34.67015976409042,
+      "tips": 89.4126725922577,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": 8.624236916441957,
+      "sv": 9.758826062218786,
+      "lpv": NaN,
+      "rpv": 11.134051648959321,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": [
+      {
+        "severity": "warning",
+        "code": "mpv_rpv_endpoint_gap",
+        "detail": "MPV 与 RPV 最近端点距离 34.1 mm，疑似拓扑不连续或标签串错"
+      }
+    ]
+  },
+  {
+    "sample": "20221231GaoChunFeng",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 246,
+      "smv": 99,
+      "sv": 582,
+      "lpv": 198,
+      "rpv": 63,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 48.66215603790351,
+      "smv": 17.506556723683076,
+      "sv": 117.41286948479186,
+      "lpv": 39.205447433845606,
+      "rpv": 10.108730994169317,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 14.778853400337091,
+      "smv": 13.922732500344036,
+      "sv": 10.098738269443448,
+      "lpv": 14.318897278816532,
+      "rpv": 17.093396865650167,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230108TangXiuQin@centerline",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 87,
+      "smv": 324,
+      "sv": 177,
+      "lpv": 66,
+      "rpv": 321,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 14.332137096500208,
+      "smv": 64.95358075133942,
+      "sv": 32.900065223259936,
+      "lpv": 11.040409818606031,
+      "rpv": 68.37925099003007,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 3.161042628710676,
+      "smv": 4.476295547951345,
+      "sv": 4.8388354071904365,
+      "lpv": 6.273905852286684,
+      "rpv": 4.842831668781686,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230119SongBao#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 341,
+      "smv": 135,
+      "sv": 627,
+      "lpv": 81,
+      "rpv": 144,
+      "tips": 327,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 69.67768036633052,
+      "smv": 22.941856671461437,
+      "sv": 124.52306485827937,
+      "lpv": 16.373080008325182,
+      "rpv": 24.193208737822026,
+      "tips": 63.06819464780392,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 14.805172166785404,
+      "smv": 12.493049544603764,
+      "sv": 10.77160253003771,
+      "lpv": 8.396373776012577,
+      "rpv": 14.44256586018262,
+      "tips": 9.7760623391888,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230129LuJun",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 272,
+      "smv": 216,
+      "sv": 480,
+      "lpv": 120,
+      "rpv": 114,
+      "tips": 0,
+      "lgv": 264,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 58.486844991911596,
+      "smv": 42.820553379727215,
+      "sv": 96.91584982887133,
+      "lpv": 23.729923130733027,
+      "rpv": 18.836912527977987,
+      "tips": NaN,
+      "lgv": 52.90576398106378,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.7834292514822,
+      "smv": 15.80398490261847,
+      "sv": 13.330508738494341,
+      "lpv": 10.785959846288758,
+      "rpv": 13.685317236720993,
+      "tips": NaN,
+      "lgv": 6.818831796138681,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230222LuJun#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 320,
+      "smv": 120,
+      "sv": 513,
+      "lpv": 90,
+      "rpv": 78,
+      "tips": 276,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 65.48979156680939,
+      "smv": 21.831352403686644,
+      "sv": 101.95133241772405,
+      "lpv": 18.354333667494462,
+      "rpv": 12.685021319307964,
+      "tips": 55.638630889512605,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": 15.962995553004713,
+      "sv": 13.663751135226128,
+      "lpv": 11.937345437243671,
+      "rpv": 12.648512528405611,
+      "tips": 9.369327910525246,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230304LiYanLi",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 255,
+      "smv": 96,
+      "sv": 534,
+      "lpv": 105,
+      "rpv": 150,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 52.835888193165346,
+      "smv": 16.274695111852818,
+      "sv": 101.13594298415222,
+      "lpv": 21.30765652564014,
+      "rpv": 27.89996807912678,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.840410584152954,
+      "smv": 15.048857975950872,
+      "sv": 9.411002385182524,
+      "lpv": 10.306483723400804,
+      "rpv": 9.589226829983314,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230310LiuHongShun@centeline",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 39,
+      "smv": 771,
+      "sv": 345,
+      "lpv": 96,
+      "rpv": 375,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 8.78846345006956,
+      "smv": 149.91017601098588,
+      "sv": 66.84653113602468,
+      "lpv": 17.76122892040687,
+      "rpv": 79.14720948315401,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.821606976188555,
+      "smv": 10.732762040291819,
+      "sv": 3.60406144375812,
+      "lpv": 10.658107498830129,
+      "rpv": 12.963728565203986,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230316WangTianShun",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 200,
+      "smv": 78,
+      "sv": 690,
+      "lpv": 114,
+      "rpv": 87,
+      "tips": 0,
+      "lgv": 201,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 43.90033556912815,
+      "smv": 15.411759795454124,
+      "sv": 135.59973907730532,
+      "lpv": 24.53698709931478,
+      "rpv": 18.33121111848248,
+      "tips": NaN,
+      "lgv": 38.693122309798525,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 9.188260379761221,
+      "smv": 11.327859870582403,
+      "sv": 8.628212826590113,
+      "lpv": 7.6114493826521805,
+      "rpv": NaN,
+      "tips": NaN,
+      "lgv": 5.557411912366832,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230319CuiQingFu@@@@",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 168,
+      "smv": 99,
+      "sv": 468,
+      "lpv": 129,
+      "rpv": 93,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 36.148681367859,
+      "smv": 17.799575601837073,
+      "sv": 91.75134132033158,
+      "lpv": 28.857743139113325,
+      "rpv": 15.398004689980677,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 11.379745878423442,
+      "smv": 7.725257570173738,
+      "sv": 4.946838679553413,
+      "lpv": 5.191519284911954,
+      "rpv": 8.86071106999446,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230328CuiQingFu#@@@@",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 206,
+      "smv": 126,
+      "sv": 510,
+      "lpv": 108,
+      "rpv": 99,
+      "tips": 198,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 41.01592141239953,
+      "smv": 22.0509958992818,
+      "sv": 97.90810807096369,
+      "lpv": 21.827741540074644,
+      "rpv": 16.5803945463947,
+      "tips": 43.71256018697419,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 12.2663217004399,
+      "smv": 8.188029062386182,
+      "sv": 7.2060262953194405,
+      "lpv": 3.542526907601741,
+      "rpv": 7.626490303567688,
+      "tips": 9.231317082538544,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230408LiuTongLi",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 63,
+      "smv": 15,
+      "sv": 53,
+      "lpv": 149,
+      "rpv": 42,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 30
+    },
+    "length_mm": {
+      "mpv": 13.867977679347991,
+      "smv": 3.3057408742474474,
+      "sv": 15.393295756609934,
+      "lpv": 29.2585912005893,
+      "rpv": 6.94026440221034,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 6.674453314950731
+    },
+    "diameter_mm": {
+      "mpv": 11.244269548022428,
+      "smv": NaN,
+      "sv": 9.546826416154708,
+      "lpv": 13.217491020167794,
+      "rpv": NaN,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230413LiuTongLi#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 271,
+      "smv": 129,
+      "sv": 575,
+      "lpv": 57,
+      "rpv": 135,
+      "tips": 213,
+      "lgv": 63,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 57.1599121361269,
+      "smv": 29.504839014037195,
+      "sv": 124.0458239232367,
+      "lpv": 11.412204631682927,
+      "rpv": 23.412171012021084,
+      "tips": 43.498405378003,
+      "lgv": 12.169485807217692,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.093498054435905,
+      "smv": 15.067550199225597,
+      "sv": 19.52962697968209,
+      "lpv": 12.551041691346544,
+      "rpv": 10.633472240777703,
+      "tips": 8.660023310404645,
+      "lgv": 9.345880907934026,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230428GaoChunFeng#@@@@",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 234,
+      "smv": 96,
+      "sv": 645,
+      "lpv": 99,
+      "rpv": 144,
+      "tips": 177,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 50.63964284585542,
+      "smv": 17.965522750364922,
+      "sv": 127.99868339243636,
+      "lpv": 24.56348323759018,
+      "rpv": 27.995016526437972,
+      "tips": 41.25355664095174,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": NaN,
+      "sv": 9.071854958654969,
+      "lpv": 7.872337640530684,
+      "rpv": 7.870559329545179,
+      "tips": 9.640185797392157,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230506HuangYongFeng",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 258,
+      "smv": 105,
+      "sv": 512,
+      "lpv": 129,
+      "rpv": 93,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 243
+    },
+    "length_mm": {
+      "mpv": 54.11105655021741,
+      "smv": 17.642733675088152,
+      "sv": 100.84082132321295,
+      "lpv": 24.549094776297487,
+      "rpv": 16.882659950606563,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 46.053923054003604
+    },
+    "diameter_mm": {
+      "mpv": 12.78418371250676,
+      "smv": NaN,
+      "sv": 8.557783693736726,
+      "lpv": 9.736703768450226,
+      "rpv": 8.847946293566812,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 3.134929418606472
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230511JiaXiuLian",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 246,
+      "smv": 147,
+      "sv": 621,
+      "lpv": 132,
+      "rpv": 87,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 49.033880529647206,
+      "smv": 26.026114927538686,
+      "sv": 129.4930112499944,
+      "lpv": 26.12371513859061,
+      "rpv": 18.634699878615127,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 16.059214712818864,
+      "smv": 11.664982236080101,
+      "sv": 12.592945397016067,
+      "lpv": 10.969464707041526,
+      "rpv": 11.27830071995617,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230518LiGuiZhi",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 243,
+      "smv": 129,
+      "sv": 618,
+      "lpv": 186,
+      "rpv": 99,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 47.353183086445036,
+      "smv": 24.854186425317696,
+      "sv": 118.04919255162865,
+      "lpv": 37.16104530444288,
+      "rpv": 22.070698556293152,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 17.309318801808892,
+      "smv": 11.911580932320204,
+      "sv": 17.854767081358705,
+      "lpv": 11.707018637632325,
+      "rpv": 9.124581146326252,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230615ZhangYuPing",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 342,
+      "smv": 177,
+      "sv": 492,
+      "lpv": 177,
+      "rpv": 126,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 65.11337952293317,
+      "smv": 34.4378274193964,
+      "sv": 102.24505177612257,
+      "lpv": 33.49513899446603,
+      "rpv": 24.095362986709084,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.956293274557517,
+      "smv": 12.0115503121176,
+      "sv": 14.362049273700027,
+      "lpv": 15.466128011120993,
+      "rpv": 16.004834608740673,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230710LiuYanChang",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 249,
+      "smv": 135,
+      "sv": 546,
+      "lpv": 87,
+      "rpv": 135,
+      "tips": 0,
+      "lgv": 234,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 52.02824372946825,
+      "smv": 23.921115989514654,
+      "sv": 109.71324592617759,
+      "lpv": 15.613749225023268,
+      "rpv": 27.59679792609864,
+      "tips": NaN,
+      "lgv": 44.45551866496417,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 15.226632330446664,
+      "smv": 14.203545052978011,
+      "sv": 10.076171432784719,
+      "lpv": 14.591065396506345,
+      "rpv": 14.366865087326387,
+      "tips": NaN,
+      "lgv": 4.625090070399505,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230719LiuYanChang#",
+    "is_post_tips_by_name": true,
+    "status": "major",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 326,
+      "smv": 105,
+      "sv": 549,
+      "lpv": 6,
+      "rpv": 135,
+      "tips": 243,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 66.8381497524984,
+      "smv": 17.71963709077941,
+      "sv": 110.79992226023711,
+      "lpv": 0.7071067811865475,
+      "rpv": 25.802587852124404,
+      "tips": 47.1606938011854,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 12.856870219128718,
+      "smv": 14.261106112348418,
+      "sv": 9.82438617502384,
+      "lpv": NaN,
+      "rpv": NaN,
+      "tips": 10.675103523641756,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": [
+      {
+        "severity": "major",
+        "code": "lpv_very_short",
+        "detail": "LPV 长度 0.71 mm，疑似分段过短"
+      }
+    ]
+  },
+  {
+    "sample": "20230729GuanJunLian",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 243,
+      "smv": 189,
+      "sv": 279,
+      "lpv": 96,
+      "rpv": 99,
+      "tips": 0,
+      "lgv": 297,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 49.756039085298255,
+      "smv": 36.289680211432426,
+      "sv": 55.18611457605587,
+      "lpv": 19.27162284624961,
+      "rpv": 19.321221760049756,
+      "tips": NaN,
+      "lgv": 63.55068395030356,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": 9.070705865987229,
+      "sv": 4.2367786778405225,
+      "lpv": NaN,
+      "rpv": 10.176102361591655,
+      "tips": NaN,
+      "lgv": 11.810402547175999,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230807GuanJunLian#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 270,
+      "smv": 174,
+      "sv": 609,
+      "lpv": 84,
+      "rpv": 81,
+      "tips": 225,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 53.76240800057415,
+      "smv": 29.15617957101744,
+      "sv": 118.59805592254142,
+      "lpv": 19.4327119590319,
+      "rpv": 15.587591801262482,
+      "tips": 44.96979746478469,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.643953663565927,
+      "smv": 6.544596948826935,
+      "sv": 10.828757446174695,
+      "lpv": 7.324427409189242,
+      "rpv": 6.699469577394953,
+      "tips": 10.382322158863893,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230814XuYongXin#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 234,
+      "smv": 102,
+      "sv": 615,
+      "lpv": 159,
+      "rpv": 0,
+      "tips": 399,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 48.48524630628757,
+      "smv": 16.85037731538769,
+      "sv": 115.24216576733059,
+      "lpv": 30.164833737804337,
+      "rpv": NaN,
+      "tips": 76.90796530794455,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.379524580994541,
+      "smv": NaN,
+      "sv": 9.467050692969023,
+      "lpv": 4.38575316129249,
+      "rpv": NaN,
+      "tips": 10.106035677548094,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230815CaiXinGang#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 339,
+      "smv": 162,
+      "sv": 654,
+      "lpv": 90,
+      "rpv": 0,
+      "tips": 285,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 68.76068044410658,
+      "smv": 26.85873408480337,
+      "sv": 131.53555110279282,
+      "lpv": 16.97228623364757,
+      "rpv": NaN,
+      "tips": 56.64535706970156,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.925689897958659,
+      "smv": 11.42552163844567,
+      "sv": 12.508520740218437,
+      "lpv": 12.735914788115927,
+      "rpv": NaN,
+      "tips": 9.949065465151687,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230818CaiXinGang#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 342,
+      "smv": 192,
+      "sv": 585,
+      "lpv": 105,
+      "rpv": 0,
+      "tips": 222,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 68.37086990429253,
+      "smv": 33.25006832648779,
+      "sv": 117.90267006977666,
+      "lpv": 19.72356904034678,
+      "rpv": NaN,
+      "tips": 44.351789939341444,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 14.702177901157153,
+      "smv": 11.529885259118933,
+      "sv": 13.616925414005715,
+      "lpv": 11.243596157417397,
+      "rpv": NaN,
+      "tips": 6.558146226286883,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230825ZhaoSuCai",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 333,
+      "smv": 129,
+      "sv": 425,
+      "lpv": 99,
+      "rpv": 120,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 555
+    },
+    "length_mm": {
+      "mpv": 61.728515970304926,
+      "smv": 22.16918502688253,
+      "sv": 79.12988660163509,
+      "lpv": 19.627883371201612,
+      "rpv": 23.848918374943075,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 106.23755078168756
+    },
+    "diameter_mm": {
+      "mpv": 10.515817837253381,
+      "smv": 12.339475681035736,
+      "sv": 6.444220373579098,
+      "lpv": 6.233376224173661,
+      "rpv": 9.087280486306797,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 7.630245823910819
+    },
+    "issues": []
+  },
+  {
+    "sample": "20230831XieSuiQing#",
+    "is_post_tips_by_name": true,
+    "status": "warning",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 986,
+      "smv": 69,
+      "sv": 360,
+      "lpv": 159,
+      "rpv": 108,
+      "tips": 219,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 189.5844353169482,
+      "smv": 12.769916781087902,
+      "sv": 78.35979163409168,
+      "lpv": 42.45411196731501,
+      "rpv": 20.234615702745007,
+      "tips": 44.86049551340078,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 14.944764309465036,
+      "smv": 17.812061737043553,
+      "sv": 11.585056159786394,
+      "lpv": 8.659798120760376,
+      "rpv": 10.95518010195553,
+      "tips": 4.685536758234771,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": [
+      {
+        "severity": "warning",
+        "code": "mpv_rpv_endpoint_gap",
+        "detail": "MPV 与 RPV 最近端点距离 73.1 mm，疑似拓扑不连续或标签串错"
+      }
+    ]
+  },
+  {
+    "sample": "20230902ZhaoSuCai#",
+    "is_post_tips_by_name": true,
+    "status": "major",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 344,
+      "smv": 108,
+      "sv": 794,
+      "lpv": 6,
+      "rpv": 6,
+      "tips": 228,
+      "lgv": 0,
+      "pgv": 132
+    },
+    "length_mm": {
+      "mpv": 64.30333678198227,
+      "smv": 17.989657083124825,
+      "sv": 152.84294087713164,
+      "lpv": 0.7071067811865476,
+      "rpv": 0.7071067811865476,
+      "tips": 50.0526820492842,
+      "lgv": NaN,
+      "pgv": 23.24717886504179
+    },
+    "diameter_mm": {
+      "mpv": 9.104485502041678,
+      "smv": 9.673644193951676,
+      "sv": 9.245248585821003,
+      "lpv": NaN,
+      "rpv": NaN,
+      "tips": 10.436156662657622,
+      "lgv": NaN,
+      "pgv": 9.92199968924087
+    },
+    "issues": [
+      {
+        "severity": "major",
+        "code": "lpv_very_short",
+        "detail": "LPV 长度 0.71 mm，疑似分段过短"
+      },
+      {
+        "severity": "major",
+        "code": "rpv_very_short",
+        "detail": "RPV 长度 0.71 mm，疑似分段过短"
+      }
+    ]
+  },
+  {
+    "sample": "20231002HanYiXing",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 294,
+      "smv": 120,
+      "sv": 567,
+      "lpv": 189,
+      "rpv": 42,
+      "tips": 0,
+      "lgv": 198,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 54.47099595150011,
+      "smv": 20.121066441446708,
+      "sv": 113.52777069727921,
+      "lpv": 38.7257103250317,
+      "rpv": 8.835934059108627,
+      "tips": NaN,
+      "lgv": 39.31857077574037,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.102358266624691,
+      "smv": 11.509504835975518,
+      "sv": 10.741663720741421,
+      "lpv": 9.64104930337761,
+      "rpv": 7.905282363016491,
+      "tips": NaN,
+      "lgv": 6.786419672687202,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20231008ZhangChengGang",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 267,
+      "smv": 192,
+      "sv": 465,
+      "lpv": 135,
+      "rpv": 132,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 56.42169708651048,
+      "smv": 32.34822385060503,
+      "sv": 94.92017599214903,
+      "lpv": 27.25315996813016,
+      "rpv": 30.993091324451235,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 9.946437822897467,
+      "smv": 16.617756220417863,
+      "sv": 14.605394006407131,
+      "lpv": 8.377300826307119,
+      "rpv": 5.605611982386522,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20231024ZhangChengGang#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 303,
+      "smv": 171,
+      "sv": 612,
+      "lpv": 81,
+      "rpv": 0,
+      "tips": 345,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 62.1738886211371,
+      "smv": 28.833513326264292,
+      "sv": 118.44371245483752,
+      "lpv": 18.412658526041785,
+      "rpv": NaN,
+      "tips": 74.04310249551324,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 10.051253363066511,
+      "smv": 12.806455346695468,
+      "sv": 16.338622361930437,
+      "lpv": 6.560019412344134,
+      "rpv": NaN,
+      "tips": 10.545151220283879,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20231027HouZhiFu@delete more",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 330,
+      "smv": 282,
+      "sv": 804,
+      "lpv": 219,
+      "rpv": 162,
+      "tips": 0,
+      "lgv": 267,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 73.45382882957179,
+      "smv": 55.976670097677875,
+      "sv": 157.77303495732895,
+      "lpv": 42.775240289707156,
+      "rpv": 31.95535846247428,
+      "tips": NaN,
+      "lgv": 48.05669608777226,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 22.02120176424644,
+      "smv": 9.0157735021254,
+      "sv": 25.204527950075363,
+      "lpv": 13.155743479458666,
+      "rpv": 14.905578002711543,
+      "tips": NaN,
+      "lgv": 5.2853779082835715,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20231030HuangYongFeng$seg",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 285,
+      "smv": 117,
+      "sv": 507,
+      "lpv": 117,
+      "rpv": 99,
+      "tips": 0,
+      "lgv": 177,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 59.26127071636265,
+      "smv": 20.112309037752947,
+      "sv": 101.70453216469866,
+      "lpv": 22.293283702631353,
+      "rpv": 19.79872259002802,
+      "tips": NaN,
+      "lgv": 32.17823011940847,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.0710163259996,
+      "smv": 10.46258416712782,
+      "sv": 9.673986561604982,
+      "lpv": 12.307626867794326,
+      "rpv": 7.948920754168885,
+      "tips": NaN,
+      "lgv": 2.919168965685156,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20231103WangFang",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": false,
+      "pgv": true
+    },
+    "path_nodes": {
+      "mpv": 234,
+      "smv": 108,
+      "sv": 827,
+      "lpv": 114,
+      "rpv": 84,
+      "tips": 0,
+      "lgv": 0,
+      "pgv": 309
+    },
+    "length_mm": {
+      "mpv": 48.53871614364189,
+      "smv": 18.477176807241474,
+      "sv": 172.00387360810055,
+      "lpv": 23.567477965791184,
+      "rpv": 15.879424428932237,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 59.996711683639894
+    },
+    "diameter_mm": {
+      "mpv": 10.935906780082242,
+      "smv": 9.551018618298999,
+      "sv": 10.50522509255098,
+      "lpv": 11.060617914080913,
+      "rpv": 7.801302971388819,
+      "tips": NaN,
+      "lgv": NaN,
+      "pgv": 5.723894925066113
+    },
+    "issues": []
+  },
+  {
+    "sample": "20231104HuangYongFeng#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 255,
+      "smv": 123,
+      "sv": 519,
+      "lpv": 93,
+      "rpv": 0,
+      "tips": 216,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 51.58387529967936,
+      "smv": 20.336204104826987,
+      "sv": 105.09889148824259,
+      "lpv": 17.033857924717044,
+      "rpv": NaN,
+      "tips": 42.57022939828452,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 12.55090004710049,
+      "smv": 9.04245259122824,
+      "sv": 8.172375830569505,
+      "lpv": 6.966056408993099,
+      "rpv": NaN,
+      "tips": 10.555876412228127,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20231107HouZhiFu#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 353,
+      "smv": 141,
+      "sv": 696,
+      "lpv": 204,
+      "rpv": 114,
+      "tips": 249,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 82.53528839559294,
+      "smv": 26.46695777937288,
+      "sv": 133.43827668382158,
+      "lpv": 40.224006263979334,
+      "rpv": 20.252677401528015,
+      "tips": 43.69143249400203,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 22.230231170271143,
+      "smv": 10.315580375794587,
+      "sv": 27.610315583148676,
+      "lpv": 12.270016753545292,
+      "rpv": 11.837149786860673,
+      "tips": 11.342234280020055,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20231112WangFang#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 237,
+      "smv": 66,
+      "sv": 852,
+      "lpv": 87,
+      "rpv": 0,
+      "tips": 198,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 47.33883516817866,
+      "smv": 11.73563046984915,
+      "sv": 177.9443661216867,
+      "lpv": 18.473405358692737,
+      "rpv": NaN,
+      "tips": 40.429293473443835,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.070805557368203,
+      "smv": 11.41761174135263,
+      "sv": 12.059847875182511,
+      "lpv": 6.209628372793622,
+      "rpv": NaN,
+      "tips": 10.040782219711565,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20231119LiuHongShun#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 243,
+      "smv": 108,
+      "sv": 765,
+      "lpv": 72,
+      "rpv": 0,
+      "tips": 246,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 53.7917250123174,
+      "smv": 19.175053336103094,
+      "sv": 148.1120888984052,
+      "lpv": 15.59788792361053,
+      "rpv": NaN,
+      "tips": 47.02665275303091,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 10.864022873077793,
+      "smv": 10.997504640635066,
+      "sv": 10.459269916373614,
+      "lpv": 8.96850375859481,
+      "rpv": NaN,
+      "tips": 9.73292753073949,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20240128HanYiXing#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 246,
+      "smv": 258,
+      "sv": 570,
+      "lpv": 129,
+      "rpv": 0,
+      "tips": 189,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 49.653165154556355,
+      "smv": 43.17786891340613,
+      "sv": 110.20528538522825,
+      "lpv": 26.500915147831478,
+      "rpv": NaN,
+      "tips": 34.258579788403644,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": NaN,
+      "sv": 12.646283503260868,
+      "lpv": 7.2018619009114815,
+      "rpv": NaN,
+      "tips": 10.790877642542654,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20240129ZhiXianCheng",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 251,
+      "smv": 321,
+      "sv": 642,
+      "lpv": 126,
+      "rpv": 201,
+      "tips": 0,
+      "lgv": 336,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 56.44663615099288,
+      "smv": 53.666050404277094,
+      "sv": 135.60383007887714,
+      "lpv": 21.951408578437817,
+      "rpv": 37.16906843142094,
+      "tips": NaN,
+      "lgv": 64.7572432737689,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 19.246816333053776,
+      "smv": 12.353084422773978,
+      "sv": 16.29451998984095,
+      "lpv": 15.633401072280785,
+      "rpv": 11.305081170178662,
+      "tips": NaN,
+      "lgv": 7.03229805748045,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20240226YangLin#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 344,
+      "smv": 114,
+      "sv": 378,
+      "lpv": 78,
+      "rpv": 102,
+      "tips": 261,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 67.92097115291,
+      "smv": 20.631168493902944,
+      "sv": 68.48290467266342,
+      "lpv": 14.48973170772584,
+      "rpv": 20.642232521538887,
+      "tips": 50.275383184943585,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": NaN,
+      "smv": NaN,
+      "sv": 8.243564780274765,
+      "lpv": 4.186005749576575,
+      "rpv": 4.754076288444052,
+      "tips": 10.699963601891245,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20240226ZhangHuaiQing$seg",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 278,
+      "smv": 141,
+      "sv": 480,
+      "lpv": 234,
+      "rpv": 123,
+      "tips": 0,
+      "lgv": 276,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 60.37482289555406,
+      "smv": 25.65586782586544,
+      "sv": 88.49247765791468,
+      "lpv": 44.114885079072394,
+      "rpv": 22.04581806851306,
+      "tips": NaN,
+      "lgv": 56.08520962711687,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 14.441810700703089,
+      "smv": NaN,
+      "sv": 10.183157660264202,
+      "lpv": 14.040738489494029,
+      "rpv": 9.2150638937627,
+      "tips": NaN,
+      "lgv": 6.691490657236652,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20240227ZhangSuHua#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 233,
+      "smv": 216,
+      "sv": 531,
+      "lpv": 171,
+      "rpv": 63,
+      "tips": 222,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 46.666504439372,
+      "smv": 36.1803399129759,
+      "sv": 97.28627858309571,
+      "lpv": 37.60986696510276,
+      "rpv": 11.839022996543333,
+      "tips": 42.343920111982754,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.390731738950972,
+      "smv": 8.729127401208645,
+      "sv": 12.116877457749593,
+      "lpv": 6.862231159646189,
+      "rpv": 10.66550519863821,
+      "tips": 10.555789116746157,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20240304LiXueRong#",
+    "is_post_tips_by_name": true,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": false,
+      "tips": true,
+      "lgv": false,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 264,
+      "smv": 129,
+      "sv": 534,
+      "lpv": 105,
+      "rpv": 0,
+      "tips": 165,
+      "lgv": 0,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 58.154449090742375,
+      "smv": 22.298242388132778,
+      "sv": 105.10113491221745,
+      "lpv": 21.727148891430488,
+      "rpv": NaN,
+      "tips": 29.86384234815008,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 16.555851116660637,
+      "smv": 11.710127515173939,
+      "sv": 17.233427746465665,
+      "lpv": 5.774070108396301,
+      "rpv": NaN,
+      "tips": 10.44935744249182,
+      "lgv": NaN,
+      "pgv": NaN
+    },
+    "issues": []
+  },
+  {
+    "sample": "20240305ZhangHuaiQing$seg",
+    "is_post_tips_by_name": false,
+    "status": "ok",
+    "present": {
+      "mpv": true,
+      "smv": true,
+      "sv": true,
+      "lpv": true,
+      "rpv": true,
+      "tips": false,
+      "lgv": true,
+      "pgv": false
+    },
+    "path_nodes": {
+      "mpv": 251,
+      "smv": 126,
+      "sv": 540,
+      "lpv": 165,
+      "rpv": 132,
+      "tips": 0,
+      "lgv": 198,
+      "pgv": 0
+    },
+    "length_mm": {
+      "mpv": 57.2274774746598,
+      "smv": 22.980454699902328,
+      "sv": 101.40538517396695,
+      "lpv": 28.186474268697786,
+      "rpv": 25.374128364172442,
+      "tips": NaN,
+      "lgv": 39.197173680670204,
+      "pgv": NaN
+    },
+    "diameter_mm": {
+      "mpv": 13.050229721160607,
+      "smv": NaN,
+      "sv": 9.884723249175353,
+      "lpv": 10.664116896746446,
+      "rpv": 10.753726737777935,
+      "tips": NaN,
+      "lgv": 5.280535210169753,
+      "pgv": NaN
+    },
+    "issues": []
+  }
+]

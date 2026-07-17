@@ -123,7 +123,7 @@ class STLPipelineTests(unittest.TestCase):
         self.assertGreater(float(item["label"].sum()), 0.0)
         self.assertLess(int((item["crop_slices"][:, 1] - item["crop_slices"][:, 0]).prod()), 24 * 24 * 16)
 
-    def test_nii_dataset_skips_dollar_marked_cases_and_missing_pretrain_stl(self) -> None:
+    def test_nii_dataset_skips_dollar_marked_cases_but_allows_missing_pretrain_stl(self) -> None:
         try:
             import nibabel as nib
             import torch  # noqa: F401
@@ -146,7 +146,7 @@ class STLPipelineTests(unittest.TestCase):
 
             ds = VesselNiiDataset(tmp, grid_size=8, include_invalid=True)
 
-        self.assertEqual([case.name for case in ds.cases], ["keep_case"])
+        self.assertEqual([case.name for case in ds.cases], ["keep_case", "skip_missing_stl"])
 
     def test_nii_dataset_resamples_mask_to_pretrain_space(self) -> None:
         try:

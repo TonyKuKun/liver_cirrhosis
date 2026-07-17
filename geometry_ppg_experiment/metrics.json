@@ -1,0 +1,36 @@
+{
+  "features": "E:\\pycharm_code\\liver_cirrhosis\\geometry_ppg_experiment\\features.csv",
+  "n_samples": 85,
+  "feature_columns": [
+    "R_total",
+    "D_Murray",
+    "R_collateral",
+    "Ratio_SMV_SV",
+    "theta_SMV_SV",
+    "Ratio_LPV_RPV"
+  ],
+  "models": {
+    "linear": {
+      "n": 85,
+      "pearson_r": -0.11766182025568596,
+      "pearson_p": 0.2835147791548383,
+      "mae": 5.540562062100187,
+      "rmse": 6.615639650626529,
+      "bias": -0.0009556576677013177,
+      "bland_altman_mean_diff": -0.0009556576677013177,
+      "bland_altman_loa_lower": -13.044563346915679,
+      "bland_altman_loa_upper": 13.042652031580277
+    },
+    "lasso": {
+      "n": 85,
+      "pearson_r": -1.0,
+      "pearson_p": 0.0,
+      "mae": 5.1621869406162455,
+      "rmse": 6.233591190867191,
+      "bias": -5.433562096989001e-15,
+      "bland_altman_mean_diff": -5.433562096989001e-15,
+      "bland_altman_loa_lower": -12.290348799372392,
+      "bland_altman_loa_upper": 12.290348799372381
+    }
+  }
+}

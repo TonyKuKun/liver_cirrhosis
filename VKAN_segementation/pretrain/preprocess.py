@@ -1823,7 +1823,7 @@ def main():
     )
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
     parser.add_argument("--patient", default=None)
-    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--force", default=False)
     parser.add_argument("--skip_existing_pretrain", action="store_true")
     parser.add_argument(
         "--only_dollar_patients",

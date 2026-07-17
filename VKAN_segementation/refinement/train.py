@@ -90,7 +90,7 @@ def _preview_names(names: list[str], limit: int = 8) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train VKAN refinement model from cropped NIfTI masks.")
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
-    parser.add_argument("--out_dir", default="VKAN_segementation/runs/nnVnet3")
+    parser.add_argument("--out_dir", default="VKAN_segementation/runs/nnVnet4")
     parser.add_argument("--dataset", choices=("nii", "stl"), default="nii")
     parser.add_argument("--model", choices=MODEL_NAMES, default="nnVnet", help="Refinement model architecture.")
     parser.add_argument("--pretrain_name", default="pretrain.nii.gz")
@@ -106,7 +106,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--base_channels", type=int, default=24)
     parser.add_argument("--val_ratio", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=30)
     parser.add_argument("--include_review", action="store_true", help="Include cases marked pretrain_quality=review.")
     parser.add_argument(
         "--resume",
