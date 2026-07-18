@@ -9,6 +9,12 @@ import os
 import numpy as np
 from collections import defaultdict, deque
 
+from features_layout import (
+    RAW_CENTERLINE_NAME,
+    SMOOTH_CENTERLINE_NAME,
+    resolve_feature_path,
+)
+
 
 # ============================================================
 # STL 体素化
@@ -93,10 +99,10 @@ def load_raw_tree(stl_path):
     返回: (nodes, adj, parentdir)
     """
     parentdir = os.path.dirname(stl_path)
-    filepath = os.path.join(parentdir, "CenterlinePoints.txt")
-    if not os.path.exists(filepath):
+    filepath = resolve_feature_path(parentdir, RAW_CENTERLINE_NAME)
+    if filepath is None:
         raise FileNotFoundError(f"找不到: {filepath}")
-    nodes, adj = _load_centerline_file(filepath)
+    nodes, adj = _load_centerline_file(str(filepath))
     return nodes, adj, parentdir
 
 
@@ -109,10 +115,10 @@ def load_tree(stl_path):
     """
     parentdir = os.path.dirname(stl_path)
 
-    for name in ["newCenterlist.txt", "CenterlinePoints.txt"]:
-        filepath = os.path.join(parentdir, name)
-        if os.path.exists(filepath):
-            nodes, adj = _load_centerline_file(filepath)
+    for name in [SMOOTH_CENTERLINE_NAME, RAW_CENTERLINE_NAME]:
+        filepath = resolve_feature_path(parentdir, name)
+        if filepath is not None:
+            nodes, adj = _load_centerline_file(str(filepath))
             return nodes, adj, parentdir
 
     raise FileNotFoundError(

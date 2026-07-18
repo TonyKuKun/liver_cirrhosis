@@ -3,6 +3,16 @@ const STAGES = [
   { key: "features", index: 2, label: "几何特征", title: "几何特征 - 中心线、分段与截面", sub: "STL -> 特征" },
   { key: "pvp", index: 3, label: "PVP 预测", title: "PVP 预测 - 物理先验约束网络", sub: "特征 -> PVP" },
 ];
+const FEATURE_LABELS = {
+  total_centerline_length: "总中心线长度",
+  sv_smv_diameter_ratio: "SV/SMV 直径比",
+  sv_smv_angle: "SV-SMV 夹角",
+  angle_sv_smv: "SV-SMV 汇合角",
+  confluence_murray3_deviation: "汇合 Murray³ 偏离",
+  inflow_resistance_asymmetry: "入流阻力不对称",
+  collateral_burden_score: "侧支负担评分",
+  splenic_dominance_index: "脾主导指数",
+};
 const STAGE_BY_KEY = Object.fromEntries(STAGES.map((stage) => [stage.key, stage]));
 const CENTERLINE_LAYER_CONTROLS = [
   ["mesh", "模型", true],
@@ -369,7 +379,7 @@ function segmentationStage(patient) {
   return `<div class="seg-workspace">
     <div class="seg-viewer-card compact">
       <div class="seg-viewer" id="segViewer">
-        <canvas id="segStlCanvas"></canvas>
+        <div id="segPlotly" class="seg-plotly"></div>
         <div class="seg-viewer-hud">
           <span>${escapeHtml(patient.id)}</span>
           <b>${primary ? escapeHtml(primary.label) : "未找到 STL"}</b>
@@ -570,6 +580,14 @@ function renderRightPanel() {
   host.querySelectorAll("[data-run-stage]").forEach((button) => {
     button.addEventListener("click", () => runStage(button.dataset.runStage));
   });
+  host.querySelectorAll("[data-seg-pipeline]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const mode = button.dataset.segMode;
+      const select = document.querySelector("[data-seg-param='mode']");
+      if (select && mode) select.value = mode;
+      runStage("segmentation");
+    });
+  });
   host.querySelectorAll("[data-file]").forEach((button) => {
     button.addEventListener("click", () => openPatientFile(button.dataset.file));
   });
@@ -632,9 +650,9 @@ function segmentationPanel(patient) {
       <span>强制重算已有结果</span>
     </label>
     <div class="pipeline-steps">
-      ${pipelineStep(1, "TotalSegmentator 粗分割", files["orig.nii.gz"]?.exists || files["dcm"]?.exists, files["pretrain.stl"]?.exists)}
-      ${pipelineStep(2, "nnVnet 门静脉精修", files["pretrain.stl"]?.exists, files["predict.stl"]?.exists)}
-      ${pipelineStep(3, "平滑 / 填洞 / STL 质控", files["predict.stl"]?.exists, files["predict_smooth.stl"]?.exists)}
+      ${pipelineStep(1, "TotalSegmentator 粗分割", "pretrain", files["orig.nii.gz"]?.exists || files["dcm"]?.exists, files["pretrain.stl"]?.exists)}
+      ${pipelineStep(2, "nnVnet 门静脉精修", "predict", files["pretrain.stl"]?.exists, files["predict.stl"]?.exists)}
+      ${pipelineStep(3, "平滑 / 填洞 / STL 质控", "smooth", files["predict.stl"]?.exists, files["predict_smooth.stl"]?.exists)}
     </div>
     <button class="btn-ghost seg-param-toggle ${state.segmentationParamsOpen ? "active" : ""}" type="button" data-seg-params-toggle>${paramsToggleLabel}</button>
     <div class="seg-params-section" ${paramsHidden}>
@@ -676,14 +694,14 @@ function segmentationPanel(patient) {
   </div>`;
 }
 
-function pipelineStep(index, label, ready, done) {
+function pipelineStep(index, label, mode, ready, done) {
   const stateClass = done ? "done" : ready ? "ready" : "missing";
   const text = done ? "完成" : ready ? "可运行" : "等待输入";
-  return `<div class="pipeline-step ${stateClass}">
+  return `<button type="button" class="pipeline-step ${stateClass}" data-seg-pipeline data-seg-mode="${mode}">
     <span>${index}</span>
     <b>${escapeHtml(label)}</b>
     <em>${text}</em>
-  </div>`;
+  </button>`;
 }
 
 function layerControl(layer) {
@@ -706,9 +724,9 @@ function segmentationLayers(patient) {
   const files = patient.status.files || {};
   const organs = patient.status.organs || {};
   const layers = [
-    { id: "pretrain", label: "Pretrain", file: "pretrain.stl", color: "#38bdf8", opacity: .76, visible: Boolean(files["pretrain.stl"]?.exists), exists: Boolean(files["pretrain.stl"]?.exists), kind: "vessel" },
-    { id: "predict", label: files["predict_smooth.stl"]?.exists ? "Predict smooth" : "Predict", file: files["predict_smooth.stl"]?.exists ? "predict_smooth.stl" : "predict.stl", color: "#10a66a", opacity: .95, visible: Boolean(files["predict_smooth.stl"]?.exists || files["predict.stl"]?.exists), exists: Boolean(files["predict_smooth.stl"]?.exists || files["predict.stl"]?.exists), kind: "vessel" },
-    { id: "vessel", label: "Vessel label", file: "vessel.stl", color: "#047857", opacity: .58, visible: !files["predict_smooth.stl"]?.exists && !files["predict.stl"]?.exists && Boolean(files["vessel.stl"]?.exists), exists: Boolean(files["vessel.stl"]?.exists), kind: "vessel" },
+    { id: "pretrain", label: "Pretrain", file: "pretrain.stl", color: "#38bdf8", opacity: .46, visible: Boolean(files["pretrain.stl"]?.exists), exists: Boolean(files["pretrain.stl"]?.exists), kind: "vessel" },
+    { id: "predict", label: files["predict_smooth.stl"]?.exists ? "Predict smooth" : "Predict", file: files["predict_smooth.stl"]?.exists ? "predict_smooth.stl" : "predict.stl", color: "#10a66a", opacity: .78, visible: Boolean(files["predict_smooth.stl"]?.exists || files["predict.stl"]?.exists), exists: Boolean(files["predict_smooth.stl"]?.exists || files["predict.stl"]?.exists), kind: "vessel" },
+    { id: "vessel", label: "Vessel label", file: "vessel.stl", color: "#047857", opacity: .60, visible: !files["predict_smooth.stl"]?.exists && !files["predict.stl"]?.exists && Boolean(files["vessel.stl"]?.exists), exists: Boolean(files["vessel.stl"]?.exists), kind: "vessel" },
   ];
   const organColors = {
     liver: "#a7c957",
@@ -729,7 +747,7 @@ function segmentationLayers(patient) {
       label: organLabel(key),
       file: `segmentation/${name}.stl`,
       color: organColors[key] || "#9ca3af",
-      opacity: key === "portal_vein" ? .72 : .22,
+      opacity: key === "portal_vein" ? .55 : key === "liver" ? .24 : .30,
       visible: ["liver", "spleen", "kidney", "kidney_left", "kidney_right", "aorta", "inferior_vena_cava", "portal_vein"].includes(key),
       exists: Boolean(info?.exists),
       kind: "organ",
@@ -881,10 +899,8 @@ function compareMetric(label, value, unit, tone = "") {
 function predictionExplanation(mean, std, min, max, clinical) {
   const risk = pressureRisk(mean);
   if (numeric(mean) == null) return "当前病例尚未生成 PVP 预测结果。请先运行 PVP 推理。";
-  const consistency = numeric(std) == null ? "暂无 fold 一致性信息" : numeric(std) <= 2 ? `5 个 fold 的标准差为 ${numeric(std).toFixed(2)}，一致性较好` : `5 个 fold 的标准差为 ${numeric(std).toFixed(2)}，建议结合输入质量复核`;
-  const range = numeric(min) == null || numeric(max) == null ? "" : `，预测范围 ${numeric(min).toFixed(2)}-${numeric(max).toFixed(2)} mmHg`;
   const timing = clinical?.timing ? `当前病例为${clinical.timing}` : "";
-  return `该病例预测 PVP 为 ${numeric(mean).toFixed(2)} mmHg，处于「${risk.label}」区间。${consistency}${range}。${timing ? timing + "，" : ""}建议结合术前 PVP、术后随访和临床症状综合判断 TIPS 压降效果。`;
+  return `该病例预测 PVP 为 ${numeric(mean).toFixed(2)} mmHg，处于「${risk.label}」区间。${timing ? timing + "，" : ""}建议结合术前 PVP、术后随访和临床症状综合判断 TIPS 压降效果。`;
 }
 
 function predictionExplanationWithGeometry(mean, std, min, max, clinical, summary) {
@@ -905,11 +921,9 @@ function predictionExplanationWithGeometry(mean, std, min, max, clinical, summar
   if (tipsDiameter != null) geom.push(`TIPS 平均直径 ${tipsDiameter.toFixed(1)} mm`);
   if (ratio != null) geom.push(`SV/SMV 直径比 ${ratio.toFixed(2)}`);
   if (angle != null) geom.push(`SV-SMV 夹角 ${angle.toFixed(1)}°`);
-  const consistency = numeric(std) == null ? "fold 一致性暂无数据" : numeric(std) <= 2 ? `fold 标准差 ${numeric(std).toFixed(2)}，模型一致性较好` : `fold 标准差 ${numeric(std).toFixed(2)}，模型分歧偏大，建议复核输入特征和分割质量`;
-  const range = numeric(min) == null || numeric(max) == null ? "" : `预测范围 ${numeric(min).toFixed(1)}-${numeric(max).toFixed(1)} mmHg`;
   const timing = clinical?.timing ? `当前为${clinical.timing}` : "";
   const geomText = geom.length ? `几何上可见 ${geom.join("、")}，这些血管通径、汇合角度和支架相关特征共同参与了 PVP 估计。` : "当前几何摘要不足，建议先完成中心线和特征提取。";
-  return `预测 PVP 为 ${n.toFixed(2)} mmHg，属于「${risk.label}」。${geomText}${consistency}${range ? `，${range}` : ""}。${timing ? timing + "，" : ""}建议结合术前压力、术后随访和出血/腹水等症状判断 TIPS 减压效果。`;
+  return `预测 PVP 为 ${n.toFixed(2)} mmHg，属于「${risk.label}」。${geomText}${timing ? timing + "，" : ""}建议结合术前压力、术后随访和出血/腹水等症状判断 TIPS 减压效果。`;
 }
 
 function pvpModelPreview(patient) {
@@ -995,11 +1009,10 @@ function pvpSegmentTable(segments) {
 }
 
 async function initSegmentationViewer(patient) {
-  const canvas = $("segStlCanvas");
+  const plot = $("segPlotly");
   const empty = $("segViewerEmpty");
-  if (!canvas || !patient) return;
+  if (!plot || !patient) return;
   const token = ++state.viewerToken;
-  const ctx = canvas.getContext("2d");
   const rawLayers = segmentationLayers(patient).filter((layer) => layer.exists);
   const initialLayers = rawLayers.filter((layer) => layer.visible);
   const loadingLayers = new Set();
@@ -1021,7 +1034,7 @@ async function initSegmentationViewer(patient) {
       const layer = model.layers.find((item) => item.id === id);
       if (layer) {
         layer.visible = visible;
-        scheduleSegmentationDraw(canvas, ctx, model);
+        renderSegmentationPlot(plot, model);
         return;
       }
       const layerDef = rawLayers.find((item) => item.id === id);
@@ -1034,7 +1047,7 @@ async function initSegmentationViewer(patient) {
           model.layers.push(layerWithStoredOpacity({ ...loadedLayer, visible: true }));
           fitSegmentationModel(model);
           empty.hidden = model.layers.length > 0;
-          scheduleSegmentationDraw(canvas, ctx, model);
+          renderSegmentationPlot(plot, model);
         }).finally(() => loadingLayers.delete(id));
       }
     },
@@ -1042,18 +1055,15 @@ async function initSegmentationViewer(patient) {
       const layer = model.layers.find((item) => item.id === id);
       if (layer && Number.isFinite(value)) {
         layer.opacity = value;
-        scheduleSegmentationDraw(canvas, ctx, model);
+        renderSegmentationPlot(plot, model);
       }
     },
   };
 
-  bindSegmentationCanvas(canvas, ctx, model);
-  resizeSegmentationCanvas(canvas, ctx, model);
-
   if (!rawLayers.length) {
     empty.textContent = "未找到 pretrain / predict / 器官 STL，请确认病人目录。";
     empty.hidden = false;
-    scheduleSegmentationDraw(canvas, ctx, model);
+    renderSegmentationPlot(plot, model);
     return;
   }
 
@@ -1071,7 +1081,7 @@ async function initSegmentationViewer(patient) {
     fitSegmentationModel(model);
     empty.hidden = loaded.length > 0;
     if (!loaded.length) empty.textContent = "STL 文件存在，但未能解析出三角面。";
-    scheduleSegmentationDraw(canvas, ctx, model);
+    renderSegmentationPlot(plot, model);
   } catch (error) {
     if (token !== state.viewerToken) return;
     empty.textContent = `STL 加载失败：${error.message}`;
@@ -1079,11 +1089,56 @@ async function initSegmentationViewer(patient) {
   }
 }
 
+function renderSegmentationPlot(plot, model) {
+  if (!window.Plotly || !plot) return;
+  const traces = model.layers.filter((layer) => layer.visible).map((layer) => {
+    const vertices = [];
+    const faces = [];
+    layer.triangles.forEach((tri) => {
+      const offset = vertices.length;
+      vertices.push(...tri);
+      faces.push([offset, offset + 1, offset + 2]);
+    });
+    return {
+      type: "mesh3d",
+      name: layer.label,
+      x: vertices.map((p) => p[0]),
+      y: vertices.map((p) => p[1]),
+      z: vertices.map((p) => p[2]),
+      i: faces.map((f) => f[0]),
+      j: faces.map((f) => f[1]),
+      k: faces.map((f) => f[2]),
+      color: layer.color,
+      opacity: layer.opacity,
+      flatshading: false,
+      hoverinfo: "skip",
+      lighting: { ambient: 0.62, diffuse: 0.82, specular: 0.08, roughness: 0.72 },
+    };
+  });
+  const axis = { showgrid: true, gridcolor: "#d9e1ea", zeroline: false, showbackground: true, backgroundcolor: "#f8fafc" };
+  Plotly.react(plot, traces, {
+    margin: { l: 0, r: 0, t: 0, b: 0 },
+    paper_bgcolor: "#f8fafc",
+    plot_bgcolor: "#f8fafc",
+    scene: {
+      aspectmode: "data",
+      xaxis: { ...axis, title: "X" },
+      yaxis: { ...axis, title: "Y" },
+      zaxis: { ...axis, title: "Z" },
+      camera: { eye: { x: 1.55, y: 1.45, z: 1.05 }, up: { x: 0, y: 0, z: 1 } },
+    },
+    showlegend: false,
+    uirevision: "segmentation-plot",
+  }, { displaylogo: false, responsive: true, scrollZoom: true });
+}
+
 async function loadSegmentationLayer(layer, token) {
   if (token !== state.viewerToken) return null;
   const response = await fetch(patientFileUrl(layer.file));
   if (!response.ok || token !== state.viewerToken) return null;
-  const triangles = parseStl(await response.arrayBuffer(), layer.kind === "organ" ? 3500 : 14000);
+  // Plotly renders the mesh on the GPU; keep the complete surface so it does
+  // not turn into a sparse cloud of unrelated triangles.
+  const triangles = parseStl(await response.arrayBuffer(), 1000000);
   return triangles.length ? { ...layer, triangles } : null;
 }
 
@@ -1199,34 +1254,48 @@ function drawSegmentationViewer(canvas, ctx, model) {
 }
 
 function drawViewerScene(ctx, w, h) {
-  const bg = ctx.createLinearGradient(0, 0, 0, h);
-  bg.addColorStop(0, "#f8fbff");
-  bg.addColorStop(0.48, "#eef5fb");
-  bg.addColorStop(1, "#dfe8f1");
-  ctx.fillStyle = bg;
+  ctx.fillStyle = "#f8fafc";
   ctx.fillRect(0, 0, w, h);
 
-  const glow = ctx.createRadialGradient(w * 0.48, h * 0.36, 20, w * 0.48, h * 0.36, Math.max(w, h) * 0.58);
-  glow.addColorStop(0, "rgba(255,255,255,.95)");
-  glow.addColorStop(0.55, "rgba(238,246,255,.58)");
-  glow.addColorStop(1, "rgba(210,222,234,0)");
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, w, h);
-
-  ctx.save();
-  ctx.translate(w / 2, h * 0.72);
-  ctx.scale(1, 0.28);
-  const floor = ctx.createRadialGradient(0, 0, 20, 0, 0, Math.min(w, h) * 0.42);
-  floor.addColorStop(0, "rgba(41,56,76,.18)");
-  floor.addColorStop(0.58, "rgba(71,88,112,.08)");
-  floor.addColorStop(1, "rgba(71,88,112,0)");
-  ctx.fillStyle = floor;
-  ctx.beginPath();
-  ctx.arc(0, 0, Math.min(w, h) * 0.42, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+  drawViewerGrid(ctx, w, h);
 
   drawViewerAxis(ctx, w, h);
+}
+
+function drawViewerGrid(ctx, w, h) {
+  const horizon = h * 0.43;
+  const floorBottom = h - 1;
+  const centerX = w * 0.5;
+  const spacing = Math.max(36, Math.min(64, w / 12));
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(203,213,225,.78)";
+  ctx.lineWidth = 1;
+
+  for (let x = -spacing * 10; x <= spacing * 10; x += spacing) {
+    ctx.beginPath();
+    ctx.moveTo(centerX + x * 0.12, horizon);
+    ctx.lineTo(centerX + x, floorBottom);
+    ctx.stroke();
+  }
+
+  const rows = 8;
+  for (let i = 0; i <= rows; i += 1) {
+    const t = i / rows;
+    const eased = t * t;
+    const y = horizon + (floorBottom - horizon) * eased;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = "rgba(148,163,184,.72)";
+  ctx.beginPath();
+  ctx.moveTo(0, horizon);
+  ctx.lineTo(w, horizon);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawViewerAxis(ctx, w, h) {
@@ -1471,8 +1540,12 @@ function keyMetricList(metrics) {
   const entries = Object.entries(metrics);
   if (!entries.length) return `<p class="note">暂无系统级关键特征；运行几何阶段后生成。</p>`;
   return `<div class="file-list compact">${entries.map(([key, value]) => `
-    <div class="file-row exists"><span>${escapeHtml(key)}</span><b>${formatNum(value, 3)}</b></div>
+    <div class="file-row exists"><span title="${escapeHtml(key)}">${escapeHtml(featureLabel(key))}</span><b>${formatNum(value, 3)}</b></div>
   `).join("")}</div>`;
+}
+
+function featureLabel(key) {
+  return FEATURE_LABELS[key] || String(key).replaceAll("_", " ");
 }
 
 function foldTable(rows) {

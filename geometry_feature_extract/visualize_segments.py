@@ -19,6 +19,7 @@ import numpy as np
 import vtk
 
 from utils import load_tree
+from features_layout import POINTWISE_TEMP_NAME, SEGMENT_ASSIGNMENTS_NAME, resolve_feature_path
 
 
 # ============================================================
@@ -284,8 +285,8 @@ def _add_max_section_actors(renderer, stl_path, seg_data, nodes, actors_dict):
     parentdir = os.path.dirname(stl_path)
 
     # 加载 pointwise 数据
-    pw_path = os.path.join(parentdir, "centerline_pointwise_profiles.json")
-    if not os.path.exists(pw_path):
+    pw_path = resolve_feature_path(parentdir, POINTWISE_TEMP_NAME)
+    if pw_path is None:
         print("  [Max sections] 缺少 centerline_pointwise_profiles.json")
         return
 
@@ -377,9 +378,9 @@ def _add_max_section_actors(renderer, stl_path, seg_data, nodes, actors_dict):
 def visualize_segments(stl_path, block=True):
     """打开 VTK 窗口可视化分段结果。"""
     parentdir = os.path.dirname(stl_path)
-    json_path = os.path.join(parentdir, "centerline_profiles.json")
+    json_path = resolve_feature_path(parentdir, SEGMENT_ASSIGNMENTS_NAME)
 
-    if not os.path.exists(json_path):
+    if json_path is None:
         print(f"  [Warn] 未找到分段文件: {json_path}")
         return
 

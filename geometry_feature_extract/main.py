@@ -21,8 +21,11 @@
 """
 
 import os
+import io
 import time
 import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import redirect_stderr, redirect_stdout
 
 from extract_centerline import extract_centerline
 from smooth_centerline import smooth_centerline
@@ -32,7 +35,13 @@ from extract_features import (FEATURE_DESCRIPTION_FILENAME,
                               extract_all_features)
 from extract_profiles import extract_profiles
 from export_visualization import export_patient_visualization
-from visualize_segments import visualize_segments
+from features_layout import (
+    SEGMENT_ASSIGNMENTS_NAME,
+    UNIFIED_FEATURES_NAME,
+    ensure_public_layout,
+    feature_path,
+    remove_generated_outputs,
+)
 
 
 # ============================================================
@@ -56,24 +65,8 @@ class PipelineSteps:
 
 def _clean_old_outputs(folder_path):
     """清理上一轮产生的中间文件 (避免与新结果混淆)。"""
-    for old in ["CenterlinePoints.txt",
-                "newCenterlist.txt",
-                "centerline_profiles.json",
-                "portal_vein_features.json",
-                "unified_features.json",
-                "feature_description.json",
-                "centerline_pointwise_profiles.json",
-                "sv_smv_angle.json",
-                "vis_interactive.html",
-                "vis_overview.png",
-                "centerline_screenshot.png",
-                "segment_screenshot.png"]:
-        p = os.path.join(folder_path, old)
-        if os.path.exists(p):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+    ensure_public_layout(folder_path)
+    remove_generated_outputs(folder_path, keep_public=False)
 
 
 def _process_one_patient(stl_path, post_tips, params, steps):
@@ -83,6 +76,7 @@ def _process_one_patient(stl_path, post_tips, params, steps):
     返回: dict, 各步骤的成功 / 失败状态。
     """
     folder_path = os.path.dirname(stl_path)
+    ensure_public_layout(folder_path)
     status = {
         'centerline': False, 'smooth': False, 'segment': False,
         'features': False, 'profiles': False,
@@ -196,12 +190,24 @@ def _process_one_patient(stl_path, post_tips, params, steps):
     # ---- Step 6: VTK 弹窗可视化 ----
     if steps.visualize:
         try:
+            from visualize_segments import visualize_segments
+
             visualize_segments(stl_path, block=True)
             status['visualize'] = True
         except Exception as e:
             print(f"  [Step 6] VTK 弹窗失败: {e}")
 
+    if steps.extract_features or steps.extract_profiles:
+        remove_generated_outputs(folder_path, keep_public=True)
     return status
+
+
+def _process_patient_job(stl_path, post_tips, params, steps):
+    """Run one patient in a worker process and return its buffered log."""
+    log = io.StringIO()
+    with redirect_stdout(log), redirect_stderr(log):
+        status = _process_one_patient(stl_path, post_tips, params, steps)
+    return status, log.getvalue()
 
 
 # ============================================================
@@ -211,7 +217,8 @@ def _process_one_patient(stl_path, post_tips, params, steps):
 def process_stl_files(root_folder, params, steps,
                        stl_name="vessel.stl",
                        clean_old=False,
-                       skip_existing_results=False):
+                       skip_existing_results=False,
+                       max_workers=None):
     """
     批量处理 root_folder 下所有合法子文件夹的 vessel.stl。
 
@@ -221,20 +228,11 @@ def process_stl_files(root_folder, params, steps,
         steps:       PipelineSteps 实例
         stl_name:    STL 文件名
         clean_old:   是否在每轮处理前清理旧文件
+        max_workers: 并行患者进程数; None 自动选择, 1 使用串行模式
     """
     if not os.path.exists(root_folder):
         print(f"根目录不存在: {root_folder}")
         return
-
-    desc_path = os.path.join(root_folder, FEATURE_DESCRIPTION_FILENAME)
-    try:
-        import json
-        with open(desc_path, 'w', encoding='utf-8') as f:
-            json.dump(build_feature_description(), f, indent=2,
-                      ensure_ascii=False, allow_nan=True)
-        print(f"feature_description 已保存: {desc_path}")
-    except Exception as e:
-        print(f"feature_description 保存失败: {e}")
 
     subfolders = sorted([
         f for f in os.listdir(root_folder)
@@ -266,6 +264,7 @@ def process_stl_files(root_folder, params, steps,
         'skipped_existing': 0,
     }
 
+    jobs = []
     for folder in valid:
         folder_path = os.path.join(root_folder, folder)
         stl_path = os.path.join(folder_path, stl_name)
@@ -275,20 +274,9 @@ def process_stl_files(root_folder, params, steps,
             summary['no_stl'] += 1
             continue
 
-        post_tips = is_post_tips(folder)
-        tag = "TIPS术后" if post_tips else "TIPS术前"
-
-        print(f"\n{'='*60}")
-        print(f"处理: {folder}   [{tag}]")
-        print(f"{'='*60}")
-
         if skip_existing_results:
-            result_files = ("unified_features.json", "unified_feature.json")
-            existing_result = next(
-                (name for name in result_files
-                 if os.path.exists(os.path.join(folder_path, name))),
-                None)
-            if existing_result:
+            existing_result = feature_path(folder_path, UNIFIED_FEATURES_NAME)
+            if existing_result.exists():
                 print(f"[Skip] {folder}: existing result file {existing_result}")
                 summary['skipped_existing'] += 1
                 continue
@@ -296,13 +284,62 @@ def process_stl_files(root_folder, params, steps,
         if clean_old:
             _clean_old_outputs(folder_path)
 
-        status = _process_one_patient(stl_path, post_tips, params, steps)
+        jobs.append((folder, stl_path, is_post_tips(folder)))
 
+    def record_status(status):
         if status['centerline']:    summary['centerline_ok']   += 1
         if status['segment']:       summary['segment_ok']      += 1
         if status['features']:      summary['features_ok']     += 1
         if status['profiles']:      summary['profiles_ok']     += 1
         if status['export_vis']:    summary['export_vis_ok']   += 1
+
+    if max_workers is None:
+        max_workers = min(
+            4, max(1, (os.cpu_count() or 2) - 1), max(1, len(jobs)))
+    else:
+        max_workers = max(1, int(max_workers))
+
+    if steps.visualize and max_workers > 1:
+        print("检测到交互式 VTK 可视化，自动改用串行模式。")
+        max_workers = 1
+
+    print(f"待处理 {len(jobs)} 个样本, 并行进程数: {max_workers}")
+
+    if max_workers == 1:
+        for folder, stl_path, post_tips in jobs:
+            tag = "TIPS术后" if post_tips else "TIPS术前"
+            print(f"\n{'='*60}")
+            print(f"处理: {folder}   [{tag}]")
+            print(f"{'='*60}")
+            try:
+                record_status(
+                    _process_one_patient(stl_path, post_tips, params, steps))
+            except Exception as exc:
+                # 单个患者失败时继续处理剩余患者。
+                print(f"  患者任务失败，跳过并继续下一个: {exc}")
+                traceback.print_exc()
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _process_patient_job, stl_path, post_tips, params, steps
+                ): (folder, post_tips)
+                for folder, stl_path, post_tips in jobs
+            }
+            for future in as_completed(futures):
+                folder, post_tips = futures[future]
+                tag = "TIPS术后" if post_tips else "TIPS术前"
+                print(f"\n{'='*60}")
+                print(f"完成: {folder}   [{tag}]")
+                print(f"{'='*60}")
+                try:
+                    status, patient_log = future.result()
+                    if patient_log:
+                        print(patient_log, end="" if patient_log.endswith("\n") else "\n")
+                    record_status(status)
+                except Exception as exc:
+                    print(f"  患者任务失败: {exc}")
+                    traceback.print_exc()
 
     # ---- 汇总 ----
     print(f"\n{'='*60}")
@@ -436,7 +473,7 @@ if __name__ == '__main__':
     steps.segment_vessels = False
     steps.extract_features = True
     steps.extract_profiles = True
-    steps.export_visualization = True   # 导出 HTML + PNG
+    steps.export_visualization = False   # 导出 HTML + PNG
     steps.visualize = False              # VTK 弹窗 (批量时建议关掉)
 
     # 参数

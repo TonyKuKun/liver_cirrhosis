@@ -25,6 +25,13 @@ import numpy as np
 import trimesh
 
 import plotly.graph_objects as go
+from features_layout import (
+    POINTWISE_TEMP_NAME,
+    RAW_CENTERLINE_NAME,
+    SEGMENT_ASSIGNMENTS_NAME,
+    SMOOTH_CENTERLINE_NAME,
+    resolve_feature_path,
+)
 
 
 # ============================================================
@@ -50,8 +57,8 @@ SEGMENT_LABELS = {
 
 def _load_segments_json(parentdir):
     """加载分段 JSON, 不存在返回 None。"""
-    path = os.path.join(parentdir, "centerline_profiles.json")
-    if not os.path.exists(path):
+    path = resolve_feature_path(parentdir, SEGMENT_ASSIGNMENTS_NAME)
+    if path is None:
         return None
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -62,8 +69,8 @@ def _load_segments_json(parentdir):
 
 def _load_pointwise_profiles(parentdir):
     """加载逐点剖面 JSON, 不存在返回 None。"""
-    path = os.path.join(parentdir, "centerline_pointwise_profiles.json")
-    if not os.path.exists(path):
+    path = resolve_feature_path(parentdir, POINTWISE_TEMP_NAME)
+    if path is None:
         return None
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -75,13 +82,13 @@ def _load_pointwise_profiles(parentdir):
 def _load_centerline_txt(parentdir, prefer_smooth=True):
     """加载中心线 txt, 返回 nodes dict。"""
     if prefer_smooth:
-        candidates = ["newCenterlist.txt", "CenterlinePoints.txt"]
+        candidates = [SMOOTH_CENTERLINE_NAME, RAW_CENTERLINE_NAME]
     else:
-        candidates = ["CenterlinePoints.txt", "newCenterlist.txt"]
+        candidates = [RAW_CENTERLINE_NAME, SMOOTH_CENTERLINE_NAME]
 
     for name in candidates:
-        path = os.path.join(parentdir, name)
-        if os.path.exists(path):
+        path = resolve_feature_path(parentdir, name)
+        if path is not None:
             nodes = {}
             try:
                 with open(path, 'r') as f:

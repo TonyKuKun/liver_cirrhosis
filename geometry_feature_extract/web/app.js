@@ -43,6 +43,18 @@ const STEPS = [
   ["export", "导出可视化"],
 ];
 
+const SYSTEM_FEATURE_LABELS = {
+  total_centerline_length: "总中心线长度",
+  sv_smv_diameter_ratio: "SV/SMV 直径比",
+  sv_smv_angle: "SV-SMV 夹角",
+  angle_sv_smv: "SV-SMV 汇合角",
+  confluence_murray3_ratio: "汇合 Murray³ 比值",
+  confluence_murray3_deviation: "汇合 Murray³ 偏离",
+  inflow_resistance_asymmetry: "入流阻力不对称",
+  collateral_burden_score: "侧支负担评分",
+  splenic_dominance_index: "脾主导指数",
+};
+
 const LAYERS = {
   mesh: true,
   rawCenterline: false,
@@ -723,6 +735,7 @@ async function saveManualSegmentation() {
     logLine(`Manual segmentation saved: ${result.n_kept || 0}/${result.n_atomic_segments || 0} atomic segments retained.`);
     if (result.vessels?.length) logLine(`Assigned vessels: ${result.vessels.join(", ")}`);
     if (result.smoothed_vessels?.length) logLine(`Smoothed final vessels: ${result.smoothed_vessels.join(", ")}`);
+    if (result.features_recomputed) logLine("Unified features recomputed after manual segmentation.");
     if (result.removed_outputs?.length) logLine(`Cleared derived outputs: ${result.removed_outputs.join(", ")}`);
     state.manualSegment.active = false;
     state.manualSegment.dirty = false;
@@ -1411,7 +1424,7 @@ function renderSystemFeatures(features) {
   rows.slice(0, 80).forEach(([key, value]) => {
     const row = document.createElement("div");
     row.className = "feature-row";
-    row.innerHTML = `<span title="${escapeHtml(key)}">${escapeHtml(key)}</span><strong>${escapeHtml(formatValue(value))}</strong>`;
+    row.innerHTML = `<span title="${escapeHtml(key)}">${escapeHtml(featureLabel(key))}</span><strong>${escapeHtml(formatValue(value))}</strong>`;
     wrap.appendChild(row);
   });
 }
@@ -1422,6 +1435,10 @@ function flattenSystem(system) {
     return { ...system.available, ...(system.unavailable || {}) };
   }
   return system;
+}
+
+function featureLabel(key) {
+  return SYSTEM_FEATURE_LABELS[key] || String(key).replaceAll("_", " ");
 }
 
 function formatValue(value) {

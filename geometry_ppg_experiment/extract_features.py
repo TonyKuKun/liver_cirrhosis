@@ -10,7 +10,9 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ import numpy as np
 
 
 DEFAULT_DATA_ROOT = Path(r"F:\PCG data\dataset\test4all_sample")
+DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 FEATURE_COLUMNS = [
     "R_total",
     "D_Murray",
@@ -1284,6 +1287,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--features-name", default="features.csv")
     parser.add_argument("--report-name", default="feature_extraction_report.json")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of patient worker processes (default: {DEFAULT_WORKERS}; use 1 for serial)",
+    )
     return parser.parse_args()
 
 
@@ -1292,14 +1301,26 @@ def main() -> None:
     data_root = args.data_root
     if not data_root.exists():
         raise FileNotFoundError(f"Data root not found: {data_root}")
+    if args.workers < 1:
+        raise ValueError("--workers must be at least 1")
 
     rows: list[dict[str, Any]] = []
     reports: list[dict[str, Any]] = []
-    for patient_dir in sorted(p for p in data_root.iterdir() if p.is_dir()):
-        row, report = extract_patient(patient_dir)
-        reports.append(report)
-        if row is not None:
-            rows.append(row)
+    patient_dirs = sorted(p for p in data_root.iterdir() if p.is_dir())
+    if args.workers == 1:
+        results = map(extract_patient, patient_dirs)
+    else:
+        executor = ProcessPoolExecutor(max_workers=args.workers)
+        results = executor.map(extract_patient, patient_dirs)
+
+    try:
+        for row, report in results:
+            reports.append(report)
+            if row is not None:
+                rows.append(row)
+    finally:
+        if args.workers > 1:
+            executor.shutdown()
 
     out_dir = args.out_dir
     write_features_csv(out_dir / args.features_name, rows)

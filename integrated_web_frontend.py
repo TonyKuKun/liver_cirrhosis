@@ -25,6 +25,17 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import urlopen
 
+from geometry_feature_extract.features_layout import (
+    FEATURES_DIRNAME,
+    PUBLIC_FEATURE_NAMES,
+    RAW_CENTERLINE_NAME,
+    SMOOTH_CENTERLINE_NAME,
+    SEGMENT_ASSIGNMENTS_NAME,
+    UNIFIED_FEATURES_NAME,
+    remove_generated_outputs,
+    resolve_feature_path,
+)
+
 
 APP_ROOT = Path(__file__).resolve().parent
 WEB_ROOT = APP_ROOT / "web"
@@ -70,14 +81,7 @@ OUTPUTS = [
     "predict.stl",
     "predict_smooth.stl",
     "vessel.stl",
-    "CenterlinePoints.txt",
-    "newCenterlist.txt",
-    "centerline_profiles.json",
-    "centerline_pointwise_profiles.json",
-    "portal_vein_features.json",
-    "unified_features.json",
-    "vis_interactive.html",
-    "vis_overview.png",
+    *PUBLIC_FEATURE_NAMES,
     "PVP_predict.txt",
     "pvp_prediction.json",
 ]
@@ -170,6 +174,69 @@ def _read_label_value(path: Path) -> str:
     return " ".join(text.split())[:120]
 
 
+PATIENT_META_ALIASES = {
+    "age": {"age", "年龄", "岁数"},
+    "sex": {"sex", "gender", "性别", "patientsex", "患者性别"},
+    "birth_date": {"birthdate", "dateofbirth", "出生日期", "生日", "patientbirthdate", "患者出生日期"},
+    "primary_disease": {"primarydisease", "disease", "diagnosis", "基础疾病", "原发病", "诊断"},
+    "symptoms": {"symptoms", "symptom", "complications", "complication", "并发症", "症状"},
+    "shunt_type": {"shunttype", "tipstype", "分流类型", "手术类型"},
+    "exam_date": {"examdate", "checkdate", "studydate", "检查日期", "检查时间"},
+    "surgery_date": {"surgerydate", "operationdate", "tipsdate", "手术日期", "手术时间"},
+    "measured_pvp": {"pvp", "pressure", "measuredpvp", "门静脉压力", "门静脉压"},
+}
+
+
+def _meta_key(value: str) -> str | None:
+    normalized = re.sub(r"[\s_\-./()（）]+", "", str(value or "").strip().lower())
+    for key, aliases in PATIENT_META_ALIASES.items():
+        if normalized in aliases:
+            return key
+    return None
+
+
+def _metadata_from_mapping(data: dict) -> dict:
+    meta = {}
+    for raw_key, raw_value in data.items():
+        key = _meta_key(str(raw_key))
+        if key and raw_value not in (None, ""):
+            meta[key] = " ".join(str(raw_value).split())[:120]
+    return meta
+
+
+def _read_patient_info(path: Path) -> dict:
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="ignore").strip()
+    except Exception:
+        return {}
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return _metadata_from_mapping(data)
+    except json.JSONDecodeError:
+        pass
+
+    meta = {}
+    for line in text.splitlines():
+        line = line.strip().lstrip("-*").strip()
+        if not line:
+            continue
+        parts = re.split(r"\s*[:：=\t]\s*", line, maxsplit=1)
+        if len(parts) == 1:
+            parts = re.split(r"\s+", line, maxsplit=1)
+        if len(parts) != 2:
+            continue
+        key = _meta_key(parts[0])
+        value = parts[1].strip()
+        if key and value:
+            meta[key] = " ".join(value.split())[:120]
+    return meta
+
+
 def _parse_date(value: str | None) -> date | None:
     raw = str(value or "").strip()
     if not raw:
@@ -228,30 +295,46 @@ def _read_pvp_value(patient_dir: Path) -> float | None:
 
 def _patient_label_metadata(path: Path) -> dict:
     label_dir = path / "label"
+    meta = _read_patient_info(path / "patient_info.txt")
     if not label_dir.exists():
-        return {}
+        return meta
     fields = {
         "age": ["age.txt", "Age.txt", "AGE.txt", "年龄.txt"],
         "sex": ["sex.txt", "Sex.txt", "gender.txt", "Gender.txt", "性别.txt"],
         "primary_disease": ["primary_disease.txt", "disease.txt", "diagnosis.txt", "基础疾病.txt", "原发病.txt"],
         "symptoms": ["symptoms.txt", "complications.txt", "complication.txt", "并发症.txt", "症状.txt"],
         "shunt_type": ["shunt_type.txt", "tips_type.txt", "分流类型.txt"],
+        "exam_date": ["exam_date.txt", "check_date.txt", "study_date.txt", "检查日期.txt"],
         "surgery_date": ["surgery_date.txt", "operation_date.txt", "tips_date.txt", "手术日期.txt"],
         "measured_pvp": ["PVP.txt", "pvp.txt", "pressure.txt", "门静脉压力.txt"],
     }
-    meta = {}
     for key, names in fields.items():
         for name in names:
             value = _read_label_value(label_dir / name)
             if value:
                 meta[key] = value
                 break
+    for file_path in label_dir.glob("*.txt"):
+        key = _meta_key(file_path.stem)
+        if key and key not in meta:
+            value = _read_label_value(file_path)
+            if value:
+                meta[key] = value
     for structured in ["clinical.json", "patient.json", "metadata.json", "label.json"]:
         data = _read_json(label_dir / structured)
         if isinstance(data, dict):
-            for key in fields:
-                if key not in meta and data.get(key) not in (None, ""):
-                    meta[key] = str(data.get(key))[:120]
+            for key, value in _metadata_from_mapping(data).items():
+                if key not in meta:
+                    meta[key] = value
+    if not meta.get("age") and meta.get("birth_date"):
+        birth_date = _parse_date(meta.get("birth_date"))
+        exam_date = _parse_date(meta.get("exam_date")) or _folder_exam_date(path)
+        if birth_date and exam_date:
+            age = exam_date.year - birth_date.year - (
+                (exam_date.month, exam_date.day) < (birth_date.month, birth_date.day)
+            )
+            if 0 <= age <= 120:
+                meta["age"] = str(age)
     return meta
 
 
@@ -278,7 +361,7 @@ def _find_preop_patient(patient: Path, root: Path | None) -> Path | None:
 
 def _clinical_context(patient: Path, root: Path | None = None) -> dict:
     meta = _patient_label_metadata(patient)
-    exam_date = _folder_exam_date(patient)
+    exam_date = _parse_date(meta.get("exam_date")) or _folder_exam_date(patient)
     surgery_date = _parse_date(meta.get("surgery_date"))
     days_from_surgery = (exam_date - surgery_date).days if exam_date and surgery_date else None
     timing = "术后" if patient.name.endswith("#") else "术前"
@@ -380,6 +463,21 @@ def _patient_file_info(patient: Path, rel: str, recursive: bool = False) -> dict
     return info
 
 
+def _resolve_feature_file(patient: Path, name: str) -> Path | None:
+    if name not in PUBLIC_FEATURE_NAMES:
+        raise ValueError(f"Unsupported geometry feature file: {name}")
+    return resolve_feature_path(patient.resolve(), name)
+
+
+def _output_file_info(patient: Path, name: str, recursive: bool = True) -> dict:
+    if name in PUBLIC_FEATURE_NAMES:
+        path = _resolve_feature_file(patient, name) or (patient / FEATURES_DIRNAME / name)
+        info = _file_info(path)
+        info["requested"] = name
+        return info
+    return _patient_file_info(patient, name, recursive=recursive)
+
+
 def _looks_like_patient(path: Path) -> bool:
     return any([
         (path / "dcm").is_dir(),
@@ -388,7 +486,7 @@ def _looks_like_patient(path: Path) -> bool:
         _resolve_patient_file(path, "predict.stl", recursive=False) is not None,
         _resolve_patient_file(path, "predict_smooth.stl", recursive=False) is not None,
         _resolve_patient_file(path, "vessel.stl", recursive=False) is not None,
-        (path / "unified_features.json").exists(),
+        _resolve_feature_file(path, UNIFIED_FEATURES_NAME) is not None,
     ])
 
 
@@ -399,20 +497,20 @@ def _valid_patient(path: Path) -> bool:
 def _discover_patients(root: Path) -> list[dict]:
     root = root.resolve()
     if _valid_patient(root):
-        return [_patient_record(root)]
+        return [_patient_record(root, include_label=False)]
     if not root.exists():
         return []
-    return [_patient_record(p) for p in sorted(root.iterdir(), key=lambda x: x.name.lower()) if _valid_patient(p)]
+    return [_patient_record(p, include_label=False) for p in sorted(root.iterdir(), key=lambda x: x.name.lower()) if _valid_patient(p)]
 
 
-def _patient_record(path: Path) -> dict:
+def _patient_record(path: Path, include_label: bool = True) -> dict:
     path = path.resolve()
     return {
         "id": path.name,
         "name": path.name,
         "folder": str(path),
         "is_post_tips": "#" in path.name,
-        "label_meta": _patient_label_metadata(path),
+        "label_meta": _patient_label_metadata(path) if include_label else {},
     }
 
 
@@ -513,10 +611,10 @@ def _stage_status(patient: Path, stage: str, model_dir: Path | None, include_out
             _resolve_patient_file(patient, "predict_smooth.stl", recursive=False) is not None
             or _resolve_patient_file(patient, "vessel.stl", recursive=False) is not None
         )
-        done = (patient / "unified_features.json").exists()
-        outputs = ["CenterlinePoints.txt", "centerline_profiles.json", "centerline_pointwise_profiles.json", "unified_features.json", "vis_interactive.html"]
+        done = _resolve_feature_file(patient, UNIFIED_FEATURES_NAME) is not None
+        outputs = list(PUBLIC_FEATURE_NAMES)
     elif stage == "pvp":
-        ready = (patient / "unified_features.json").exists() and bool(model_dir)
+        ready = _resolve_feature_file(patient, UNIFIED_FEATURES_NAME) is not None and bool(model_dir)
         done = (patient / "PVP_predict.txt").exists() or (patient / "pvp_prediction.json").exists()
         outputs = ["PVP_predict.txt", "pvp_prediction.json"]
     else:
@@ -525,7 +623,7 @@ def _stage_status(patient: Path, stage: str, model_dir: Path | None, include_out
         "status": "done" if done else "ready" if ready else "missing",
         "ready": ready,
         "done": done,
-        "outputs": {name: _patient_file_info(patient, name, recursive=False) for name in outputs} if include_outputs else {},
+        "outputs": {name: _output_file_info(patient, name) for name in outputs} if include_outputs else {},
     }
 
 
@@ -542,8 +640,20 @@ def _patient_organs(patient: Path) -> dict:
     return organs
 
 
-def _patient_output_files(patient: Path) -> dict:
-    return {name: _patient_file_info(patient, name, recursive=False) for name in OUTPUTS}
+def _patient_output_files(patient: Path, recursive: bool = False) -> dict:
+    # The patient-list request is intentionally shallow. Searching through a
+    # DICOM tree once per output file makes loading a large cohort expensive.
+    return {name: _output_file_info(patient, name, recursive=recursive) for name in OUTPUTS}
+
+
+def _feature_source(system: dict | None) -> dict:
+    if not isinstance(system, dict):
+        return {}
+    for key in ("all_values", "available"):
+        value = system.get(key)
+        if isinstance(value, dict) and value:
+            return value
+    return system
 
 
 def _feature_summary(features: dict | None) -> dict:
@@ -553,7 +663,7 @@ def _feature_summary(features: dict | None) -> dict:
     system = features.get("system") if isinstance(features.get("system"), dict) else {}
     global_data = features.get("global") if isinstance(features.get("global"), dict) else {}
     vessel_presence = features.get("vessel_presence") if isinstance(features.get("vessel_presence"), dict) else {}
-    sys_values = system.get("all_values") if isinstance(system.get("all_values"), dict) else system
+    sys_values = _feature_source(system)
     segments = []
     for key in ["mpv", "sv", "smv", "lpv", "rpv", "tips", "lgv", "pgv"]:
         value = stat.get(key)
@@ -567,16 +677,27 @@ def _feature_summary(features: dict | None) -> dict:
                 "max_curvature": value.get("max_curvature"),
                 "mean_circularity": value.get("mean_circularity"),
             })
-    keys = [
-        "angle_sv_smv",
-        "confluence_murray3_deviation",
-        "inflow_resistance_asymmetry",
-        "collateral_burden_score",
-        "splenic_dominance_index",
+    preferred_metrics = [
+        ("total_centerline_length", global_data.get("total_centerline_length")),
+        ("sv_smv_diameter_ratio", global_data.get("sv_smv_diameter_ratio")),
+        ("sv_smv_angle", global_data.get("sv_smv_angle")),
+        ("angle_sv_smv", sys_values.get("angle_sv_smv")),
+        ("confluence_murray3_deviation", sys_values.get("confluence_murray3_deviation")),
+        ("inflow_resistance_asymmetry", sys_values.get("inflow_resistance_asymmetry")),
+        ("collateral_burden_score", sys_values.get("collateral_burden_score")),
+        ("splenic_dominance_index", sys_values.get("splenic_dominance_index")),
     ]
+    key_metrics = {}
+    for key, value in preferred_metrics:
+        if value not in (None, ""):
+            key_metrics[key] = value
+    if "angle_sv_smv" not in key_metrics and sys_values.get("angle_sv_smv") not in (None, ""):
+        key_metrics["angle_sv_smv"] = sys_values.get("angle_sv_smv")
+    if "sv_smv_angle" not in key_metrics and global_data.get("sv_smv_angle") not in (None, ""):
+        key_metrics["sv_smv_angle"] = global_data.get("sv_smv_angle")
     return {
         "segments": segments,
-        "key_metrics": {key: sys_values.get(key) for key in keys if isinstance(sys_values, dict) and key in sys_values},
+        "key_metrics": key_metrics,
         "global": global_data,
         "vessel_presence": {
             key: {
@@ -594,6 +715,7 @@ def _patient_status(patient: Path, model_dir: Path | None, root: Path | None = N
     if not detailed:
         return {
             "folder": str(patient),
+            "label_meta": {},
             "files": _patient_output_files(patient),
             "organs": _patient_organs(patient),
             "stages": stages,
@@ -604,7 +726,8 @@ def _patient_status(patient: Path, model_dir: Path | None, root: Path | None = N
         }
 
     organs = _patient_organs(patient)
-    features = _read_json(patient / "unified_features.json")
+    features_path = _resolve_feature_file(patient, UNIFIED_FEATURES_NAME)
+    features = _read_json(features_path) if features_path else None
     prediction = _read_json(patient / "pvp_prediction.json")
     preview_stl = (
         _resolve_patient_file(patient, "predict_smooth.stl", recursive=False)
@@ -614,6 +737,7 @@ def _patient_status(patient: Path, model_dir: Path | None, root: Path | None = N
     )
     return {
         "folder": str(patient),
+        "label_meta": _patient_label_metadata(patient),
         "files": _patient_output_files(patient),
         "organs": organs,
         "stages": stages,
@@ -621,7 +745,7 @@ def _patient_status(patient: Path, model_dir: Path | None, root: Path | None = N
         "prediction": prediction,
         "clinical": _clinical_context(patient, root),
         "preview": {
-            "vis_html": (patient / "vis_interactive.html").exists(),
+            "vis_html": False,
             "vis_png": _file_info(patient / "vis_overview.png"),
             "stl": _file_info(preview_stl) if preview_stl else _file_info(patient / "predict_smooth.stl"),
         },
@@ -716,7 +840,7 @@ def _run_segmentation(patient_dir: Path, session: dict, payload: dict, job: dict
     py = sys.executable
     if mode in {"auto", "pretrain"}:
         _run_command([
-            py, str(VKAN_ROOT / "totalseg.py"), "--data_root", str(patient_dir),
+            py, str(VKAN_ROOT / "pretrain" / "totalseg.py"), "--data_root", str(patient_dir),
             "--patient", patient_dir.name, "--device", str(payload.get("device") or "gpu"),
             "--structures", "bone_all", "spleen", "liver", "kidney_left", "kidney_right",
             "inferior_vena_cava", "aorta", "portal_vein", "--resume", "--fast",
@@ -758,13 +882,13 @@ def _feature_stl(patient_dir: Path) -> Path:
 def _run_features(patient_dir: Path, job: dict):
     stl = _feature_stl(patient_dir)
     script = f"""
+import shutil
 from pathlib import Path
 from extract_centerline import extract_centerline
 from smooth_centerline import smooth_centerline
 from segment_vessels import segment_vessels
 from extract_profiles import extract_profiles
 from extract_features import extract_all_features
-from export_visualization import export_patient_visualization
 
 stl = Path(r'''{stl}''')
 extract_centerline(str(stl), pitch=0.5, min_branch_length_mm=10.0, min_relative_length=0.05,
@@ -776,7 +900,23 @@ segment_vessels(str(stl), post_tips='#' in stl.parent.name)
 extract_profiles(str(stl), n_points=200, pitch=0.5, curvature_window=7, section_step=3,
                  ownership_factor=1.8, junction_policy='min_valid', max_diameter_rate_per_mm=0.5)
 extract_all_features(str(stl), n_fit_points=10, curvature_window=7, sample_step=3, pitch=0.5)
-export_patient_visualization(str(stl), export_html=True, export_png=False, verbose=True)
+from features_layout import PUBLIC_FEATURE_NAMES, remove_generated_outputs
+remove_generated_outputs(stl.parent, keep_public=True)
+patient_root = Path(r'''{patient_dir}''')
+source_features = stl.parent / 'features'
+target_features = patient_root / 'features'
+target_features.mkdir(parents=True, exist_ok=True)
+if source_features.resolve() != target_features.resolve():
+    for name in PUBLIC_FEATURE_NAMES:
+        source = source_features / name
+        target = target_features / name
+        if source.exists():
+            if target.exists():
+                target.unlink()
+            shutil.move(str(source), str(target))
+    if source_features.exists() and not any(source_features.iterdir()):
+        source_features.rmdir()
+remove_generated_outputs(patient_root, keep_public=True)
 """
     _run_command([sys.executable, "-c", script], CENTERLINE_ROOT, job)
 
@@ -845,7 +985,7 @@ def _run_job(job_id: str):
                         else:
                             _run_segmentation(patient_dir, session, payload, job)
                     elif stage == "features":
-                        if (patient_dir / "unified_features.json").exists() and not payload.get("force"):
+                        if _resolve_feature_file(patient_dir, UNIFIED_FEATURES_NAME) is not None and not payload.get("force"):
                             _append(job, f"[skip] {patient['id']} feature outputs already exist")
                         else:
                             _run_features(patient_dir, job)
@@ -932,6 +1072,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/health":
                 self._json({"ok": True, "time": _now(), "runtime": _runtime()})
+            elif path == "/assets/plotly.min.js":
+                self._serve_plotly()
             elif path == "/api/legacy-workbench":
                 self._legacy_workbench(parsed.query)
             elif path.startswith("/api/session/") and path.endswith("/data"):
@@ -1005,6 +1147,18 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
         self._bytes(file_path.read_bytes(), ctype, headers={"Cache-Control": "no-store"}, head_only=head_only)
 
+    def _serve_plotly(self, head_only=False):
+        try:
+            import plotly
+            file_path = Path(plotly.__file__).resolve().parent / "package_data" / "plotly.min.js"
+            if file_path.exists():
+                self._bytes(file_path.read_bytes(), "application/javascript; charset=utf-8",
+                            headers={"Cache-Control": "no-store"}, head_only=head_only)
+                return
+        except Exception:
+            pass
+        self._json({"error": "Local Plotly asset not found"}, status=404, head_only=head_only)
+
     def _session(self, session_id: str) -> dict:
         with LOCK:
             session = SESSIONS.get(session_id)
@@ -1045,7 +1199,13 @@ class Handler(BaseHTTPRequestHandler):
         data = []
         for patient in patients:
             item = dict(patient)
-            item["status"] = _patient_status(Path(patient["folder"]), model, root, detailed=detailed)
+            status = _patient_status(Path(patient["folder"]), model, root, detailed=detailed)
+            item["status"] = status
+            # The frontend renders patient cards and clinical fields from the
+            # top-level record. Promote detailed metadata from the status
+            # payload so the selected patient shows the same source of truth.
+            if detailed:
+                item["label_meta"] = status.get("label_meta") or {}
             data.append(item)
         self._json({"session": session, "patients": data, "stage_labels": STAGE_LABELS})
 

@@ -35,6 +35,7 @@
 import os
 import json
 import numpy as np
+from features_layout import SEGMENT_ASSIGNMENTS_NAME, feature_path
 from collections import deque
 
 from utils import (
@@ -724,7 +725,10 @@ def segment_vessels(stl_path, post_tips=None, output_json_path=None,
                                 nodes, branch_points, endpoints)
 
     if output_json_path is None:
-        output_json_path = os.path.join(parentdir, "centerline_profiles.json")
+        output_json_path = str(feature_path(
+            parentdir, SEGMENT_ASSIGNMENTS_NAME, create=True))
+    else:
+        os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
     with open(output_json_path, 'w', encoding='utf-8') as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
 

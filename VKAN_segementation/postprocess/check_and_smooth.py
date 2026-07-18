@@ -321,10 +321,10 @@ def discover_patients(data_root: str | Path):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check, smooth and visualize STL meshes.")
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample", help="Root directory containing patient subdirectories")
-    parser.add_argument("--patient", default=r"20201224WangMingLian#", help="Only process a specific patient")
+    parser.add_argument("--patient", default=None, help="Only process a specific patient")
     parser.add_argument("--iterations", type=int, default=80, help="Smooth iterations; <=20 is amplified for visible smoothing")
     parser.add_argument("--strength", type=float, default=0.55, help="Smoothing strength, clamped to 0.05..0.85")
-    parser.add_argument("--force", action="store_true", help="Overwrite existing smooth STL and reports")
+    parser.add_argument("--force", default=True, help="Overwrite existing smooth STL and reports")
     args = parser.parse_args()
 
     cases = discover_patients(args.data_root)

@@ -21,6 +21,12 @@ import trimesh
 import trimesh.intersections
 
 from utils import (load_tree, path_to_coords, voxelize_stl, physical_to_voxel)
+from features_layout import (
+    POINTWISE_TEMP_NAME,
+    SEGMENT_ASSIGNMENTS_NAME,
+    feature_path,
+    resolve_feature_path,
+)
 
 
 # ============================================================
@@ -1737,20 +1743,17 @@ def _branchpoint_arcs_for_path(seg_path, nodes, branchpoint_ids):
             if int(nid) in branchpoint_ids]
 
 
-ANALYSIS_RANGE_FILE = "analysis_ranges.json"
-
-
 def _load_analysis_ranges(parentdir):
-    range_path = os.path.join(parentdir, ANALYSIS_RANGE_FILE)
-    if not os.path.exists(range_path):
+    range_path = resolve_feature_path(parentdir, SEGMENT_ASSIGNMENTS_NAME)
+    if range_path is None:
         return {}
     try:
         with open(range_path, 'r', encoding='utf-8') as handle:
             data = json.load(handle)
-        ranges = data.get('ranges', {}) if isinstance(data, dict) else {}
+        ranges = data.get('analysis_ranges', {}) if isinstance(data, dict) else {}
         return ranges if isinstance(ranges, dict) else {}
     except Exception as exc:
-        print(f"  Warning: unable to read {ANALYSIS_RANGE_FILE}: {exc}")
+        print(f"  Warning: unable to read analysis ranges: {exc}")
         return {}
 
 
@@ -1819,8 +1822,8 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
                                   超阈孤立点视为伪影截面 (单点塌陷/膨胀).
     """
     parentdir = os.path.dirname(stl_path)
-    seg_path = os.path.join(parentdir, "centerline_profiles.json")
-    if not os.path.exists(seg_path):
+    seg_path = resolve_feature_path(parentdir, SEGMENT_ASSIGNMENTS_NAME)
+    if seg_path is None:
         print(f"  跳过 (无分段文件): {seg_path}")
         return
 
@@ -2018,7 +2021,7 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
             str(k): float(v) for k, v in radii_by_seg.items()
             if v is not None
         },
-        'analysis_ranges_file': ANALYSIS_RANGE_FILE if analysis_ranges else None,
+        'analysis_ranges_file': SEGMENT_ASSIGNMENTS_NAME if analysis_ranges else None,
         'analysis_ranges_applied': sorted(analysis_ranges.keys()),
         # 新增逐点通道清单 (便于训练侧统一索引)
         'pointwise_channels': [
@@ -2040,7 +2043,7 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
         ],
     }
 
-    out_path = os.path.join(parentdir, "centerline_pointwise_profiles.json")
+    out_path = str(feature_path(parentdir, POINTWISE_TEMP_NAME, create=True))
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump(profiles, f, indent=2, ensure_ascii=False, allow_nan=True)
 
@@ -2112,8 +2115,8 @@ def batch_extract_profiles(root_folder, n_points=100, pitch=0.5,
         stl = os.path.join(fp, stl_name)
         if not os.path.exists(stl):
             continue
-        seg_json = os.path.join(fp, "centerline_profiles.json")
-        if not os.path.exists(seg_json):
+        seg_json = resolve_feature_path(fp, SEGMENT_ASSIGNMENTS_NAME)
+        if seg_json is None:
             print(f"  {folder}: 缺少分段 JSON, 跳过")
             fail += 1
             continue

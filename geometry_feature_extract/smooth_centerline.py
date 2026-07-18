@@ -16,6 +16,7 @@ from scipy.interpolate import UnivariateSpline
 from collections import defaultdict, deque
 
 from utils import load_raw_tree, classify_nodes, save_tree
+from features_layout import SMOOTH_CENTERLINE_NAME, feature_path
 
 
 def smooth_centerline(stl_path, output_txt_path=None,
@@ -94,7 +95,9 @@ def smooth_centerline(stl_path, output_txt_path=None,
         segments, smoothed_segments, nodes, key_points, endpoints)
 
     if output_txt_path is None:
-        output_txt_path = os.path.join(parentdir, "newCenterlist.txt")
+        output_txt_path = str(feature_path(parentdir, SMOOTH_CENTERLINE_NAME, create=True))
+    else:
+        os.makedirs(os.path.dirname(output_txt_path), exist_ok=True)
 
     save_tree(new_tree, output_txt_path)
 

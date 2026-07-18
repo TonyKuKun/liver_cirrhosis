@@ -201,7 +201,9 @@ def _extract_centerline_once(stl_path, output_txt_path=None,
 
     if output_txt_path is None:
         parentdir = os.path.dirname(stl_path)
-        output_txt_path = os.path.join(parentdir, "CenterlinePoints.txt")
+        output_txt_path = str(feature_path(parentdir, RAW_CENTERLINE_NAME, create=True))
+    else:
+        os.makedirs(os.path.dirname(output_txt_path), exist_ok=True)
     save_tree(centerline_tree, output_txt_path)
 
     # ---- 缓存一致性保护 ----
@@ -210,8 +212,8 @@ def _extract_centerline_once(stl_path, output_txt_path=None,
     #   或 smooth_centerline 关闭), 旧的 newCenterlist.txt 会"屏蔽"新结果,
     #   导致下游/可视化与新参数完全脱节. 这里主动把过期的平滑文件干掉,
     #   保证 load_tree() 必然落到刚写的 CenterlinePoints.txt 上.
-    stale_smooth = os.path.join(os.path.dirname(output_txt_path),
-                                 "newCenterlist.txt")
+    stale_smooth = str(feature_path(
+        os.path.dirname(stl_path), SMOOTH_CENTERLINE_NAME))
     if os.path.exists(stale_smooth):
         try:
             os.remove(stale_smooth)
@@ -672,3 +674,4 @@ if __name__ == '__main__':
     import sys
     path = sys.argv[1] if len(sys.argv) > 1 else r"F:\example\vessel.stl"
     extract_centerline(path)
+from features_layout import RAW_CENTERLINE_NAME, SMOOTH_CENTERLINE_NAME, feature_path

@@ -28,6 +28,13 @@ from utils import (load_tree, path_to_coords, node_distance,
 from system_features import (compute_system_features,
                               SYSTEM_FEATURE_NAMES,
                               SYSTEM_FEATURE_LABELS_CN)
+from features_layout import (
+    POINTWISE_TEMP_NAME,
+    SEGMENT_ASSIGNMENTS_NAME,
+    UNIFIED_FEATURES_NAME,
+    feature_path,
+    resolve_feature_path,
+)
 
 
 # ============================================================
@@ -470,7 +477,7 @@ def extract_all_features(stl_path, n_fit_points=10,
                           curvature_window=7, sample_step=3,
                           pitch=0.5,
                           write_unified=True,
-                          write_legacy=True):
+                          write_legacy=False):
     """
     从中心线树 + 分段 JSON + 剖面 JSON 计算所有统计特征 + 系统特征,
     写入:
@@ -508,8 +515,8 @@ def extract_all_features(stl_path, n_fit_points=10,
 
     # ---------- 2. 加载分段 JSON ----------
     print("[2/5] 加载分段 JSON (centerline_profiles.json)...")
-    seg_json_path = os.path.join(parentdir, "centerline_profiles.json")
-    if not os.path.exists(seg_json_path):
+    seg_json_path = resolve_feature_path(parentdir, SEGMENT_ASSIGNMENTS_NAME)
+    if seg_json_path is None:
         print(f"  ✗ 分段 JSON 不存在, 请先运行 segment_vessels.py")
         return {}
 
@@ -524,9 +531,9 @@ def extract_all_features(stl_path, n_fit_points=10,
 
     # ---------- 3. 加载 pointwise 剖面 JSON (优先源) ----------
     print("[3/5] 加载剖面 JSON (centerline_pointwise_profiles.json)...")
-    pw_json_path = os.path.join(parentdir, "centerline_pointwise_profiles.json")
+    pw_json_path = resolve_feature_path(parentdir, POINTWISE_TEMP_NAME)
     pointwise_data = None
-    if os.path.exists(pw_json_path):
+    if pw_json_path is not None:
         try:
             with open(pw_json_path, 'r', encoding='utf-8') as f:
                 pointwise_data = json.load(f)
@@ -593,11 +600,8 @@ def extract_all_features(stl_path, n_fit_points=10,
     if angle_result is not None:
         all_features['sv_smv_angle'] = angle_result['angle_degrees']
         # 角度详情单独保存 (保留旧文件以兼容)
-        angle_json = os.path.join(parentdir, "sv_smv_angle.json")
         save_data = {k: v for k, v in angle_result.items()
                      if not k.startswith('_')}
-        with open(angle_json, 'w', encoding='utf-8') as f:
-            json.dump(save_data, f, indent=2, ensure_ascii=False)
         print(f"  sv_smv_angle: {angle_result['angle_degrees']:.1f}°")
     else:
         all_features['sv_smv_angle'] = None
@@ -634,30 +638,18 @@ def extract_all_features(stl_path, n_fit_points=10,
 
     # ---------- 保存 ----------
     if write_legacy:
-        # 旧版扁平 schema, 兼容 correlation_analysis.py / profile_correlation.py
-        output_path = os.path.join(parentdir, "portal_vein_features.json")
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(all_features, f, indent=2, ensure_ascii=False, allow_nan=True)
-        n_valid = sum(1 for k, v in all_features.items()
-                      if k != '_meta' and v is not None)
-        n_null = sum(1 for k, v in all_features.items()
-                     if k != '_meta' and v is None)
-        print(f"\n[Legacy] 扁平特征已保存: {output_path}")
-        print(f"  有效 {n_valid}, 为 None {n_null}")
+        print("[Legacy] portal_vein_features.json output is disabled; "
+              "all values are stored in features/unified_features.json.")
 
     if write_unified:
-        unified_path = os.path.join(parentdir, "unified_features.json")
-        description_path = os.path.join(parentdir, FEATURE_DESCRIPTION_FILENAME)
+        unified_path = str(feature_path(
+            parentdir, UNIFIED_FEATURES_NAME, create=True))
         unified = build_unified_features(
             all_features, pointwise_data, seg_data,
             angle_detail=save_data)
         with open(unified_path, 'w', encoding='utf-8') as f:
             json.dump(unified, f, indent=2, ensure_ascii=False, allow_nan=True)
-        with open(description_path, 'w', encoding='utf-8') as f:
-            json.dump(build_feature_description(), f, indent=2,
-                      ensure_ascii=False, allow_nan=True)
         print(f"[Unified] 统一特征已保存: {unified_path}")
-        print(f"[Unified] 特征说明已保存: {description_path}")
 
     return all_features
 

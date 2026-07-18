@@ -37,14 +37,27 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import numpy as np
 
+from features_layout import (
+    FEATURES_DIRNAME,
+    PUBLIC_FEATURE_NAMES,
+    RAW_CENTERLINE_NAME,
+    SMOOTH_CENTERLINE_NAME,
+    SEGMENT_ASSIGNMENTS_NAME,
+    UNIFIED_FEATURES_NAME,
+    feature_path,
+    features_dir,
+    remove_generated_outputs,
+    resolve_feature_path,
+)
+
 
 APP_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = APP_ROOT / "web"
 RUNS_ROOT = APP_ROOT / "web_runs"
 DEFAULT_CONFIG_PATH = APP_ROOT / "web_frontend_config.json"
 WEB_FRONTEND_VERSION = "analysis-ranges-surface-sections-20260527-v1"
-MANUAL_SEGMENT_FILE = "manual_segment_assignments.json"
-ANALYSIS_RANGE_FILE = "analysis_ranges.json"
+MANUAL_SEGMENT_FILE = SEGMENT_ASSIGNMENTS_NAME
+ANALYSIS_RANGE_FILE = "analysis_ranges"
 
 RUNS_ROOT.mkdir(exist_ok=True)
 
@@ -107,29 +120,16 @@ DEFAULT_PARAMS = {
 }
 
 OUTPUT_FILES = [
-    "CenterlinePoints.txt",
-    "newCenterlist.txt",
-    "centerline_profiles.json",
-    MANUAL_SEGMENT_FILE,
-    ANALYSIS_RANGE_FILE,
-    "centerline_pointwise_profiles.json",
-    "portal_vein_features.json",
-    "unified_features.json",
-    "feature_description.json",
-    "sv_smv_angle.json",
-    "vis_interactive.html",
-    "vis_overview.png",
-    "centerline_screenshot.png",
-    "segment_screenshot.png",
+    *PUBLIC_FEATURE_NAMES,
 ]
 
 STEP_OUTPUTS = {
-    "centerline": ["CenterlinePoints.txt"],
-    "smooth": ["newCenterlist.txt"],
-    "segment": ["centerline_profiles.json"],
-    "profiles": ["centerline_pointwise_profiles.json"],
-    "features": ["unified_features.json"],
-    "export": ["vis_interactive.html"],
+    "centerline": [RAW_CENTERLINE_NAME],
+    "smooth": [SMOOTH_CENTERLINE_NAME],
+    "segment": [SEGMENT_ASSIGNMENTS_NAME],
+    "profiles": [],
+    "features": [UNIFIED_FEATURES_NAME],
+    "export": [],
 }
 
 SESSIONS: dict[str, dict] = {}
@@ -385,6 +385,11 @@ def _read_centerline_file(path: Path):
     return nodes
 
 
+def _feature_file(parent: Path, name: str) -> Path:
+    """Resolve a public feature file, preferring the canonical features dir."""
+    return resolve_feature_path(parent, name) or feature_path(parent, name)
+
+
 def _line_arrays_from_nodes(nodes: dict | None) -> dict | None:
     if not nodes:
         return None
@@ -538,7 +543,7 @@ def _atomic_centerline_segments(nodes: dict | None) -> list[dict]:
 
 
 def _saved_manual_assignments(parent: Path) -> dict:
-    saved = _read_json_file(parent / MANUAL_SEGMENT_FILE)
+    saved = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
     if not isinstance(saved, dict):
         return {}
     assignments = saved.get("assignments") or {}
@@ -615,13 +620,22 @@ def _paths_touch(path_a: list[int] | None, path_b: list[int] | None) -> set[int]
     return set(path_a) & set(path_b)
 
 
-def save_manual_segment_assignments(stl_path: Path, assignments_payload: list[dict]) -> dict:
+def save_manual_segment_assignments(
+    stl_path: Path,
+    assignments_payload: list[dict],
+    recompute_features: bool = True,
+) -> dict:
     parent = stl_path.parent
-    smooth_nodes = _read_centerline_file(parent / "newCenterlist.txt")
-    raw_nodes = _read_centerline_file(parent / "CenterlinePoints.txt")
+    smooth_path = _feature_file(parent, SMOOTH_CENTERLINE_NAME)
+    raw_path = _feature_file(parent, RAW_CENTERLINE_NAME)
+    smooth_nodes = _read_centerline_file(smooth_path)
+    raw_nodes = _read_centerline_file(raw_path)
     nodes = smooth_nodes or raw_nodes
     if not nodes:
         raise ValueError("No centerline is available. Run centerline extraction or import a saved centerline first.")
+    canonical_raw = feature_path(parent, RAW_CENTERLINE_NAME, create=True)
+    if raw_path.exists() and raw_path.resolve() != canonical_raw.resolve():
+        shutil.copy2(raw_path, canonical_raw)
 
     atoms = _atomic_centerline_segments(nodes)
     by_id = {item["id"]: item for item in atoms}
@@ -677,45 +691,45 @@ def save_manual_segment_assignments(stl_path: Path, assignments_payload: list[di
     output["segment_vessels_version"] = "manual-atomic-assignment-v1"
     output["manual_assignment"] = True
     smoothed_vessels = _apply_manual_segment_smoothing(output, nodes)
-    with (parent / "centerline_profiles.json").open("w", encoding="utf-8") as handle:
+    tree = _rebuild_smoothed_assignment_tree(output, nodes)
+    centerline_path = feature_path(parent, SMOOTH_CENTERLINE_NAME, create=True)
+    removed_outputs = remove_generated_outputs(
+        parent, keep_public=False, preserve=(RAW_CENTERLINE_NAME,))
+    _write_centerline_tree(centerline_path, tree)
+    output["assignments"] = received
+    output["manual_assignment_version"] = 1
+    output_path = feature_path(parent, SEGMENT_ASSIGNMENTS_NAME, create=True)
+    with output_path.open("w", encoding="utf-8") as handle:
         json.dump(output, handle, indent=2, ensure_ascii=False)
-    with (parent / MANUAL_SEGMENT_FILE).open("w", encoding="utf-8") as handle:
-        json.dump({
-            "version": 1,
-            "centerline_source": "newCenterlist.txt" if smooth_nodes else "CenterlinePoints.txt",
-            "assignments": received,
-        }, handle, indent=2, ensure_ascii=False)
 
-    stale_outputs = [
-        "centerline_pointwise_profiles.json",
-        "portal_vein_features.json",
-        "unified_features.json",
-        "feature_description.json",
-        "sv_smv_angle.json",
-        "vis_interactive.html",
-        "vis_overview.png",
-        "segment_screenshot.png",
-    ]
-    removed_outputs = []
-    for name in stale_outputs:
-        output_path = parent / name
-        if output_path.exists():
-            output_path.unlink()
-            removed_outputs.append(name)
+    removed_outputs.extend(remove_generated_outputs(parent, keep_public=True))
+    features_recomputed = False
+    if recompute_features:
+        from extract_profiles import extract_profiles
+        from extract_features import extract_all_features
+
+        extract_profiles(str(stl_path))
+        extract_all_features(str(stl_path), write_legacy=False)
+        remove_generated_outputs(parent, keep_public=True)
+        features_recomputed = feature_path(
+            parent, UNIFIED_FEATURES_NAME).exists()
     return {
         "n_atomic_segments": len(atoms),
         "n_kept": sum(1 for item in received.values() if item["kept"]),
         "vessels": sorted(used_vessels),
         "smoothed_vessels": sorted(smoothed_vessels),
+        "centerline_file": str(centerline_path),
+        "segment_assignments_file": str(output_path),
+        "features_recomputed": features_recomputed,
         "removed_outputs": removed_outputs,
     }
 
 
 def _load_analysis_ranges(parent: Path) -> dict:
-    data = _read_json_file(parent / ANALYSIS_RANGE_FILE)
+    data = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
     if not isinstance(data, dict):
         return {}
-    ranges = data.get("ranges") or {}
+    ranges = data.get("analysis_ranges") or {}
     return ranges if isinstance(ranges, dict) else {}
 
 
@@ -726,7 +740,8 @@ def _normalize_range(value, default: float) -> float:
 
 def save_analysis_ranges(stl_path: Path, ranges_payload: list[dict]) -> dict:
     parent = stl_path.parent
-    seg_data = _read_json_file(parent / "centerline_profiles.json")
+    seg_path = _feature_file(parent, SEGMENT_ASSIGNMENTS_NAME)
+    seg_data = _read_json_file(seg_path)
     if not seg_data:
         raise ValueError("No anatomical segmentation is available.")
     available = {
@@ -750,25 +765,11 @@ def save_analysis_ranges(stl_path: Path, ranges_payload: list[dict]) -> dict:
     if not saved:
         raise ValueError("No valid vessel analysis ranges were supplied.")
 
-    with (parent / ANALYSIS_RANGE_FILE).open("w", encoding="utf-8") as handle:
-        json.dump({"version": 1, "ranges": saved}, handle, indent=2, ensure_ascii=False)
-
-    stale_outputs = [
-        "centerline_pointwise_profiles.json",
-        "portal_vein_features.json",
-        "unified_features.json",
-        "feature_description.json",
-        "sv_smv_angle.json",
-        "vis_interactive.html",
-        "vis_overview.png",
-        "segment_screenshot.png",
-    ]
-    removed_outputs = []
-    for name in stale_outputs:
-        output_path = parent / name
-        if output_path.exists():
-            output_path.unlink()
-            removed_outputs.append(name)
+    seg_data["analysis_ranges"] = saved
+    seg_path = feature_path(parent, SEGMENT_ASSIGNMENTS_NAME, create=True)
+    with seg_path.open("w", encoding="utf-8") as handle:
+        json.dump(seg_data, handle, indent=2, ensure_ascii=False)
+    removed_outputs = remove_generated_outputs(parent, keep_public=True)
     return {"ranges": saved, "removed_outputs": removed_outputs}
 
 
@@ -867,10 +868,10 @@ def _write_centerline_tree(path: Path, tree: list[list[float | int]]):
 
 def delete_centerline_terminal_branches(stl_path: Path, branch_ids: list[str]) -> dict:
     parent = stl_path.parent
-    centerline_path = parent / "CenterlinePoints.txt"
+    centerline_path = _feature_file(parent, RAW_CENTERLINE_NAME)
     nodes = _read_centerline_file(centerline_path)
     if not nodes:
-        raise ValueError("CenterlinePoints.txt not found or empty.")
+        raise ValueError(f"{RAW_CENTERLINE_NAME} not found or empty.")
 
     requested = {str(item) for item in branch_ids if str(item)}
     editable = {item["id"]: item for item in _editable_centerline_branches(nodes)}
@@ -895,34 +896,9 @@ def delete_centerline_terminal_branches(stl_path: Path, branch_ids: list[str]) -
 
     adj = _centerline_adjacency(kept_nodes)
     tree = _rebuild_centerline_tree(kept_nodes, adj)
+    removed_outputs = remove_generated_outputs(parent, keep_public=False)
+    centerline_path = feature_path(parent, RAW_CENTERLINE_NAME, create=True)
     _write_centerline_tree(centerline_path, tree)
-
-    # Downstream files are derived from the old raw centerline. Remove them so
-    # smoothing/segmentation/features recompute from the edited raw tree.
-    stale_outputs = [
-        "newCenterlist.txt",
-        "centerline_profiles.json",
-        MANUAL_SEGMENT_FILE,
-        ANALYSIS_RANGE_FILE,
-        "centerline_pointwise_profiles.json",
-        "portal_vein_features.json",
-        "unified_features.json",
-        "feature_description.json",
-        "sv_smv_angle.json",
-        "vis_interactive.html",
-        "vis_overview.png",
-        "centerline_screenshot.png",
-        "segment_screenshot.png",
-    ]
-    removed_outputs = []
-    for name in stale_outputs:
-        p = parent / name
-        if p.exists():
-            try:
-                p.unlink()
-                removed_outputs.append(name)
-            except Exception:
-                pass
 
     new_nodes = _read_centerline_file(centerline_path)
     return {
@@ -1047,7 +1023,48 @@ def _smooth_manual_segment_coords(coords: np.ndarray) -> np.ndarray | None:
     return smoothed
 
 
+def _pin_shared_path_nodes(
+    smoothed: np.ndarray,
+    path: list[int],
+    nodes: dict,
+    shared_node_ids: set[int],
+) -> np.ndarray:
+    """Keep branch attachment coordinates on an otherwise whole-path spline."""
+    anchors = [index for index, nid in enumerate(path)
+               if int(nid) in shared_node_ids and 0 < index < len(path) - 1]
+    if not anchors or len(smoothed) < 3:
+        return smoothed
+
+    original = _coords_for_path(path, nodes)
+    if original is None:
+        return smoothed
+    original_arc = np.concatenate((
+        [0.0], np.cumsum(np.linalg.norm(np.diff(original, axis=0), axis=1))))
+    total = float(original_arc[-1])
+    if total <= 1e-9:
+        return smoothed
+
+    pinned = np.asarray(smoothed, dtype=float).copy()
+    used_indices: set[int] = set()
+    for anchor_index in anchors:
+        target = int(round((original_arc[anchor_index] / total) * (len(pinned) - 1)))
+        target = max(1, min(len(pinned) - 2, target))
+        while target in used_indices and target < len(pinned) - 2:
+            target += 1
+        used_indices.add(target)
+        pinned[target] = original[anchor_index]
+    return pinned
+
+
 def _apply_manual_segment_smoothing(output: dict, nodes: dict) -> list[str]:
+    membership: dict[int, int] = {}
+    for info in (output.get("segments") or {}).values():
+        if not info:
+            continue
+        for nid in set(int(value) for value in (info.get("path") or [])):
+            membership[nid] = membership.get(nid, 0) + 1
+    shared_node_ids = {nid for nid, count in membership.items() if count > 1}
+
     smoothed_vessels = []
     for vessel, info in (output.get("segments") or {}).items():
         if not info or not info.get("path"):
@@ -1058,6 +1075,8 @@ def _apply_manual_segment_smoothing(output: dict, nodes: dict) -> list[str]:
         smoothed = _smooth_manual_segment_coords(coords)
         if smoothed is None:
             continue
+        smoothed = _pin_shared_path_nodes(
+            smoothed, info["path"], nodes, shared_node_ids)
         info["topology_n_points"] = int(len(info.get("path", [])))
         info["smoothed_coords"] = [
             [float(point[0]), float(point[1]), float(point[2])]
@@ -1080,6 +1099,110 @@ def _apply_manual_segment_smoothing(output: dict, nodes: dict) -> list[str]:
         "vessels": smoothed_vessels,
     }
     return smoothed_vessels
+
+
+def _rebuild_smoothed_assignment_tree(output: dict, nodes: dict) -> list[list[float | int]]:
+    """Build one connected centerline tree from the edited vessel paths.
+
+    Each vessel is smoothed as a complete path first.  Shared endpoints are
+    merged by coordinate, so a vessel split by a junction (for example MPV
+    around an LPV attachment) is smoothed continuously and remains connected
+    to the branch in the rewritten tree.
+    """
+    coord_ids: dict[tuple[float, float, float], int] = {}
+    generated_nodes: dict[int, dict] = {}
+    chains: dict[str, list[int]] = {}
+
+    def node_for(point) -> int:
+        key = tuple(round(float(value), 8) for value in point)
+        if key not in coord_ids:
+            nid = len(coord_ids)
+            coord_ids[key] = nid
+            generated_nodes[nid] = {
+                "id": nid,
+                "x": float(point[0]),
+                "y": float(point[1]),
+                "z": float(point[2]),
+                "parent": -1,
+                "left": -1,
+                "right": -1,
+            }
+        return coord_ids[key]
+
+    for vessel, info in (output.get("segments") or {}).items():
+        if not info or not info.get("path"):
+            continue
+        coords = np.asarray(info.get("smoothed_coords") or [], dtype=float)
+        if coords.ndim != 2 or coords.shape[1] != 3 or len(coords) < 2:
+            coords = _coords_for_path(info["path"], nodes)
+        if coords is None or len(coords) < 2:
+            continue
+        chain = [node_for(point) for point in coords]
+        deduped = [chain[0]]
+        for nid in chain[1:]:
+            if nid != deduped[-1]:
+                deduped.append(nid)
+        chains[vessel] = deduped
+
+    adjacency = _centerline_adjacency(generated_nodes)
+    for chain in chains.values():
+        for a, b in zip(chain, chain[1:]):
+            adjacency.setdefault(a, set()).add(b)
+            adjacency.setdefault(b, set()).add(a)
+
+    tree = _rebuild_centerline_tree(generated_nodes, adjacency)
+    id_by_coord = {
+        tuple(round(float(value), 8) for value in row[1:4]): int(row[0])
+        for row in tree
+    }
+    for vessel, chain in chains.items():
+        info = output["segments"][vessel]
+        coords = np.asarray(info.get("smoothed_coords"), dtype=float)
+        info["path"] = [
+            id_by_coord[tuple(round(float(value), 8) for value in point)]
+            for point in coords
+        ]
+        info["n_points"] = len(info["path"])
+
+    final_nodes = _read_centerline_file_from_rows(tree)
+    final_adj = _centerline_adjacency(final_nodes)
+    output["branch_points"] = [
+        {
+            "id": int(nid),
+            "coord": [node["x"], node["y"], node["z"]],
+        }
+        for nid, nbs in final_adj.items()
+        if len(nbs) >= 3
+        for node in [final_nodes[nid]]
+    ]
+    output["endpoints"] = [
+        {
+            "id": int(nid),
+            "coord": [node["x"], node["y"], node["z"]],
+        }
+        for nid, nbs in final_adj.items()
+        if len(nbs) == 1
+        for node in [final_nodes[nid]]
+    ]
+    output["centerline_source"] = SMOOTH_CENTERLINE_NAME
+    output["manual_segment_smoothing"]["rewrote_centerline"] = True
+    output["manual_segment_smoothing"]["centerline_file"] = SMOOTH_CENTERLINE_NAME
+    return tree
+
+
+def _read_centerline_file_from_rows(tree: list[list[float | int]]) -> dict:
+    return {
+        int(row[0]): {
+            "id": int(row[0]),
+            "x": float(row[1]),
+            "y": float(row[2]),
+            "z": float(row[3]),
+            "parent": int(row[4]),
+            "left": int(row[5]),
+            "right": int(row[6]),
+        }
+        for row in tree
+    }
 
 
 def _point_and_tangent_at_fraction(coords: np.ndarray, frac: float):
@@ -1544,11 +1667,11 @@ def _suggest_boundary_fraction(
 
 def suggest_analysis_ranges(stl_path: Path) -> dict:
     parent = stl_path.parent
-    smooth_nodes = _read_centerline_file(parent / "newCenterlist.txt")
-    raw_nodes = _read_centerline_file(parent / "CenterlinePoints.txt")
+    smooth_nodes = _read_centerline_file(_feature_file(parent, SMOOTH_CENTERLINE_NAME))
+    raw_nodes = _read_centerline_file(_feature_file(parent, RAW_CENTERLINE_NAME))
     nodes = smooth_nodes or raw_nodes
-    seg_data = _read_json_file(parent / "centerline_profiles.json")
-    pointwise = _read_json_file(parent / "centerline_pointwise_profiles.json") or {}
+    seg_data = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
+    pointwise = {}
     if not nodes or not seg_data:
         raise ValueError("Run or import centerline smoothing and anatomical segmentation first.")
     mesh = _load_surface_section_mesh(stl_path)
@@ -1792,11 +1915,10 @@ def _compact_sampled_mesh(vertices: np.ndarray, faces: np.ndarray, max_faces: in
 
 
 def _load_feature_blocks(parent: Path):
-    unified = _read_json_file(parent / "unified_features.json")
-    flat = _read_json_file(parent / "portal_vein_features.json")
+    unified = _read_json_file(_feature_file(parent, UNIFIED_FEATURES_NAME))
     if unified:
         return {
-            "source": "unified_features.json",
+            "source": UNIFIED_FEATURES_NAME,
             "meta": unified.get("_meta", {}),
             "vessel_presence": unified.get("vessel_presence", {}),
             "statistical": unified.get("statistical", {}),
@@ -1804,36 +1926,6 @@ def _load_feature_blocks(parent: Path):
             "global": unified.get("global", {}),
             "segments_meta": unified.get("segments_meta", {}),
             "pointwise_meta": unified.get("pointwise_meta", {}),
-        }
-    if flat:
-        statistical = {}
-        for key, value in flat.items():
-            if "_" not in key or key.startswith("_"):
-                continue
-            seg, feature = key.split("_", 1)
-            if seg in SEGMENT_LABELS:
-                statistical.setdefault(seg, {})[feature] = value
-        return {
-            "source": "portal_vein_features.json",
-            "meta": flat.get("_meta", {}),
-            "vessel_presence": {},
-            "statistical": statistical,
-            "system": {},
-            "global": {
-                k: flat.get(k)
-                for k in (
-                    "total_centerline_length",
-                    "sv_smv_diameter_ratio",
-                    "sv_smv_angle",
-                    "has_lgv",
-                    "has_pgv",
-                    "has_compensation_vessel",
-                    "has_tips",
-                )
-                if k in flat
-            },
-            "segments_meta": {},
-            "pointwise_meta": {},
         }
     return {
         "source": None,
@@ -1854,11 +1946,11 @@ def build_visualization_data(
     include_surface_sections: bool = False,
 ) -> dict:
     parent = stl_path.parent
-    raw_nodes = _read_centerline_file(parent / "CenterlinePoints.txt")
-    smooth_nodes = _read_centerline_file(parent / "newCenterlist.txt")
+    raw_nodes = _read_centerline_file(_feature_file(parent, RAW_CENTERLINE_NAME))
+    smooth_nodes = _read_centerline_file(_feature_file(parent, SMOOTH_CENTERLINE_NAME))
     nodes = smooth_nodes or raw_nodes
-    seg_data = _read_json_file(parent / "centerline_profiles.json")
-    pointwise = _read_json_file(parent / "centerline_pointwise_profiles.json")
+    seg_data = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
+    pointwise = None
 
     surface_mesh = _load_surface_section_mesh(stl_path) if include_surface_sections else None
     pointwise_layers = _build_pointwise_layers(
@@ -1871,7 +1963,7 @@ def build_visualization_data(
 
     return _sanitize_json({
         "patient": _patient_record(stl_path),
-        "segment_profile": "centerline_profiles.json",
+        "segment_profile": SEGMENT_ASSIGNMENTS_NAME,
         "mesh": _load_mesh(stl_path, max_faces=max_faces),
         "centerlines": {
             "raw": _line_arrays_from_nodes(raw_nodes),
@@ -1890,11 +1982,11 @@ def build_visualization_data(
                 }
                 for name in SEGMENT_LABELS
             ],
-            "saved": (parent / MANUAL_SEGMENT_FILE).exists(),
+            "saved": _feature_file(parent, SEGMENT_ASSIGNMENTS_NAME).exists(),
         },
         "analysis_regions": {
             "ranges": _load_analysis_ranges(parent),
-            "saved": (parent / ANALYSIS_RANGE_FILE).exists(),
+            "saved": bool(_load_analysis_ranges(parent)),
         },
         "segments": _build_segments(seg_data, nodes),
         "branch_points": branch_points,
@@ -1908,7 +2000,7 @@ def build_visualization_data(
 def _available_outputs(parent: Path) -> list[dict]:
     files = []
     for name in OUTPUT_FILES:
-        p = parent / name
+        p = feature_path(parent, name)
         if p.exists():
             files.append({
                 "name": name,
@@ -1923,7 +2015,7 @@ def _step_file_status(parent: Path) -> dict:
     for step, names in STEP_OUTPUTS.items():
         files = []
         for name in names:
-            p = parent / name
+            p = feature_path(parent, name)
             files.append({
                 "name": name,
                 "exists": p.exists(),
@@ -1939,7 +2031,7 @@ def _step_file_status(parent: Path) -> dict:
 
 def _reuse_pipeline_step(step: str, stl_path: Path):
     required = STEP_OUTPUTS.get(step) or []
-    search_dir = stl_path.parent
+    search_dir = features_dir(stl_path.parent, create=False)
     missing = [name for name in required if not (search_dir / name).exists()]
     if missing:
         raise FileNotFoundError(
@@ -2090,6 +2182,7 @@ def _run_job(job_id: str, params: dict, post_tips_mode: str, export_png: bool):
                     if not ok:
                         job["errors"].append(status_line)
                 _set_job_progress(job, completed_delta=1)
+            remove_generated_outputs(stl_path.parent, keep_public=True)
         with STATE_LOCK:
             job["status"] = "failed" if job["errors"] else "done"
             job["current"] = ""
@@ -2117,16 +2210,10 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
             absolute_min_radius_mm=params["absolute_min_radius_mm"],
             merge_bp_distance_mm=params["merge_bp_distance_mm"],
         )
-        analysis_path = stl_path.parent / ANALYSIS_RANGE_FILE
-        if analysis_path.exists():
-            analysis_path.unlink()
     elif step == "smooth":
         from smooth_centerline import smooth_centerline
 
         smooth_centerline(str(stl_path))
-        analysis_path = stl_path.parent / ANALYSIS_RANGE_FILE
-        if analysis_path.exists():
-            analysis_path.unlink()
     elif step == "segment":
         script = APP_ROOT / "segment_vessels.py"
         post_tips = "1" if _post_tips_value(stl_path, post_tips_mode) else "0"
@@ -2149,12 +2236,6 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
             print(result.stderr.rstrip())
         if result.returncode != 0:
             raise RuntimeError(f"segment_vessels failed with exit code {result.returncode}")
-        manual_path = stl_path.parent / MANUAL_SEGMENT_FILE
-        if manual_path.exists():
-            manual_path.unlink()
-        analysis_path = stl_path.parent / ANALYSIS_RANGE_FILE
-        if analysis_path.exists():
-            analysis_path.unlink()
     elif step == "profiles":
         from extract_profiles import extract_profiles
 
@@ -2178,10 +2259,12 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
             sample_step=params["sample_step"],
             pitch=params["pitch"],
         )
+        remove_generated_outputs(stl_path.parent, keep_public=True)
     elif step == "export":
         from export_visualization import export_patient_visualization
 
         export_patient_visualization(str(stl_path), export_html=True, export_png=export_png, verbose=True)
+        remove_generated_outputs(stl_path.parent, keep_public=True)
     else:
         raise ValueError(f"Unknown step: {step}")
 
@@ -2204,9 +2287,9 @@ def _zip_patient_outputs(patients: list[dict]) -> bytes:
             if stl_path.exists():
                 zf.write(stl_path, f"{prefix}/{stl_path.name}")
             for name in OUTPUT_FILES:
-                p = parent / name
+                p = feature_path(parent, name)
                 if p.exists():
-                    zf.write(p, f"{prefix}/{name}")
+                    zf.write(p, f"{prefix}/{FEATURES_DIRNAME}/{name}")
     return bio.getvalue()
 
 
