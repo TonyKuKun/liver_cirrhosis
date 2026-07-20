@@ -66,6 +66,31 @@ ANALYSIS_RANGE_FILE = "analysis_ranges"
 
 RUNS_ROOT.mkdir(exist_ok=True)
 
+
+def cleanup_runs(keep: int = 5) -> dict:
+    """Remove old generated run folders while retaining the newest ones.
+
+    ``geometry_runs`` contains uploaded STL files and generated outputs for
+    single-file sessions.  They are temporary and can be regenerated, but the
+    newest few runs are useful when restarting the local server during an
+    active investigation.  Only direct child directories are considered.
+    """
+    try:
+        keep = max(0, int(keep))
+    except (TypeError, ValueError):
+        keep = 5
+    runs = [path for path in RUNS_ROOT.iterdir() if path.is_dir()]
+    runs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    removed = 0
+    errors = []
+    for path in runs[keep:]:
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as exc:
+            errors.append(f"{path.name}: {exc}")
+    return {"found": len(runs), "kept": min(keep, len(runs)), "removed": removed, "errors": errors}
+
 SEGMENT_COLORS = {
     "mpv": "#ff3333",
     "sv": "#3380ff",

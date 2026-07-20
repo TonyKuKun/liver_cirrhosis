@@ -149,3 +149,6 @@ datasets/
 *.h5
 models/
 checkpoints/
+
+# Local geometry workbench uploads and generated outputs
+web/geometry_runs/

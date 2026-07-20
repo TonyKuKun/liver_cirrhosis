@@ -1432,6 +1432,20 @@ def main(argv=None):
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8788)
     args = parser.parse_args(argv)
+    # Uploaded single-file geometry sessions are stored in a disposable run
+    # cache. Keep a small recent history so startup does not accumulate STL
+    # files indefinitely; set GEOMETRY_RUN_RETENTION=0 to remove all old runs.
+    try:
+        run_retention = max(0, int(os.environ.get("GEOMETRY_RUN_RETENTION", "5")))
+    except ValueError:
+        run_retention = 5
+    cleanup = geometry_web.cleanup_runs(run_retention)
+    if cleanup["removed"] or cleanup["errors"]:
+        print(
+            "Geometry run cache: "
+            f"kept {cleanup['kept']}, removed {cleanup['removed']}"
+            + (f", errors: {'; '.join(cleanup['errors'])}" if cleanup["errors"] else "")
+        )
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"PortaFlow workbench running at http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")
