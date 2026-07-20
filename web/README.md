@@ -8,15 +8,16 @@ This folder contains only the integrated PortaFlow website:
 - `styles.css`: workbench styles.
 - `landing.css`: cover page styles.
 - `assets/`: integrated website images.
-- `web_modules.json`: locations of the code and standalone web apps used by each stage.
+- `geometry/`: the blue geometry-stage UI designed for the integrated workbench.
+- `web_modules.json`: locations of processing code, checkpoints, and model assets used by each stage.
 
-Standalone module web apps stay in their own projects:
+The geometry UI is owned by this integrated site under `web/geometry`. It calls geometry
+processing and visualization-data implementations from `geometry_feature_extract` through the
+integrated backend. `geometry_feature_extract/web` is not mounted or served, and no additional
+port or process is used.
 
-- Segmentation: `VKAN_segementation/web`
-- Centerline geometry: `E:/pycharm_code/liver_pre_process/zxx_stl/web`
-- PVP code: `PVP_predictor`
-
-The integrated backend is still `../integrated_web_frontend.py`. It serves this folder as static files and reads `web_modules.json` to locate the stage backends and model code.
+The integrated backend is `../integrated_web_frontend.py`. It serves both the main workbench and
+the embedded geometry workspace, and reads `web_modules.json` to locate processing and model code.
 
 Run:
 

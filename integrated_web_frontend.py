@@ -23,8 +23,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
-from urllib.request import urlopen
 
+_GEOMETRY_IMPORT_ROOT = Path(__file__).resolve().parent / "geometry_feature_extract"
+if str(_GEOMETRY_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_GEOMETRY_IMPORT_ROOT))
+
+from geometry_feature_extract import web_frontend as geometry_web
 from geometry_feature_extract.features_layout import (
     FEATURES_DIRNAME,
     PUBLIC_FEATURE_NAMES,
@@ -64,7 +68,8 @@ WEB_CONFIG = _load_web_config()
 STAGE_CONFIG = WEB_CONFIG.get("stages") if isinstance(WEB_CONFIG.get("stages"), dict) else {}
 STATIC_ROOT = _cfg_path((WEB_CONFIG.get("integrated") or {}).get("static_root"), WEB_ROOT)
 VKAN_ROOT = _cfg_path((STAGE_CONFIG.get("segmentation") or {}).get("root"), APP_ROOT / "VKAN_segementation")
-CENTERLINE_ROOT = _cfg_path((STAGE_CONFIG.get("features") or {}).get("root"), Path(r"E:\pycharm_code\liver_pre_process\zxx_stl"))
+CENTERLINE_ROOT = _cfg_path((STAGE_CONFIG.get("features") or {}).get("root"), APP_ROOT / "geometry_feature_extract")
+GEOMETRY_STATIC_ROOT = WEB_ROOT / "geometry"
 PVP_ROOT = _cfg_path((STAGE_CONFIG.get("pvp") or {}).get("root"), APP_ROOT / "PVP_predictor")
 
 STAGES = ["segmentation", "features", "pvp"]
@@ -100,23 +105,9 @@ FILE_ALIASES = {
 
 SESSIONS: dict[str, dict] = {}
 JOBS: dict[str, dict] = {}
-LEGACY_PROCS: dict[str, subprocess.Popen] = {}
 LOCK = threading.Lock()
-
-LEGACY_WORKBENCHES = {
-    "segmentation": {
-        "label": "VKAN segmentation workbench",
-        "port": int((STAGE_CONFIG.get("segmentation") or {}).get("port") or 8775),
-        "cwd": VKAN_ROOT,
-        "script": _cfg_path((STAGE_CONFIG.get("segmentation") or {}).get("backend"), VKAN_ROOT / "web_frontend.py"),
-    },
-    "features": {
-        "label": "Centerline geometry workbench",
-        "port": int((STAGE_CONFIG.get("features") or {}).get("port") or 8765),
-        "cwd": CENTERLINE_ROOT,
-        "script": _cfg_path((STAGE_CONFIG.get("features") or {}).get("backend"), CENTERLINE_ROOT / "web_frontend.py"),
-    },
-}
+GEOMETRY_STL_CACHE: dict[str, tuple[tuple, Path]] = {}
+GEOMETRY_STL_CACHE_LOCK = threading.Lock()
 
 
 def _now() -> float:
@@ -136,6 +127,7 @@ def _runtime() -> dict:
         "web_config": str(WEB_CONFIG_PATH),
         "vkan_root": str(VKAN_ROOT),
         "centerline_root": str(CENTERLINE_ROOT),
+        "geometry_static_root": str(GEOMETRY_STATIC_ROOT),
         "pvp_root": str(PVP_ROOT),
         "pvp_python": str(_pvp_python()),
     }
@@ -553,54 +545,6 @@ def _vkan_checkpoint() -> Path | None:
     return None
 
 
-def _legacy_health(port: int) -> bool:
-    try:
-        with urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1.2) as response:
-            if response.status != 200:
-                return False
-            payload = json.loads(response.read().decode("utf-8"))
-            return bool(payload.get("ok"))
-    except Exception:
-        return False
-
-
-def _ensure_legacy_workbench(stage: str) -> dict:
-    if stage not in LEGACY_WORKBENCHES:
-        raise ValueError("legacy stage must be segmentation or features")
-    cfg = LEGACY_WORKBENCHES[stage]
-    port = int(cfg["port"])
-    if _legacy_health(port):
-        return {"stage": stage, "running": True, "url": f"http://127.0.0.1:{port}/", "pid": None}
-    proc = LEGACY_PROCS.get(stage)
-    if proc and proc.poll() is None:
-        for _ in range(15):
-            if _legacy_health(port):
-                return {"stage": stage, "running": True, "url": f"http://127.0.0.1:{port}/", "pid": proc.pid}
-            time.sleep(0.2)
-    script = Path(cfg["script"])
-    if not script.exists():
-        raise FileNotFoundError(f"Legacy workbench script not found: {script}")
-    kwargs = {
-        "cwd": str(cfg["cwd"]),
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
-    if hasattr(subprocess, "CREATE_NO_WINDOW"):
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    proc = subprocess.Popen(
-        [sys.executable, str(script), "--host", "127.0.0.1", "--port", str(port)],
-        **kwargs,
-    )
-    LEGACY_PROCS[stage] = proc
-    for _ in range(25):
-        if _legacy_health(port):
-            return {"stage": stage, "running": True, "url": f"http://127.0.0.1:{port}/", "pid": proc.pid}
-        if proc.poll() is not None:
-            break
-        time.sleep(0.25)
-    raise RuntimeError(f"Could not start {cfg['label']} on port {port}")
-
-
 def _stage_status(patient: Path, stage: str, model_dir: Path | None, include_outputs: bool = True) -> dict:
     if stage == "segmentation":
         ready = (patient / "dcm").is_dir() or (patient / "orig.nii.gz").exists()
@@ -871,12 +815,82 @@ def _run_segmentation(patient_dir: Path, session: dict, payload: dict, job: dict
         _run_command([py, "-c", smooth], VKAN_ROOT, job)
 
 
+def _geometry_file_signature(path: Path | None) -> tuple:
+    if not path:
+        return ("", 0, 0)
+    try:
+        stat = path.stat()
+        return (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return (str(path), 0, 0)
+
+
+def _point_center(points) -> tuple[float, float, float] | None:
+    coords = []
+    for point in points if points is not None else []:
+        try:
+            coords.append((float(point[0]), float(point[1]), float(point[2])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    if not coords:
+        return None
+    count = float(len(coords))
+    return tuple(sum(point[axis] for point in coords) / count for axis in range(3))
+
+
+def _centerline_center(path: Path | None) -> tuple[float, float, float] | None:
+    if not path:
+        return None
+    nodes = geometry_web._read_centerline_file(path)
+    if not nodes:
+        return None
+    return _point_center((node["x"], node["y"], node["z"]) for node in nodes.values())
+
+
+def _mesh_center(path: Path) -> tuple[float, float, float] | None:
+    mesh = geometry_web._load_mesh(path, max_faces=5000)
+    return _point_center((mesh or {}).get("vertices"))
+
+
 def _feature_stl(patient_dir: Path) -> Path:
+    candidates = []
     for name in ["predict_smooth.stl", "predict.stl", "vessel.stl", "pretrain.stl"]:
         path = _resolve_patient_file(patient_dir, name)
-        if path and path.is_file():
-            return path
-    raise FileNotFoundError("Need predict_smooth.stl, predict.stl, vessel.stl, or pretrain.stl for geometry extraction.")
+        if path and path.is_file() and path not in candidates:
+            candidates.append(path)
+    if not candidates:
+        raise FileNotFoundError("Need predict_smooth.stl, predict.stl, vessel.stl, or pretrain.stl for geometry extraction.")
+
+    centerline = (
+        resolve_feature_path(patient_dir, SMOOTH_CENTERLINE_NAME)
+        or resolve_feature_path(patient_dir, RAW_CENTERLINE_NAME)
+    )
+    signature = (
+        _geometry_file_signature(centerline),
+        tuple(_geometry_file_signature(path) for path in candidates),
+    )
+    cache_key = str(patient_dir.resolve())
+    with GEOMETRY_STL_CACHE_LOCK:
+        cached = GEOMETRY_STL_CACHE.get(cache_key)
+        if cached and cached[0] == signature and cached[1] in candidates:
+            return cached[1]
+
+    selected = candidates[0]
+    center = _centerline_center(centerline)
+    if center is not None and len(candidates) > 1:
+        scored = []
+        for order, path in enumerate(candidates):
+            mesh_center = _mesh_center(path)
+            if mesh_center is None:
+                continue
+            distance_sq = sum((center[axis] - mesh_center[axis]) ** 2 for axis in range(3))
+            scored.append((distance_sq, order, path))
+        if scored:
+            selected = min(scored)[2]
+
+    with GEOMETRY_STL_CACHE_LOCK:
+        GEOMETRY_STL_CACHE[cache_key] = (signature, selected)
+    return selected
 
 
 def _run_features(patient_dir: Path, job: dict):
@@ -1072,10 +1086,18 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/health":
                 self._json({"ok": True, "time": _now(), "runtime": _runtime()})
+            elif path == "/api/geometry/health":
+                self._json({"ok": True, "time": _now(), "runtime": geometry_web._runtime_info()})
+            elif path.startswith("/api/geometry/session/") and path.endswith("/data"):
+                self._geometry_session_data(path, parsed.query)
+            elif path.startswith("/api/geometry/session/") and path.endswith("/download"):
+                self._geometry_download(path, parsed.query)
+            elif path.startswith("/api/geometry/job/"):
+                self._geometry_job(path)
             elif path == "/assets/plotly.min.js":
                 self._serve_plotly()
-            elif path == "/api/legacy-workbench":
-                self._legacy_workbench(parsed.query)
+            elif path == "/api/geometry/workbench":
+                self._geometry_workbench(parsed.query)
             elif path.startswith("/api/session/") and path.endswith("/data"):
                 self._session_data(path, parsed.query)
             elif path.startswith("/api/session/") and path.endswith("/download"):
@@ -1086,6 +1108,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._job(path)
             elif path == "/favicon.ico":
                 self._bytes(b"", "image/x-icon", status=204)
+            elif path == "/geometry" or path.startswith("/geometry/"):
+                self._geometry_static(path)
             else:
                 self._static(path)
         except Exception as exc:
@@ -1096,6 +1120,20 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/session":
                 self._json({"session": _create_session(self._body_json())})
+            elif parsed.path == "/api/geometry/session/from-parent":
+                self._geometry_session_from_parent()
+            elif parsed.path == "/api/geometry/session":
+                self._geometry_create_session()
+            elif parsed.path == "/api/geometry/run":
+                self._geometry_run()
+            elif parsed.path == "/api/geometry/centerline/delete-branches":
+                self._geometry_edit("delete")
+            elif parsed.path == "/api/geometry/centerline/manual-segments":
+                self._geometry_edit("manual")
+            elif parsed.path == "/api/geometry/analysis/suggest-ranges":
+                self._geometry_edit("suggest")
+            elif parsed.path == "/api/geometry/analysis/save-ranges":
+                self._geometry_edit("save-ranges")
             elif parsed.path == "/api/run-stage":
                 self._run_stage()
             else:
@@ -1159,6 +1197,131 @@ class Handler(BaseHTTPRequestHandler):
             pass
         self._json({"error": "Local Plotly asset not found"}, status=404, head_only=head_only)
 
+    def _geometry_static(self, path: str, head_only=False):
+        rel = "index.html" if path in ("/geometry", "/geometry/") else path[len("/geometry/"):]
+        file_path = (GEOMETRY_STATIC_ROOT / rel).resolve()
+        if not _inside(GEOMETRY_STATIC_ROOT, file_path) or not file_path.is_file():
+            self._json({"error": "Not found"}, status=404, head_only=head_only)
+            return
+        ctype = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        self._bytes(file_path.read_bytes(), ctype, headers={"Cache-Control": "no-store"}, head_only=head_only)
+
+    def _geometry_create_session(self):
+        payload = self._body_json()
+        session = geometry_web._create_session_batch(payload)
+        self._json({"session": session})
+
+    def _geometry_session_from_parent(self):
+        payload = self._body_json()
+        parent = self._session(str(payload.get("session_id") or ""))
+        patient = _resolve_patient(parent, payload.get("patient_id"))
+        if not patient:
+            raise ValueError("Patient not found")
+        patient_dir = Path(patient["folder"])
+        stl = _feature_stl(patient_dir)
+        patient_key = uuid.uuid5(uuid.NAMESPACE_URL, str(patient_dir.resolve())).hex[:12]
+        session_id = f"integrated-{parent['id']}-{patient_key}"
+        session = {
+            "id": session_id,
+            "mode": "single",
+            "created": _now(),
+            "root": str(patient_dir),
+            "stl_name": stl.name,
+            "patients": [geometry_web._patient_record(stl)],
+            "params": dict(geometry_web.DEFAULT_PARAMS),
+            "runtime": geometry_web._runtime_info(),
+            "parent_session_id": parent["id"],
+        }
+        with geometry_web.STATE_LOCK:
+            geometry_web.SESSIONS[session_id] = session
+        self._json({"session": session})
+
+    def _geometry_session(self, session_id: str) -> dict:
+        with geometry_web.STATE_LOCK:
+            session = geometry_web.SESSIONS.get(session_id)
+        if not session:
+            raise ValueError("Geometry session not found")
+        return session
+
+    def _geometry_session_data(self, path: str, query: str):
+        session_id = unquote(path.split("/")[4])
+        session = self._geometry_session(session_id)
+        qs = parse_qs(query)
+        patient = geometry_web._resolve_patient(session, (qs.get("patient") or [None])[0])
+        if not patient:
+            raise ValueError("Patient not found")
+        data = geometry_web.build_visualization_data(
+            Path(patient["stl_path"]),
+            section_stride=geometry_web._safe_int((qs.get("section_stride") or [10])[0], 10),
+            max_faces=geometry_web._safe_int((qs.get("max_faces") or [80000])[0], 80000),
+            include_surface_sections=(qs.get("surface_sections") or ["0"])[0] == "1",
+        )
+        data["session"] = session
+        self._json(data)
+
+    def _geometry_run(self):
+        payload = self._body_json()
+        session = self._geometry_session(str(payload.get("session_id") or ""))
+        steps = [step for step in (payload.get("steps") or []) if step in geometry_web.PIPELINE_STEPS]
+        if not steps:
+            raise ValueError("No valid geometry steps selected")
+        raw_modes = payload.get("step_modes") or {}
+        step_modes = {step: "reuse" if raw_modes.get(step) == "reuse" else "recompute" for step in steps}
+        patients = session.get("patients") or []
+        patient_id = payload.get("patient_id")
+        if patient_id and patient_id != "all":
+            patient = geometry_web._resolve_patient(session, patient_id)
+            patients = [patient] if patient else []
+        params = geometry_web._merge_params(payload.get("params"))
+        job = geometry_web._new_job(session["id"], steps, patients, step_modes=step_modes)
+        with geometry_web.STATE_LOCK:
+            job["_patients_runtime"] = patients
+            session["params"] = params
+        threading.Thread(
+            target=geometry_web._run_job,
+            args=(job["id"], params, payload.get("post_tips_mode") or "auto", bool(payload.get("export_png"))),
+            daemon=True,
+        ).start()
+        self._json({"job": job})
+
+    def _geometry_edit(self, operation: str):
+        payload = self._body_json()
+        session = self._geometry_session(str(payload.get("session_id") or ""))
+        patient = geometry_web._resolve_patient(session, payload.get("patient_id"))
+        if not patient:
+            raise ValueError("Patient not found")
+        stl = Path(patient["stl_path"])
+        if operation == "delete":
+            result = geometry_web.delete_centerline_terminal_branches(stl, payload.get("branch_ids") or [])
+        elif operation == "manual":
+            result = geometry_web.save_manual_segment_assignments(stl, payload.get("assignments") or [])
+        elif operation == "suggest":
+            result = geometry_web.suggest_analysis_ranges(stl)
+        else:
+            result = geometry_web.save_analysis_ranges(stl, payload.get("ranges") or [])
+        self._json({"ok": True, "result": result})
+
+    def _geometry_job(self, path: str):
+        job_id = unquote(path.rstrip("/").split("/")[-1])
+        with geometry_web.STATE_LOCK:
+            job = geometry_web.JOBS.get(job_id)
+        if not job:
+            self._json({"error": "Job not found"}, status=404)
+            return
+        self._json({"job": job})
+
+    def _geometry_download(self, path: str, query: str):
+        session_id = unquote(path.split("/")[4])
+        session = self._geometry_session(session_id)
+        patient_id = (parse_qs(query).get("patient") or ["all"])[0]
+        if patient_id == "all":
+            patients = session.get("patients") or []
+        else:
+            patient = geometry_web._resolve_patient(session, patient_id)
+            patients = [patient] if patient else []
+        payload = geometry_web._zip_patient_outputs(patients)
+        self._bytes(payload, "application/zip", headers={"Content-Disposition": f'attachment; filename="geometry_{session_id}.zip"'})
+
     def _session(self, session_id: str) -> dict:
         with LOCK:
             session = SESSIONS.get(session_id)
@@ -1166,24 +1329,22 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Session not found")
         return session
 
-    def _legacy_workbench(self, query: str):
+    def _geometry_workbench(self, query: str):
         qs = parse_qs(query)
-        stage = (qs.get("stage") or [""])[0]
-        info = _ensure_legacy_workbench(stage)
-        root = (qs.get("root_folder") or [""])[0]
+        session_id = (qs.get("session_id") or [""])[0]
         patient = (qs.get("patient") or [""])[0]
-        iframe_url = info["url"]
-        params = []
-        if root:
-            params.append("root=" + quote(root))
+        iframe_url = "/geometry/?embed=1&autoload=1&ui=7"
+        if session_id:
+            iframe_url += "&session_id=" + quote(session_id)
         if patient:
-            params.append("patient=" + quote(patient))
-        params.append("embed=1")
-        if params:
-            params.append("autoload=1")
-            iframe_url += "?" + "&".join(params)
-        info["iframe_url"] = iframe_url
-        self._json({"workbench": info})
+            iframe_url += "&patient=" + quote(patient)
+        self._json({"workbench": {
+            "stage": "features",
+            "running": True,
+            "url": "/geometry/",
+            "iframe_url": iframe_url,
+            "pid": os.getpid(),
+        }})
 
     def _session_data(self, path: str, query: str):
         session = self._session(path.split("/")[3])

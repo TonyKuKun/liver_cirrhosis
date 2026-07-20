@@ -37,18 +37,32 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import numpy as np
 
-from features_layout import (
-    FEATURES_DIRNAME,
-    PUBLIC_FEATURE_NAMES,
-    RAW_CENTERLINE_NAME,
-    SMOOTH_CENTERLINE_NAME,
-    SEGMENT_ASSIGNMENTS_NAME,
-    UNIFIED_FEATURES_NAME,
-    feature_path,
-    features_dir,
-    remove_generated_outputs,
-    resolve_feature_path,
-)
+try:
+    from .features_layout import (
+        FEATURES_DIRNAME,
+        PUBLIC_FEATURE_NAMES,
+        RAW_CENTERLINE_NAME,
+        SMOOTH_CENTERLINE_NAME,
+        SEGMENT_ASSIGNMENTS_NAME,
+        UNIFIED_FEATURES_NAME,
+        feature_path,
+        features_dir,
+        remove_generated_outputs,
+        resolve_feature_path,
+    )
+except ImportError:
+    from features_layout import (
+        FEATURES_DIRNAME,
+        PUBLIC_FEATURE_NAMES,
+        RAW_CENTERLINE_NAME,
+        SMOOTH_CENTERLINE_NAME,
+        SEGMENT_ASSIGNMENTS_NAME,
+        UNIFIED_FEATURES_NAME,
+        feature_path,
+        features_dir,
+        remove_generated_outputs,
+        resolve_feature_path,
+    )
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -680,7 +694,10 @@ def save_manual_segment_assignments(
     adj = _centerline_adjacency(nodes)
     endpoints = [nid for nid, nbs in adj.items() if len(nbs) == 1]
     branch_points = [nid for nid, nbs in adj.items() if len(nbs) >= 3]
-    from segment_vessels import _build_output_json
+    try:
+        from .segment_vessels import _build_output_json
+    except ImportError:
+        from segment_vessels import _build_output_json
 
     result = {
         "segments": paths,
@@ -705,8 +722,12 @@ def save_manual_segment_assignments(
     removed_outputs.extend(remove_generated_outputs(parent, keep_public=True))
     features_recomputed = False
     if recompute_features:
-        from extract_profiles import extract_profiles
-        from extract_features import extract_all_features
+        try:
+            from .extract_profiles import extract_profiles
+            from .extract_features import extract_all_features
+        except ImportError:
+            from extract_profiles import extract_profiles
+            from extract_features import extract_all_features
 
         extract_profiles(str(stl_path))
         extract_all_features(str(stl_path), write_legacy=False)
@@ -1005,7 +1026,10 @@ def _smooth_manual_segment_coords(coords: np.ndarray) -> np.ndarray | None:
     if len(coords) == 2:
         return _resample_coords_by_arc(coords, n_points)
     try:
-        from smooth_centerline import _fit_spline_segment
+        try:
+            from .smooth_centerline import _fit_spline_segment
+        except ImportError:
+            from smooth_centerline import _fit_spline_segment
 
         smoothed = np.asarray(_fit_spline_segment(
             coords.tolist(),
@@ -1671,7 +1695,8 @@ def suggest_analysis_ranges(stl_path: Path) -> dict:
     raw_nodes = _read_centerline_file(_feature_file(parent, RAW_CENTERLINE_NAME))
     nodes = smooth_nodes or raw_nodes
     seg_data = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
-    pointwise = {}
+    unified = _read_json_file(_feature_file(parent, UNIFIED_FEATURES_NAME))
+    pointwise = unified.get("pointwise") if isinstance(unified, dict) else {}
     if not nodes or not seg_data:
         raise ValueError("Run or import centerline smoothing and anatomical segmentation first.")
     mesh = _load_surface_section_mesh(stl_path)
@@ -1950,7 +1975,8 @@ def build_visualization_data(
     smooth_nodes = _read_centerline_file(_feature_file(parent, SMOOTH_CENTERLINE_NAME))
     nodes = smooth_nodes or raw_nodes
     seg_data = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
-    pointwise = None
+    unified = _read_json_file(_feature_file(parent, UNIFIED_FEATURES_NAME))
+    pointwise = unified.get("pointwise") if isinstance(unified, dict) else None
 
     surface_mesh = _load_surface_section_mesh(stl_path) if include_surface_sections else None
     pointwise_layers = _build_pointwise_layers(
@@ -2197,7 +2223,10 @@ def _run_job(job_id: str, params: dict, post_tips_mode: str, export_png: bool):
 
 def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: str, export_png: bool):
     if step == "centerline":
-        from extract_centerline import extract_centerline
+        try:
+            from .extract_centerline import extract_centerline
+        except ImportError:
+            from extract_centerline import extract_centerline
 
         extract_centerline(
             str(stl_path),
@@ -2211,7 +2240,10 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
             merge_bp_distance_mm=params["merge_bp_distance_mm"],
         )
     elif step == "smooth":
-        from smooth_centerline import smooth_centerline
+        try:
+            from .smooth_centerline import smooth_centerline
+        except ImportError:
+            from smooth_centerline import smooth_centerline
 
         smooth_centerline(str(stl_path))
     elif step == "segment":
@@ -2237,7 +2269,10 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
         if result.returncode != 0:
             raise RuntimeError(f"segment_vessels failed with exit code {result.returncode}")
     elif step == "profiles":
-        from extract_profiles import extract_profiles
+        try:
+            from .extract_profiles import extract_profiles
+        except ImportError:
+            from extract_profiles import extract_profiles
 
         extract_profiles(
             str(stl_path),
@@ -2250,7 +2285,10 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
             max_diameter_rate_per_mm=params["max_diameter_rate_per_mm"],
         )
     elif step == "features":
-        from extract_features import extract_all_features
+        try:
+            from .extract_features import extract_all_features
+        except ImportError:
+            from extract_features import extract_all_features
 
         extract_all_features(
             str(stl_path),
@@ -2261,7 +2299,10 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
         )
         remove_generated_outputs(stl_path.parent, keep_public=True)
     elif step == "export":
-        from export_visualization import export_patient_visualization
+        try:
+            from .export_visualization import export_patient_visualization
+        except ImportError:
+            from export_visualization import export_patient_visualization
 
         export_patient_visualization(str(stl_path), export_html=True, export_png=export_png, verbose=True)
         remove_generated_outputs(stl_path.parent, keep_public=True)

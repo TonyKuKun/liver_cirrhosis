@@ -1,69 +1,19 @@
-# PPG Vessel Web Workbench
+# PortaFlow 几何特征工作区
 
-## 启动
+几何工作台保留原有页面布局、六步流水线、三维图层、中心线编辑、人工分段、
+有效分析区和特征展示，由整体 PortaFlow 后端统一提供，不再启动独立端口。
 
-```powershell
-python web_frontend.py --host 127.0.0.1 --port 8765
-```
-
-浏览器打开:
-
-```text
-http://127.0.0.1:8765
-```
-
-## 指定 Conda 环境
-
-推荐方式: 编辑 [web_frontend_config.json](E:/PPG_Prediction/web_frontend_config.json) 里的 `conda_env`:
-
-```json
-{
-  "host": "127.0.0.1",
-  "port": 8765,
-  "conda_env": "base",
-  "conda_exe": ""
-}
-```
-
-然后运行:
+从仓库根目录启动：
 
 ```powershell
-.\start_web_frontend.ps1
+python .\integrated_web_frontend.py --host 127.0.0.1 --port 8788
 ```
 
-也可以临时覆盖环境:
+打开 `http://127.0.0.1:8788/workbench.html`，在顶部选择“几何特征”。
 
-```powershell
-.\start_web_frontend.ps1 -CondaEnv pytorch
-```
+蓝色几何界面属于整体站点，源码位于 `web/geometry/`。统一后端只复用
+`geometry_feature_extract/web_frontend.py` 及同目录算法模块中的处理和可视化数据函数；
+`geometry_feature_extract/web/` 不作为整体网站页面，也不会启动独立 HTTP 服务。
 
-或直接用 Python:
-
-```powershell
-python web_frontend.py --conda-env pytorch
-```
-
-如果 `conda` 不在 PATH 中，可以把 `conda_exe` 改成完整路径，例如:
-
-```json
-"conda_exe": "D:\\anaconda\\Scripts\\conda.exe"
-```
-
-## 功能
-
-- 单文件模式: 上传一个 `.stl`，输出写入 `web_runs/<session>/...`，也可以填写输出目录。
-- 批量模式: 输入病例根目录，默认查找每个子目录下的 `vessel.stl`。
-- 流程按钮: 中心线提取、平滑、分段、逐点截面特征、统计特征、导出可视化。
-- 自动全流程: 按顺序运行全部步骤；批量模式会处理全部病例。
-- 3D 图层: STL 模型、原始/平滑中心线、分段、分叉点、曲率特征点、间隔截面、最大截面、平均截面、标签。
-- 下载结果: 打包 STL、各中间文件、最终 JSON 和导出 HTML/PNG。
-
-## 依赖
-
-前端服务本身只依赖 Python 标准库和本仓库内已有文件。实际运行算法时仍需要原项目依赖，例如:
-
-```text
-numpy scipy scikit-image networkx trimesh shapely plotly vtk kaleido pillow
-```
-
-如果依赖缺失，页面中的任务日志会显示对应的 `ModuleNotFoundError` 或算法异常。
+整体 session、患者路径、六步任务和下载路由均由根目录
+`integrated_web_frontend.py` 统一管理。

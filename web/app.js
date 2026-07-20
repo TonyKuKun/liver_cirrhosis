@@ -363,8 +363,7 @@ async function ensureLegacyStage(stageKey) {
   if (cached && cached.status !== "error" && cached.patientId === patient) return;
   state.legacy[stageKey] = { status: "loading" };
   try {
-    const root = state.session.root || $("rootFolder").value.trim();
-    const data = await api(`/api/legacy-workbench?stage=${encodeURIComponent(stageKey)}&root_folder=${encodeURIComponent(root)}&patient=${encodeURIComponent(patient)}`);
+    const data = await api(`/api/geometry/workbench?session_id=${encodeURIComponent(state.session.id)}&patient=${encodeURIComponent(patient)}`);
     state.legacy[stageKey] = { status: "ready", patientId: patient, ...data.workbench };
   } catch (error) {
     state.legacy[stageKey] = { status: "error", patientId: patient, error: error.message };
