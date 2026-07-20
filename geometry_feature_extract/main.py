@@ -149,7 +149,14 @@ def _process_one_patient(stl_path, post_tips, params, steps):
                 ownership_factor=params['ownership_factor'],
                 junction_policy=params['junction_policy'],
                 max_diameter_rate_per_mm=params[
-                    'max_diameter_rate_per_mm'])
+                    'max_diameter_rate_per_mm'],
+                area_jump_ratio_threshold=params[
+                    'area_jump_ratio_threshold'],
+                area_jump_window_mm=params['area_jump_window_mm'],
+                area_jump_min_persistence_mm=params[
+                    'area_jump_min_persistence_mm'],
+                area_jump_max_terminal_extension_mm=params[
+                    'area_jump_max_terminal_extension_mm'])
             print(f"  [Step 4] 剖面特征: {time.time()-t0:.2f}s")
             status['profiles'] = True
         except Exception as e:
@@ -442,6 +449,11 @@ DEFAULT_PARAMS = {
     'max_diameter_rate_per_mm': 0.5,  # 沿管轴等效直径相对变化率上限 (1/mm)
                                        # 0.5 = 每 mm 最多 50% 变化, 超阈孤立
                                        # 点视为单点突变伪影
+    # Persistent cross-section expansion: confluence spillover / internal intrusion.
+    'area_jump_ratio_threshold': 1.8,
+    'area_jump_window_mm': 6.0,
+    'area_jump_min_persistence_mm': 4.0,
+    'area_jump_max_terminal_extension_mm': 15.0,
 }
 
 

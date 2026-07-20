@@ -1730,6 +1730,323 @@ def _interpolate_profile_intervals(profile, intervals_mm):
     return profile
 
 
+_AREA_JUMP_INTERPOLATION_KEYS = [
+    'area', 'perimeter', 'eq_diameter',
+    'anchor_radius', 'owned_radius',
+    'circularity', 'hydraulic_diameter', 'solidity',
+    'r_insc_to_r_eq_ratio', 'n_components',
+]
+
+
+_AREA_JUMP_MASK_KEYS = _AREA_JUMP_INTERPOLATION_KEYS + [
+    'raw_area', 'raw_perimeter', 'raw_eq_diameter',
+    'inscribed_radius', 'dA_ds_norm',
+]
+
+
+def _interpolate_profile_mask(profile, mask, keys=None):
+    """Replace a masked internal interval using adjacent valid sections."""
+    n = len(profile.get('position', []))
+    arc = np.asarray(profile.get('arc_length_mm', []), dtype=float)
+    mask = np.asarray(mask, dtype=bool)
+    if n == 0 or len(arc) != n or len(mask) != n or not np.any(mask):
+        return profile
+
+    for key in keys or _AREA_JUMP_INTERPOLATION_KEYS:
+        if key not in profile:
+            continue
+        values = np.asarray(profile[key], dtype=float)
+        if len(values) != n:
+            continue
+        valid = np.isfinite(values) & ~mask
+        if np.sum(valid) < 2:
+            continue
+        kind = 'nearest' if key == 'n_components' else 'linear'
+        interpolator = interp1d(
+            arc[valid], values[valid], kind=kind, bounds_error=False,
+            fill_value=(values[valid][0], values[valid][-1]))
+        values[mask] = interpolator(arc[mask])
+        if key != 'n_components':
+            values = np.clip(values, 0, None)
+        profile[key] = values.tolist()
+    return profile
+
+
+def _mask_profile_sections(profile, mask):
+    """Mask section-derived channels while retaining centerline geometry."""
+    n = len(profile.get('position', []))
+    mask = np.asarray(mask, dtype=bool)
+    if n == 0 or len(mask) != n or not np.any(mask):
+        return profile
+    for key in _AREA_JUMP_MASK_KEYS:
+        if key not in profile:
+            continue
+        values = list(profile[key])
+        if len(values) != n:
+            continue
+        for idx in np.where(mask)[0]:
+            values[int(idx)] = float('nan')
+        profile[key] = values
+    return profile
+
+
+def _window_median(values, arc, valid, start_mm, end_mm):
+    in_window = valid & (arc >= start_mm) & (arc <= end_mm)
+    if np.sum(in_window) < 2:
+        return None
+    return float(np.median(values[in_window]))
+
+
+def _detect_terminal_area_jump(area, arc, valid, side, ratio_threshold,
+                               window_mm, min_persistence_mm,
+                               max_terminal_extension_mm):
+    """Find a persistent high-area terminal run relative to the segment interior."""
+    total = float(arc[-1]) if len(arc) else 0.0
+    max_extent = min(float(max_terminal_extension_mm), 0.35 * total)
+    if total <= 0 or max_extent < min_persistence_mm:
+        return None
+
+    candidates = []
+    if side == 'start':
+        boundary_indices = np.where(
+            (arc >= min_persistence_mm) & (arc <= max_extent))[0]
+        for boundary in boundary_indices:
+            edge = valid & (arc <= arc[boundary])
+            reference = _window_median(
+                area, arc, valid, arc[boundary], arc[boundary] + window_mm)
+            if np.sum(edge) < 2 or reference is None or reference <= 0:
+                continue
+            edge_values = area[edge]
+            edge_median = float(np.median(edge_values))
+            ratio = edge_median / reference
+            far_reference = _window_median(
+                area, arc, valid, total - window_mm, total)
+            if (far_reference is not None and far_reference > 0
+                    and edge_median / far_reference <= 1.35):
+                # A high-low-high pattern is a possible stenosis/thrombus,
+                # not a terminal transition into a larger vessel.
+                continue
+            high_fraction = float(np.mean(
+                edge_values >= ratio_threshold * reference))
+            if ratio >= ratio_threshold and high_fraction >= 0.60:
+                candidates.append((int(boundary), ratio))
+    else:
+        boundary_indices = np.where(
+            (total - arc >= min_persistence_mm)
+            & (total - arc <= max_extent))[0]
+        for boundary in boundary_indices:
+            edge = valid & (arc >= arc[boundary])
+            reference = _window_median(
+                area, arc, valid, arc[boundary] - window_mm, arc[boundary])
+            if np.sum(edge) < 2 or reference is None or reference <= 0:
+                continue
+            edge_values = area[edge]
+            edge_median = float(np.median(edge_values))
+            ratio = edge_median / reference
+            far_reference = _window_median(area, arc, valid, 0.0, window_mm)
+            if (far_reference is not None and far_reference > 0
+                    and edge_median / far_reference <= 1.35):
+                continue
+            high_fraction = float(np.mean(
+                edge_values >= ratio_threshold * reference))
+            if ratio >= ratio_threshold and high_fraction >= 0.60:
+                candidates.append((int(boundary), ratio))
+
+    if not candidates:
+        return None
+    # Keep the largest supported terminal extent: it is the estimated boundary
+    # between the assigned vessel and the receiving vessel.
+    if side == 'start':
+        return max(candidates, key=lambda item: item[0])
+    return min(candidates, key=lambda item: item[0])
+
+
+def _detect_symmetric_area_runs(area, arc, valid, ratio_threshold,
+                                window_mm, min_persistence_mm,
+                                detect_high):
+    """Find short runs that differ substantially from similar left/right baselines."""
+    n = len(area)
+    max_run_mm = max(3.0 * window_mm, min_persistence_mm)
+    valid_float = valid.astype(float)
+    area_sum = np.concatenate(([0.0], np.cumsum(np.where(valid, area, 0.0))))
+    valid_count = np.concatenate(([0.0], np.cumsum(valid_float)))
+
+    def interval_mean(start, end):
+        count = valid_count[end] - valid_count[start]
+        if count < 2:
+            return None
+        return float((area_sum[end] - area_sum[start]) / count)
+
+    left_reference = [None] * n
+    right_reference = [None] * n
+    for idx in range(n):
+        left_start = int(np.searchsorted(arc, arc[idx] - window_mm, side='left'))
+        left_reference[idx] = interval_mean(left_start, idx)
+        right_end = int(np.searchsorted(arc, arc[idx] + window_mm, side='right'))
+        right_reference[idx] = interval_mean(idx + 1, right_end)
+
+    candidates = []
+    for start in range(1, n - 2):
+        for end in range(start + 1, n - 1):
+            span = float(arc[end] - arc[start])
+            if span < min_persistence_mm:
+                continue
+            if span > max_run_mm:
+                break
+            if valid_count[end + 1] - valid_count[start] != end - start + 1:
+                continue
+            # Open intervals prevent the candidate run from contributing to
+            # either reference statistic.
+            left = left_reference[start]
+            right = right_reference[end]
+            if left is None or right is None or min(left, right) <= 0:
+                continue
+            # A real taper changes one baseline relative to the other. The
+            # inserted-vessel model needs comparable parent-vessel baselines.
+            if max(left, right) / min(left, right) > 1.35:
+                continue
+            run_values = area[start:end + 1]
+            run_mean = float((area_sum[end + 1] - area_sum[start])
+                             / (end - start + 1))
+            if detect_high:
+                baseline = max(left, right)
+                ratio = run_mean / baseline
+                fraction = float(np.mean(
+                    run_values >= ratio_threshold * baseline))
+                edge_consistent = bool(
+                    run_values[0] >= ratio_threshold * baseline
+                    and run_values[-1] >= ratio_threshold * baseline)
+            else:
+                baseline = min(left, right)
+                ratio = baseline / run_mean
+                fraction = float(np.mean(run_values <= baseline / ratio_threshold))
+                edge_consistent = bool(
+                    run_values[0] <= baseline / ratio_threshold
+                    and run_values[-1] <= baseline / ratio_threshold)
+            if (ratio >= ratio_threshold and fraction >= 0.80
+                    and edge_consistent):
+                candidates.append((ratio, start, end))
+
+    # The same plateau yields overlapping candidates. Keep non-overlapping
+    # representatives, prioritising the strongest and longest evidence.
+    selected = []
+    occupied = np.zeros(n, dtype=bool)
+    for ratio, start, end in sorted(
+            candidates, key=lambda item: item[0] * (item[2] - item[1] + 1),
+            reverse=True):
+        if np.any(occupied[start:end + 1]):
+            continue
+        occupied[start:end + 1] = True
+        selected.append((ratio, start, end))
+    return selected
+
+
+def _apply_persistent_area_jump_filter(
+        profile, ratio_threshold=1.8, window_mm=6.0,
+        min_persistence_mm=4.0, max_terminal_extension_mm=15.0):
+    """
+    Detect a persistent section-area expansion caused by a neighbouring vessel.
+
+    A one-point expansion is handled by existing local/rate outlier filters. This
+    method targets a different failure mode: several consecutive planes enter a
+    receiving vessel at an assigned segment endpoint, or an overlapping vessel
+    contaminates an interior interval. The high-area run must exceed robust
+    medians on both sides (interior) or the adjacent interior (endpoint).
+
+    Only sustained *increases* are removed. Sustained decreases are reported as
+    ``area_drop_candidate`` because they can reflect true stenosis or thrombus
+    and must not be replaced by an image-processing rule.
+    """
+    if profile is None:
+        return profile
+    n = len(profile.get('position', []))
+    area = np.asarray(profile.get('area', []), dtype=float)
+    arc = np.asarray(profile.get('arc_length_mm', []), dtype=float)
+    if n < 5 or len(area) != n or len(arc) != n or not np.all(np.diff(arc) > 0):
+        return profile
+
+    ratio_threshold = max(float(ratio_threshold), 1.01)
+    window_mm = max(float(window_mm), 0.1)
+    min_persistence_mm = max(float(min_persistence_mm), 0.0)
+    max_terminal_extension_mm = max(
+        float(max_terminal_extension_mm), min_persistence_mm)
+    existing_junction = np.asarray(
+        profile.get('junction_replaced', [0.0] * n), dtype=float)
+    if len(existing_junction) != n:
+        existing_junction = np.zeros(n, dtype=float)
+    valid = np.isfinite(area) & (area > 0) & (existing_junction <= 0)
+
+    terminal_mask = np.zeros(n, dtype=bool)
+    events = []
+    start_event = _detect_terminal_area_jump(
+        area, arc, valid, 'start', ratio_threshold, window_mm,
+        min_persistence_mm, max_terminal_extension_mm)
+    if start_event is not None:
+        boundary, ratio = start_event
+        terminal_mask[:boundary + 1] = True
+        events.append({
+            'type': 'terminal_start', 'arc_start_mm': float(arc[0]),
+            'arc_end_mm': float(arc[boundary]), 'area_ratio': float(ratio),
+        })
+
+    end_event = _detect_terminal_area_jump(
+        area, arc, valid, 'end', ratio_threshold, window_mm,
+        min_persistence_mm, max_terminal_extension_mm)
+    if end_event is not None:
+        boundary, ratio = end_event
+        terminal_mask[boundary:] = True
+        events.append({
+            'type': 'terminal_end', 'arc_start_mm': float(arc[boundary]),
+            'arc_end_mm': float(arc[-1]), 'area_ratio': float(ratio),
+        })
+
+    valid_after_terminal = valid & ~terminal_mask
+    internal_mask = np.zeros(n, dtype=bool)
+    high_runs = _detect_symmetric_area_runs(
+        area, arc, valid_after_terminal, ratio_threshold, window_mm,
+        min_persistence_mm, detect_high=True)
+    for ratio, start, end in high_runs:
+        internal_mask[start:end + 1] = True
+        events.append({
+            'type': 'internal_interpolated',
+            'arc_start_mm': float(arc[start]),
+            'arc_end_mm': float(arc[end]), 'area_ratio': float(ratio),
+        })
+
+    low = np.zeros(n, dtype=bool)
+    drop_events = []
+    low_runs = _detect_symmetric_area_runs(
+        area, arc, valid_after_terminal, ratio_threshold, window_mm,
+        min_persistence_mm, detect_high=False)
+    for ratio, start, end in low_runs:
+        low[start:end + 1] = True
+        drop_events.append({
+            'type': 'persistent_area_drop',
+            'arc_start_mm': float(arc[start]),
+            'arc_end_mm': float(arc[end]), 'area_ratio': float(ratio),
+        })
+
+    _mask_profile_sections(profile, terminal_mask)
+    _interpolate_profile_mask(profile, internal_mask)
+    _refresh_dA_ds_norm(profile)
+
+    profile['area_jump_terminal_mask'] = terminal_mask.astype(float).tolist()
+    profile['area_jump_interpolated'] = internal_mask.astype(float).tolist()
+    profile['area_drop_candidate'] = low.astype(float).tolist()
+    profile['n_area_jump_terminal_masked'] = int(np.sum(terminal_mask))
+    profile['n_area_jump_interpolated'] = int(np.sum(internal_mask))
+    profile['n_area_drop_candidates'] = int(len(drop_events))
+    profile['area_jump_parameters'] = {
+        'ratio_threshold': ratio_threshold,
+        'window_mm': window_mm,
+        'min_persistence_mm': min_persistence_mm,
+        'max_terminal_extension_mm': max_terminal_extension_mm,
+    }
+    profile['area_jump_events'] = events
+    profile['area_drop_events'] = drop_events
+    return profile
+
+
 def _branchpoint_arcs_for_path(seg_path, nodes, branchpoint_ids):
     """返回当前段路径上所有分叉点的弧长位置。"""
     if not seg_path or not branchpoint_ids:
@@ -1794,7 +2111,11 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
                      inscribed_factor=1.8,
                      ownership_factor=1.8,
                      junction_policy='min_valid',
-                     max_diameter_rate_per_mm=0.5):
+                     max_diameter_rate_per_mm=0.5,
+                     area_jump_ratio_threshold=1.8,
+                     area_jump_window_mm=6.0,
+                     area_jump_min_persistence_mm=4.0,
+                     area_jump_max_terminal_extension_mm=15.0):
     """
     为每个解剖段提取 100 点剖面 (含截面特征)。
 
@@ -1849,6 +2170,9 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
     n_total_local_outliers = 0
     n_total_rate_outliers = 0
     n_total_implausibly_small = 0
+    n_total_area_jump_terminal_masked = 0
+    n_total_area_jump_interpolated = 0
+    n_total_area_drop_candidates = 0
     branchpoint_ids = {
         int(bp['id']) for bp in seg_data.get('branch_points', [])
         if isinstance(bp, dict) and 'id' in bp
@@ -1943,6 +2267,12 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
             # 应用真实末端掩码 + 交叉区最小截面替换/封顶
             resampled = _interpolate_profile_intervals(
                 resampled, interpolate_intervals)
+            resampled = _apply_persistent_area_jump_filter(
+                resampled,
+                ratio_threshold=area_jump_ratio_threshold,
+                window_mm=area_jump_window_mm,
+                min_persistence_mm=area_jump_min_persistence_mm,
+                max_terminal_extension_mm=area_jump_max_terminal_extension_mm)
             if plan.get('trim_sources'):
                 n_total_clinical_endpoint_trimmed += len(plan.get('trim_sources', []))
             n_total_clinical_interpolated += int(
@@ -1988,6 +2318,12 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
                 'n_junction_protected', 0)
             n_total_junction_replaced += resampled.get(
                 'n_junction_replaced', 0)
+            n_total_area_jump_terminal_masked += resampled.get(
+                'n_area_jump_terminal_masked', 0)
+            n_total_area_jump_interpolated += resampled.get(
+                'n_area_jump_interpolated', 0)
+            n_total_area_drop_candidates += resampled.get(
+                'n_area_drop_candidates', 0)
             profiles[seg_name] = resampled
 
         except Exception as e:
@@ -2005,6 +2341,11 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
         'ownership_factor': float(ownership_factor),
         'junction_policy': junction_policy,
         'max_diameter_rate_per_mm': float(max_diameter_rate_per_mm),
+        'area_jump_ratio_threshold': float(area_jump_ratio_threshold),
+        'area_jump_window_mm': float(area_jump_window_mm),
+        'area_jump_min_persistence_mm': float(area_jump_min_persistence_mm),
+        'area_jump_max_terminal_extension_mm': float(
+            area_jump_max_terminal_extension_mm),
         'n_total_masked': int(n_total_masked),
         'n_total_junction_protected': int(n_total_junction_protected),
         'n_total_junction_replaced': int(n_total_junction_replaced),
@@ -2013,6 +2354,11 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
         'n_total_local_outliers': int(n_total_local_outliers),
         'n_total_rate_outliers': int(n_total_rate_outliers),
         'n_total_implausibly_small_sections': int(n_total_implausibly_small),
+        'n_total_area_jump_terminal_masked': int(
+            n_total_area_jump_terminal_masked),
+        'n_total_area_jump_interpolated': int(
+            n_total_area_jump_interpolated),
+        'n_total_area_drop_candidates': int(n_total_area_drop_candidates),
         'clinical_junction_method': 'radius_based_endpoint_trim_and_side_branch_interpolation',
         'clinical_radius_factor': 1.25,
         'n_total_clinical_endpoint_trimmed': int(n_total_clinical_endpoint_trimmed),
@@ -2035,6 +2381,9 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
             'r_insc_to_r_eq_ratio',      # 2r_insc / D_eq, 瓶颈程度
             'n_components',              # lumen 分量数 (1=正常, 2+=被血栓隔断)
             'junction_replaced',         # 1=交叉区使用可信最小截面替换/封顶
+            'area_jump_terminal_mask',   # 1=persistent high-area terminal section excluded
+            'area_jump_interpolated',    # 1=persistent high-area internal section interpolated
+            'area_drop_candidate',       # 1=persistent area decrease, diagnostic only
             'implausibly_small_section',
             'curvature',
             'torsion',                   # Frenet 挠率, 中心线 3D 扭转 (NaN 友好)
@@ -2055,7 +2404,10 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
           f"(替换/封顶 {n_total_junction_replaced} 处), "
           f"形状/内切超限剔除 {n_total_rejected_oversize} 处, "
           f"局部异常剔除 {n_total_local_outliers} 处, "
-          f"变化率剔除 {n_total_rate_outliers} 处")
+          f"变化率剔除 {n_total_rate_outliers} 处, "
+          f"面积跃迁端点排除 {n_total_area_jump_terminal_masked} 处, "
+          f"段内插值 {n_total_area_jump_interpolated} 处, "
+          f"面积下降候选 {n_total_area_drop_candidates} 段")
     return profiles
 
 def _diagnose_centerline_mesh(branch_path, nodes, mesh):

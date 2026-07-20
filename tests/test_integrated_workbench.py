@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import integrated_web_frontend as web
+from web import server as web
 
 
 def test_discover_patients_accepts_expected_inputs(tmp_path):

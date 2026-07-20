@@ -6,14 +6,14 @@
 从仓库根目录启动：
 
 ```powershell
-python .\integrated_web_frontend.py --host 127.0.0.1 --port 8788
+python ..\web\server.py --host 127.0.0.1 --port 8788
 ```
 
 打开 `http://127.0.0.1:8788/workbench.html`，在顶部选择“几何特征”。
 
 蓝色几何界面属于整体站点，源码位于 `web/geometry/`。统一后端只复用
-`geometry_feature_extract/web_frontend.py` 及同目录算法模块中的处理和可视化数据函数；
-`geometry_feature_extract/web/` 不作为整体网站页面，也不会启动独立 HTTP 服务。
+`web/geometry_backend.py` 及本目录算法模块中的处理和可视化数据函数；
+`geometry_feature_extract` 不再保存或启动 Web 页面与 HTTP 服务。
 
 整体 session、患者路径、六步任务和下载路由均由根目录
-`integrated_web_frontend.py` 统一管理。
+`web/server.py` 统一管理。

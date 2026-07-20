@@ -938,6 +938,10 @@ def _pointwise_diag(profile):
         'n_relaxed_bounds': profile.get('n_relaxed_bounds'),
         'n_local_outliers': profile.get('n_local_outliers'),
         'n_rate_outliers': profile.get('n_rate_outliers'),
+        'n_area_jump_terminal_masked': profile.get(
+            'n_area_jump_terminal_masked'),
+        'n_area_jump_interpolated': profile.get('n_area_jump_interpolated'),
+        'n_area_drop_candidates': profile.get('n_area_drop_candidates'),
         'n_junction_protected': profile.get('n_junction_protected'),
         'n_junction_replaced': profile.get('n_junction_replaced'),
         'valid_area_points': _finite_positive_count(profile.get('area', [])),
@@ -1456,7 +1460,9 @@ def build_feature_description():
                 'raw_area', 'raw_eq_diameter', 'raw_perimeter',
                 'anchor_radius', 'owned_radius', 'hydraulic_diameter',
                 'circularity', 'solidity', 'r_insc_to_r_eq_ratio',
-                'n_components', 'junction_replaced', 'curvature',
+                'n_components', 'junction_replaced',
+                'area_jump_terminal_mask', 'area_jump_interpolated',
+                'area_drop_candidate', 'curvature',
                 'torsion', 'dA_ds_norm', 'inscribed_radius',
                 'edge_margin_pct', 'edge_margin_mm', 'n_masked_endpoints',
                 'n_junction_protected', 'n_junction_replaced',
@@ -1685,6 +1691,9 @@ def build_unified_features(flat_features, pointwise_data, seg_data,
                              'r_insc_to_r_eq_ratio',      # 瓶颈程度
                              'n_components',              # lumen 分量数
                              'junction_replaced',         # 1=交叉区已替换/封顶
+                             'area_jump_terminal_mask',
+                             'area_jump_interpolated',
+                             'area_drop_candidate',
                              'curvature',
                              'torsion',                   # 中心线 3D 扭转
                              'dA_ds_norm',                # 局部锥度
@@ -1709,6 +1718,9 @@ def build_unified_features(flat_features, pointwise_data, seg_data,
                 'r_insc_to_r_eq_ratio': '内切/等效半径比 (瓶颈)',
                 'n_components': 'lumen 连通分量数',
                 'junction_replaced': '交叉区替换/封顶标记',
+                'area_jump_terminal_mask': '持续面积增大导致的端点排除标记',
+                'area_jump_interpolated': '段内持续面积增大后的插值标记',
+                'area_drop_candidate': '持续面积下降候选，仅用于诊断',
                 'curvature': '曲率 1/mm',
                 'torsion': '挠率 1/mm (NaN 可信度)',
                 'dA_ds_norm': '面积归一化变化率 (1/mm)',

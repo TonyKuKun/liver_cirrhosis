@@ -1,0 +1,20 @@
+{
+  "angle_degrees": 99.6,
+  "confluence_point_physical": [
+    -25.0,
+    20.0,
+    -268.0
+  ],
+  "confluence_node_id": 554,
+  "branch1_direction": [
+    0.8764,
+    -0.3313,
+    0.3494
+  ],
+  "branch2_direction": [
+    0.1164,
+    -0.2122,
+    -0.9703
+  ],
+  "n_fit_points": 10
+}

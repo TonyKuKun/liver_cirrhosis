@@ -2,7 +2,7 @@
   "integrated": {
     "name": "PortaFlow integrated workbench",
     "static_root": "web",
-    "entry": "integrated_web_frontend.py",
+    "entry": "web/server.py",
     "host": "127.0.0.1",
     "port": 8788
   },

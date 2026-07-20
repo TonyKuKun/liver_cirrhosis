@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-import integrated_web_frontend as web
+from web import server as web
 
 
 def _write_tetra_stl(path, origin):

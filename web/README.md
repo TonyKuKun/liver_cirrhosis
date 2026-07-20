@@ -13,16 +13,16 @@ This folder contains only the integrated PortaFlow website:
 
 The geometry UI is owned by this integrated site under `web/geometry`. It calls geometry
 processing and visualization-data implementations from `geometry_feature_extract` through the
-integrated backend. `geometry_feature_extract/web` is not mounted or served, and no additional
-port or process is used.
+integrated backend. The historical module page is retained only under `web/geometry_legacy` and
+is not mounted or served; no additional port or process is used.
 
-The integrated backend is `../integrated_web_frontend.py`. It serves both the main workbench and
+The integrated backend is `server.py`. It serves both the main workbench and
 the embedded geometry workspace, and reads `web_modules.json` to locate processing and model code.
 
 Run:
 
 ```powershell
-python ..\integrated_web_frontend.py --host 127.0.0.1 --port 8788
+python .\server.py --host 127.0.0.1 --port 8788
 ```
 
 Then open:
