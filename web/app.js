@@ -19,12 +19,11 @@ const CENTERLINE_LAYER_CONTROLS = [
   ["rawCenterline", "原始线", false],
   ["smoothCenterline", "平滑线", true],
   ["segments", "分段", true],
-  ["branchPoints", "分叉点", false],
-  ["featurePoints", "特征点", true],
-  ["sampledSections", "间隔截面", true],
-  ["surfaceSections", "表面相交截面", false],
-  ["maxSections", "最大截面", true],
-  ["meanSections", "平均截面", true],
+  ["globalAngle", "SV-SMV 汇合角", true],
+  ["featurePoints", "特征点", false],
+  ["sampledSections", "等效圆采样", false],
+  ["surfaceSections", "表面相交截面", true],
+  ["representativeSections", "代表截面（均值/最大）", false],
   ["labels", "标签", true],
 ];
 const state = {
@@ -39,6 +38,7 @@ const state = {
   segmentationParamsOpen: false,
   segmentationOpacityTarget: "",
   segmentationLayerOpacity: {},
+  segmentationMeshCache: new Map(),
   viewerToken: 0,
   centerlineLayers: Object.fromEntries(CENTERLINE_LAYER_CONTROLS.map(([key, , checked]) => [key, checked])),
 };
@@ -47,6 +47,7 @@ const $ = (id) => document.getElementById(id);
 
 function init() {
   $("loadBtn").addEventListener("click", loadSession);
+  $("nextPatientBtn").addEventListener("click", selectNextPatient);
   $("patientSearch").addEventListener("input", renderPatientList);
   $("stepper").querySelectorAll(".step").forEach((button) => {
     button.addEventListener("click", () => setStage(button.dataset.stage));
@@ -100,6 +101,7 @@ async function loadSession() {
     const data = await api("/api/session", { method: "POST", body: payload });
     state.session = data.session;
     state.legacy = {};
+    state.segmentationMeshCache.clear();
     localStorage.setItem("portaflow.rootFolder", root);
     $("sessionBadge").textContent = state.session.id.split("-").slice(0, 2).join("-");
     setLoadNote("");
@@ -139,14 +141,23 @@ async function refreshPatients(patientId = null) {
 
 function selectPatient(patientId) {
   if (!patientId) return;
-  const previousId = state.currentPatient?.id || "";
   state.currentPatient = state.patients.find((patient) => patient.id === patientId) || null;
-  if (state.currentPatient?.id && state.currentPatient.id !== previousId) {
-    delete state.legacy.segmentation;
-    delete state.legacy.features;
-  }
   renderPatientList();
   renderAll();
+}
+
+function selectNextPatient() {
+  if (state.patients.length < 2) return;
+  const currentIndex = state.patients.findIndex((patient) => patient.id === state.currentPatient?.id);
+  const nextIndex = (currentIndex + 1 + state.patients.length) % state.patients.length;
+  selectPatient(state.patients[nextIndex].id);
+}
+
+function updateNextPatientButton() {
+  const button = $("nextPatientBtn");
+  const hasNext = state.patients.length > 1;
+  button.disabled = !hasNext;
+  button.title = hasNext ? "切换到病人列表中的下一位病人" : "至少加载两位病人后可用";
 }
 
 function setStage(stageKey) {
@@ -186,6 +197,7 @@ function renderPatientList() {
   });
   $("patientCount").textContent = `个数 ${state.patients.length}`;
   const host = $("patientList");
+  updateNextPatientButton();
   if (!state.session) {
     host.innerHTML = `<li class="list-empty">请先加载数据根目录</li>`;
     return;
@@ -294,6 +306,16 @@ function sendCenterlineLayers() {
   }, "*");
 }
 
+function sendFeaturePatient(frame, patientId) {
+  if (!frame?.contentWindow || !state.session || state.stage !== "features") return;
+  frame.contentWindow.postMessage({
+    source: "portaflow-workbench",
+    type: "patient-change",
+    sessionId: state.session.id,
+    patientId,
+  }, "*");
+}
+
 function renderStage() {
   const patient = state.currentPatient;
   const host = $("stageBody");
@@ -310,6 +332,13 @@ function renderStage() {
     initSegmentationViewer(patient);
   }
   if (state.stage === "features") {
+    const frame = host.querySelector(".legacy-frame");
+    const legacy = state.legacy.features;
+    if (frame && legacy?.status === "ready" && legacy.parentSessionId === state.session.id) {
+      legacy.patientId = patient.id;
+      window.setTimeout(() => sendFeaturePatient(frame, patient.id), 0);
+      return;
+    }
     host.innerHTML = legacyStage(patient, "features");
     bindLegacyControls();
     ensureLegacyStage("features");
@@ -320,7 +349,7 @@ function renderStage() {
 function legacyStage(patient, stageKey) {
   const legacy = state.legacy[stageKey];
   const label = stageKey === "segmentation" ? "Segmentation Workbench" : "Centerline Workbench";
-  if (!legacy || legacy.status === "loading") {
+  if (!legacy || legacy.status === "loading" || legacy.patientId !== patient.id) {
     return `<div class="legacy-loading">
       <div class="spinner"></div>
       <h3>Loading ${label}</h3>
@@ -360,11 +389,11 @@ async function ensureLegacyStage(stageKey) {
   if (!state.session || !["segmentation", "features"].includes(stageKey)) return;
   const cached = state.legacy[stageKey];
   const patient = state.currentPatient?.id || "";
-  if (cached && cached.status !== "error" && cached.patientId === patient) return;
+  if (cached && cached.status !== "error" && cached.patientId === patient && cached.parentSessionId === state.session.id) return;
   state.legacy[stageKey] = { status: "loading" };
   try {
     const data = await api(`/api/geometry/workbench?session_id=${encodeURIComponent(state.session.id)}&patient=${encodeURIComponent(patient)}`);
-    state.legacy[stageKey] = { status: "ready", patientId: patient, ...data.workbench };
+    state.legacy[stageKey] = { status: "ready", patientId: patient, parentSessionId: state.session.id, ...data.workbench };
   } catch (error) {
     state.legacy[stageKey] = { status: "error", patientId: patient, error: error.message };
   }
@@ -1041,7 +1070,7 @@ async function initSegmentationViewer(patient) {
         loadingLayers.add(id);
         empty.hidden = false;
         empty.textContent = "正在加载所选 STL 图层...";
-        loadSegmentationLayer(layerDef, token).then((loadedLayer) => {
+        loadSegmentationLayer(layerDef, patient, token).then((loadedLayer) => {
           if (!loadedLayer || token !== state.viewerToken) return;
           model.layers.push(layerWithStoredOpacity({ ...loadedLayer, visible: true }));
           fitSegmentationModel(model);
@@ -1069,12 +1098,9 @@ async function initSegmentationViewer(patient) {
   empty.hidden = false;
   empty.textContent = "正在加载 STL 模型...";
   try {
-    const loaded = [];
-    for (const layer of initialLayers) {
-      if (token !== state.viewerToken) return;
-      const loadedLayer = await loadSegmentationLayer(layer, token);
-      if (loadedLayer) loaded.push(layerWithStoredOpacity(loadedLayer));
-    }
+    const loaded = (await Promise.all(
+      initialLayers.map((layer) => loadSegmentationLayer(layer, patient, token)),
+    )).filter(Boolean).map(layerWithStoredOpacity);
     if (token !== state.viewerToken) return;
     model.layers = loaded;
     fitSegmentationModel(model);
@@ -1131,13 +1157,33 @@ function renderSegmentationPlot(plot, model) {
   }, { displaylogo: false, responsive: true, scrollZoom: true });
 }
 
-async function loadSegmentationLayer(layer, token) {
+function segmentationMeshCacheKey(patient, layer) {
+  const file = patient.status?.files?.[layer.file] || {};
+  return `${patient.id}:${layer.file}:${file.size || 0}:${file.modified || 0}`;
+}
+
+function cacheSegmentationMesh(key, triangles) {
+  state.segmentationMeshCache.delete(key);
+  state.segmentationMeshCache.set(key, triangles);
+  while (state.segmentationMeshCache.size > 2) {
+    state.segmentationMeshCache.delete(state.segmentationMeshCache.keys().next().value);
+  }
+}
+
+async function loadSegmentationLayer(layer, patient, token) {
   if (token !== state.viewerToken) return null;
+  const cacheKey = segmentationMeshCacheKey(patient, layer);
+  const cached = state.segmentationMeshCache.get(cacheKey);
+  if (cached) {
+    cacheSegmentationMesh(cacheKey, cached);
+    return { ...layer, triangles: cached };
+  }
   const response = await fetch(patientFileUrl(layer.file));
   if (!response.ok || token !== state.viewerToken) return null;
   // Plotly renders the mesh on the GPU; keep the complete surface so it does
   // not turn into a sparse cloud of unrelated triangles.
   const triangles = parseStl(await response.arrayBuffer(), 1000000);
+  if (triangles.length) cacheSegmentationMesh(cacheKey, triangles);
   return triangles.length ? { ...layer, triangles } : null;
 }
 

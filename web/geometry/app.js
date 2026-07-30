@@ -8,6 +8,7 @@ const DEFAULT_PARAMS = {
   absolute_min_radius_mm: 0.5,
   merge_bp_distance_mm: 5.0,
   n_fit_points: 10,
+  angle_fit_length_mm: 10.0,
   n_profile_points: 100,
   curvature_window: 7,
   sample_step: 3,
@@ -26,6 +27,7 @@ const PARAM_LABELS = {
   absolute_min_radius_mm: "硬剪枝半径",
   merge_bp_distance_mm: "分叉点合并距离",
   n_fit_points: "拟合点数",
+  angle_fit_length_mm: "角度拟合长度",
   n_profile_points: "剖面点数",
   curvature_window: "曲率窗口",
   sample_step: "截面采样步长",
@@ -48,17 +50,17 @@ const LAYERS = {
   rawCenterline: false,
   smoothCenterline: true,
   segments: true,
-  branchPoints: false,
-  featurePoints: true,
-  sampledSections: true,
-  surfaceSections: false,
-  maxSections: true,
-  meanSections: true,
+  globalAngle: true,
+  featurePoints: false,
+  sampledSections: false,
+  surfaceSections: true,
+  representativeSections: false,
   labels: true,
 };
 
 const API_BASE = "/api/geometry";
 const geometryApi = (path) => `${API_BASE}${path}`;
+const VIEW_MAX_FACES = 80000;
 
 const CENTERLINE_EDIT_COLORS = [
   "#d9822b",
@@ -82,6 +84,34 @@ const VESSEL_LABELS = {
   tips: "TIPS",
   lgv: "LGV",
   pgv: "PGV",
+};
+
+const GLOBAL_FEATURE_LABELS = {
+  total_centerline_length: "总中心线长度",
+  sv_smv_diameter_ratio: "SV/SMV 直径比",
+  sv_smv_angle: "SV-SMV 汇合角",
+  has_lgv: "存在 LGV",
+  has_pgv: "存在 PGV",
+  has_compensation_vessel: "存在代偿血管",
+  has_tips: "存在 TIPS",
+};
+
+const SYSTEM_FEATURE_LABELS = {
+  angle_sv_smv: "SV-SMV 汇合角",
+  angle_mpv_lpv: "MPV-LPV 夹角",
+  angle_mpv_rpv: "MPV-RPV 夹角",
+  angle_lpv_rpv: "LPV-RPV 夹角",
+  angle_mpv_bifurc_total: "MPV 分叉总角",
+  mpv_bifurc_planarity_deg: "MPV 分叉非平面度",
+  angle_mpv_tips: "TIPS 入射角",
+  confluence_murray3_ratio: "汇合处 Murray³ 比",
+  confluence_murray3_deviation: "汇合 Murray³ 偏离",
+  confluence_area_ratio: "汇合面积比",
+  splenic_dominance_index: "脾主导指数",
+  inflow_resistance_asymmetry: "入流阻力不对称",
+  collateral_burden_score: "侧支负担评分",
+  n_collaterals_detected: "侧支数量",
+  branchpoint_density_per_cm: "分叉点密度/cm",
 };
 
 const state = {
@@ -112,6 +142,8 @@ const state = {
   queryPatient: "",
 };
 
+const meshTraceCache = new WeakMap();
+
 const $ = (id) => document.getElementById(id);
 
 function init() {
@@ -129,7 +161,14 @@ function init() {
 function bindWorkbenchMessages() {
   window.addEventListener("message", (event) => {
     const data = event.data || {};
-    if (data.source !== "portaflow-workbench" || data.type !== "centerline-layers") return;
+    if (data.source !== "portaflow-workbench") return;
+    if (data.type === "patient-change") {
+      if (!data.sessionId || !data.patientId || state.queryPatient === data.patientId) return;
+      state.queryPatient = data.patientId;
+      createIntegratedSession(data.sessionId, data.patientId);
+      return;
+    }
+    if (data.type !== "centerline-layers") return;
     const incoming = data.layers || {};
     let needsSurfaceRefresh = false;
     Object.entries(incoming).forEach(([key, value]) => {
@@ -496,7 +535,7 @@ async function refreshData() {
     const cacheBust = Date.now();
     const surfaceSections = state.layers.surfaceSections ? "1" : "0";
     const res = await fetch(
-      geometryApi(`/session/${encodeURIComponent(state.session.id)}/data?patient=${encodeURIComponent(patient)}&section_stride=${stride}&surface_sections=${surfaceSections}&_=${cacheBust}`),
+      geometryApi(`/session/${encodeURIComponent(state.session.id)}/data?patient=${encodeURIComponent(patient)}&section_stride=${stride}&max_faces=${VIEW_MAX_FACES}&surface_sections=${surfaceSections}&_=${cacheBust}`),
       { cache: "no-store" },
     );
     const data = await readResponse(res);
@@ -1065,23 +1104,27 @@ function renderScene() {
   const opacity = Number($("meshOpacity").value || 22) / 100;
 
   if (data.mesh && data.mesh.vertices && state.layers.mesh) {
-    const vertices = data.mesh.vertices;
-    const faces = data.mesh.faces || [];
-    traces.push({
-      type: "mesh3d",
-      name: `STL mesh (${data.mesh.n_faces_rendered || faces.length} faces)`,
-      x: vertices.map((v) => v[0]),
-      y: vertices.map((v) => v[1]),
-      z: vertices.map((v) => v[2]),
-      i: faces.map((f) => f[0]),
-      j: faces.map((f) => f[1]),
-      k: faces.map((f) => f[2]),
-      color: "#b8c3cc",
-      opacity,
-      hoverinfo: "skip",
-      flatshading: false,
-      lighting: { ambient: 0.55, diffuse: 0.8, specular: 0.1 },
-    });
+    let meshTrace = meshTraceCache.get(data.mesh);
+    if (!meshTrace) {
+      const vertices = data.mesh.vertices;
+      const faces = data.mesh.faces || [];
+      meshTrace = {
+        type: "mesh3d",
+        name: `STL mesh (${data.mesh.n_faces_rendered || faces.length} faces)`,
+        x: vertices.map((v) => v[0]),
+        y: vertices.map((v) => v[1]),
+        z: vertices.map((v) => v[2]),
+        i: faces.map((f) => f[0]),
+        j: faces.map((f) => f[1]),
+        k: faces.map((f) => f[2]),
+        color: "#b8c3cc",
+        hoverinfo: "skip",
+        flatshading: false,
+        lighting: { ambient: 0.55, diffuse: 0.8, specular: 0.1 },
+      };
+      meshTraceCache.set(data.mesh, meshTrace);
+    }
+    traces.push({ ...meshTrace, opacity });
   }
 
   addCenterlineTrace(traces, data.centerlines?.raw, "原始中心线", "#6b7280", state.layers.rawCenterline || state.centerlineEdit.active);
@@ -1094,14 +1137,14 @@ function renderScene() {
   } else if (!state.manualSegment.active) {
     addSegmentTraces(traces, data.segments || {});
   }
-  addBranchPointTrace(traces, data.branch_points || []);
+  addGlobalAngleTrace(traces, data.features?.sv_smv_angle);
   addFeaturePointTraces(traces, data.pointwise?.feature_points || {});
-  addSectionTraces(traces, data.pointwise?.sampled_sections || {}, "sampledSections", "间隔截面", 2, 0.38);
-  addSectionTraces(traces, data.pointwise?.surface_sections || {}, "surfaceSections", "表面相交截面", 4, 0.96);
-  addNamedSectionTraces(traces, data.pointwise?.max_sections || {}, "maxSections", "最大截面", 6);
-  addNamedSectionTraces(traces, data.pointwise?.mean_sections || {}, "meanSections", "平均截面", 4);
-  addSurfaceNamedSectionTraces(traces, data.pointwise?.surface_max_sections || {}, "maxSections", "最大表面截面", 7);
-  addSurfaceNamedSectionTraces(traces, data.pointwise?.surface_mean_sections || {}, "meanSections", "平均表面截面", 6);
+  addSectionTraces(traces, data.pointwise?.sampled_sections || {}, "sampledSections", "等效圆采样", 2, 0.38);
+  addSectionTraces(traces, data.pointwise?.surface_sections || {}, "surfaceSections", "校验通过的表面截面", 4, 0.96);
+  addNamedSectionTraces(traces, data.pointwise?.max_sections || {}, "representativeSections", "最大截面", 6);
+  addNamedSectionTraces(traces, data.pointwise?.mean_sections || {}, "representativeSections", "平均截面", 4);
+  addSurfaceNamedSectionTraces(traces, data.pointwise?.surface_max_sections || {}, "representativeSections", "最大表面截面", 7);
+  addSurfaceNamedSectionTraces(traces, data.pointwise?.surface_mean_sections || {}, "representativeSections", "平均表面截面", 6);
   if (!state.manualSegment.active) addLabelTrace(traces, data.segments || {});
 
   const layout = {
@@ -1354,18 +1397,75 @@ function addAnalysisBoundarySectionTraces(traces, sections) {
   });
 }
 
-function addBranchPointTrace(traces, branchPoints) {
-  if (!state.layers.branchPoints || !branchPoints.length) return;
+function addGlobalAngleTrace(traces, angle) {
+  if (!state.layers.globalAngle || !angle) return;
+  const point = angle.confluence_point_physical;
+  const sv = angle.branch1_direction;
+  const smv = angle.branch2_direction;
+  if (!Array.isArray(point) || !Array.isArray(sv) || !Array.isArray(smv)
+      || point.length !== 3 || sv.length !== 3 || smv.length !== 3) return;
+  const magnitude = (vector) => Math.hypot(...vector);
+  const unit = (vector) => {
+    const length = magnitude(vector);
+    return length > 1e-6 ? vector.map((value) => value / length) : null;
+  };
+  const a = unit(sv);
+  const b = unit(smv);
+  if (!a || !b) return;
+  const fitLength = Number(angle.fit_length_mm);
+  const radius = Number.isFinite(fitLength) ? Math.max(5, Math.min(16, fitLength)) : 10;
+  const cross = [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+  const normal = unit(cross);
+  if (!normal) return;
+  const angleRad = Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])));
+  const arc = Array.from({ length: 25 }, (_, index) => {
+    const t = angleRad * index / 24;
+    const tangent = [
+      normal[1] * a[2] - normal[2] * a[1],
+      normal[2] * a[0] - normal[0] * a[2],
+      normal[0] * a[1] - normal[1] * a[0],
+    ];
+    return point.map((value, axis) => value + radius * (Math.cos(t) * a[axis] + Math.sin(t) * tangent[axis]));
+  });
+  const degree = Number(angle.angle_degrees);
   traces.push({
     type: "scatter3d",
-    mode: "markers",
-    name: "分叉点",
-    x: branchPoints.map((p) => p.coord?.[0]),
-    y: branchPoints.map((p) => p.coord?.[1]),
-    z: branchPoints.map((p) => p.coord?.[2]),
-    marker: { size: 5, color: "#111820", line: { color: "#fff", width: 1 } },
-    text: branchPoints.map((p) => `BP ${p.id}`),
-    hovertemplate: "%{text}<extra></extra>",
+    mode: "lines+markers",
+    name: "SV-SMV 汇合角",
+    x: [point[0] + radius * a[0], point[0], point[0] + radius * b[0]],
+    y: [point[1] + radius * a[1], point[1], point[1] + radius * b[1]],
+    z: [point[2] + radius * a[2], point[2], point[2] + radius * b[2]],
+    line: { color: "#d97706", width: 6 },
+    marker: { size: 4, color: "#d97706" },
+    hovertemplate: `SV-SMV 汇合角<br>${fmt(degree, 1)}°<extra></extra>`,
+  });
+  traces.push({
+    type: "scatter3d",
+    mode: "lines",
+    name: "SV-SMV 汇合角弧",
+    x: arc.map((value) => value[0]),
+    y: arc.map((value) => value[1]),
+    z: arc.map((value) => value[2]),
+    line: { color: "#d97706", width: 8 },
+    hovertemplate: `SV-SMV 汇合角<br>${fmt(degree, 1)}°<extra></extra>`,
+  });
+  const labelPoint = arc[Math.floor(arc.length / 2)].map(
+    (value, axis) => value + normal[axis] * 2);
+  traces.push({
+    type: "scatter3d",
+    mode: "text",
+    name: "SV-SMV 汇合角数值",
+    x: [labelPoint[0]],
+    y: [labelPoint[1]],
+    z: [labelPoint[2]],
+    text: [`${fmt(degree, 1)}°`],
+    textfont: { color: "#9a5c06", size: 18 },
+    showlegend: false,
+    hoverinfo: "skip",
   });
 }
 
@@ -1426,7 +1526,7 @@ function addNamedSectionTraces(traces, sections, layerKey, label, width) {
       x: sec.x,
       y: sec.y,
       z: sec.z,
-      line: { color, width, dash: layerKey === "meanSections" ? "dash" : "solid" },
+      line: { color, width, dash: label.includes("平均") ? "dash" : "solid" },
       hovertemplate: `<b>${segLabel} ${label}</b><br>point: ${sec.index}<br>diameter: ${fmt(sec.diameter, 3)} mm<br>area: ${fmt(sec.area, 3)} mm²<extra></extra>`,
     });
   });
@@ -1482,10 +1582,13 @@ function addLabelTrace(traces, segments) {
 function renderInspector() {
   const data = state.data;
   const segmentCount = renderSegmentCards(data.features?.statistical || {}, data.segments || {});
-  const systemCount = renderSystemFeatures(data.features || {});
+  const globalCount = renderGlobalFeatures(data.features?.global || {});
+  const systemCount = renderSystemFeatures(data.features?.system || {});
   const segmentTitle = document.querySelector(".segment-profile-panel .panel-title");
+  const globalTitle = document.querySelector(".global-feature-panel .panel-title");
   const systemTitle = document.querySelector(".system-feature-panel .panel-title");
   if (segmentTitle) segmentTitle.textContent = `分段剖面特征 (${segmentCount})`;
+  if (globalTitle) globalTitle.textContent = `全局几何特征 (${globalCount})`;
   if (systemTitle) systemTitle.textContent = `系统特征 (${systemCount})`;
 }
 
@@ -1524,26 +1627,39 @@ function metricRow(label, value, unit) {
   return `<div class="metric"><span>${label}</span><strong>${fmt(value, 3)} ${unit}</strong></div>`;
 }
 
-function renderSystemFeatures(features) {
+function renderGlobalFeatures(global) {
+  const wrap = $("globalFeatures");
+  wrap.innerHTML = "";
+  const rows = Object.entries(global || {})
+    .filter(([, value]) => value !== null && value !== undefined && value !== "");
+  if (!rows.length) {
+    wrap.textContent = "暂无全局几何特征";
+    return 0;
+  }
+  rows.forEach(([key, value]) => appendFeatureRow(wrap, GLOBAL_FEATURE_LABELS[key] || key, key, value));
+  return rows.length;
+}
+
+function renderSystemFeatures(system) {
   const wrap = $("systemFeatures");
   wrap.innerHTML = "";
-  const flat = flattenSystem(features.system || {});
-  const global = features.global || {};
-  const rows = [
-    ...Object.entries(global).map(([key, value]) => [key, value]),
-    ...Object.entries(flat).map(([key, value]) => [key, value]),
-  ].filter(([, value]) => value !== null && value !== undefined && value !== "");
+  const rows = Object.entries(flattenSystem(system || {}))
+    .filter(([, value]) => value !== null && value !== undefined && value !== "");
   if (!rows.length) {
     wrap.textContent = "暂无系统特征";
     return 0;
   }
   rows.slice(0, 80).forEach(([key, value]) => {
-    const row = document.createElement("div");
-    row.className = "feature-row";
-    row.innerHTML = `<span title="${escapeHtml(key)}">${escapeHtml(key)}</span><strong>${escapeHtml(formatValue(value))}</strong>`;
-    wrap.appendChild(row);
+    appendFeatureRow(wrap, SYSTEM_FEATURE_LABELS[key] || key, key, value);
   });
   return rows.length;
+}
+
+function appendFeatureRow(wrap, label, key, value) {
+  const row = document.createElement("div");
+  row.className = "feature-row";
+  row.innerHTML = `<span title="${escapeHtml(key)}">${escapeHtml(label)}</span><strong>${escapeHtml(formatValue(value))}</strong>`;
+  wrap.appendChild(row);
 }
 
 function flattenSystem(system) {

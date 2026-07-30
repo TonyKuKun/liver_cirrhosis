@@ -156,7 +156,11 @@ def _process_one_patient(stl_path, post_tips, params, steps):
                 area_jump_min_persistence_mm=params[
                     'area_jump_min_persistence_mm'],
                 area_jump_max_terminal_extension_mm=params[
-                    'area_jump_max_terminal_extension_mm'])
+                    'area_jump_max_terminal_extension_mm'],
+                area_jump_reference_points=params[
+                    'area_jump_reference_points'],
+                endpoint_min_distance_mm=params[
+                    'endpoint_min_distance_mm'])
             print(f"  [Step 4] 剖面特征: {time.time()-t0:.2f}s")
             status['profiles'] = True
         except Exception as e:
@@ -450,10 +454,12 @@ DEFAULT_PARAMS = {
                                        # 0.5 = 每 mm 最多 50% 变化, 超阈孤立
                                        # 点视为单点突变伪影
     # Persistent cross-section expansion: confluence spillover / internal intrusion.
-    'area_jump_ratio_threshold': 1.8,
+    'area_jump_ratio_threshold': 1.6,
     'area_jump_window_mm': 6.0,
     'area_jump_min_persistence_mm': 4.0,
     'area_jump_max_terminal_extension_mm': 15.0,
+    'area_jump_reference_points': 5,
+    'endpoint_min_distance_mm': 3.0,
 }
 
 

@@ -62,8 +62,8 @@ const LAYERS = {
   segments: true,
   branchPoints: false,
   featurePoints: true,
-  sampledSections: true,
-  surfaceSections: false,
+  sampledSections: false,
+  surfaceSections: true,
   maxSections: true,
   meanSections: true,
   labels: true,
@@ -993,7 +993,7 @@ function renderScene() {
   addBranchPointTrace(traces, data.branch_points || []);
   addFeaturePointTraces(traces, data.pointwise?.feature_points || {});
   addSectionTraces(traces, data.pointwise?.sampled_sections || {}, "sampledSections", "间隔截面", 2, 0.38);
-  addSectionTraces(traces, data.pointwise?.surface_sections || {}, "surfaceSections", "表面相交截面", 4, 0.96);
+  addSectionTraces(traces, data.pointwise?.surface_sections || {}, "surfaceSections", "校验通过的表面截面", 4, 0.96);
   addNamedSectionTraces(traces, data.pointwise?.max_sections || {}, "maxSections", "最大截面", 6);
   addNamedSectionTraces(traces, data.pointwise?.mean_sections || {}, "meanSections", "平均截面", 4);
   addSurfaceNamedSectionTraces(traces, data.pointwise?.surface_max_sections || {}, "maxSections", "最大表面截面", 7);

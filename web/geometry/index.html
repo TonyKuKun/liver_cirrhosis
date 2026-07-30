@@ -9,7 +9,7 @@
       document.documentElement.classList.add("embed");
     }
   </script>
-  <link rel="stylesheet" href="styles.css?v=7" />
+  <link rel="stylesheet" href="styles.css?v=8" />
   <script src="/assets/plotly.min.js"></script>
 </head>
 <body>
@@ -87,12 +87,11 @@
           <label><input class="layer-toggle" data-layer="rawCenterline" type="checkbox" />原始线</label>
           <label><input class="layer-toggle" data-layer="smoothCenterline" type="checkbox" checked />平滑线</label>
           <label><input class="layer-toggle" data-layer="segments" type="checkbox" checked />分段</label>
-          <label><input class="layer-toggle" data-layer="branchPoints" type="checkbox" />分叉点</label>
-          <label><input class="layer-toggle" data-layer="featurePoints" type="checkbox" checked />特征点</label>
-          <label><input class="layer-toggle" data-layer="sampledSections" type="checkbox" checked />间隔截面</label>
-          <label><input class="layer-toggle" data-layer="surfaceSections" type="checkbox" />表面相交截面</label>
-          <label><input class="layer-toggle" data-layer="maxSections" type="checkbox" checked />最大截面</label>
-          <label><input class="layer-toggle" data-layer="meanSections" type="checkbox" checked />平均截面</label>
+          <label title="在 SV 与 SMV 的汇合处显示夹角和方向"><input class="layer-toggle" data-layer="globalAngle" type="checkbox" checked />SV-SMV 汇合角</label>
+          <label><input class="layer-toggle" data-layer="featurePoints" type="checkbox" />特征点</label>
+          <label title="沿中心线按设定间隔绘制的等效圆"><input class="layer-toggle" data-layer="sampledSections" type="checkbox" />等效圆采样</label>
+          <label><input class="layer-toggle" data-layer="surfaceSections" type="checkbox" checked />校验通过的表面截面</label>
+          <label title="每段平均面积附近及最大面积位置的等效圆"><input class="layer-toggle" data-layer="representativeSections" type="checkbox" />代表截面（均值/最大）</label>
           <label><input class="layer-toggle" data-layer="labels" type="checkbox" checked />标签</label>
         </div>
         <div class="slider-group">
@@ -170,6 +169,10 @@
           <div class="panel-title">分段剖面特征</div>
           <div id="segmentCards" class="cards"></div>
         </div>
+        <div class="inspector-block global-feature-panel">
+          <div class="panel-title">全局几何特征</div>
+          <div id="globalFeatures" class="feature-table"></div>
+        </div>
         <div class="inspector-block system-feature-panel">
           <div class="panel-title">系统特征</div>
           <div id="systemFeatures" class="feature-table"></div>
@@ -179,6 +182,6 @@
     </main>
   </div>
 
-  <script src="app.js?v=7"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>

@@ -470,12 +470,16 @@ a.brand:hover .brand-name { color: var(--accent-deep); }
 }
 .btn-run:hover { filter: brightness(1.05); }
 .btn-run:disabled { opacity: .55; cursor: progress; }
+.session-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 4px; }
+.session-actions .btn-run, .session-actions .btn-ghost { width: 100%; margin-top: 0; }
+.session-actions .btn-ghost { padding: 11px 8px; }
 .btn-ghost {
   width: 100%; margin-top: 8px; padding: 9px; border-radius: 9px;
   background: #fff; border: 1px solid var(--line); color: var(--ink-1); font-weight: 500;
 }
 .btn-ghost.compact { margin-top: 4px; }
 .btn-ghost:hover { color: var(--accent-deep); border-color: #bcd6fb; background: var(--accent-soft); }
+.btn-ghost:disabled { opacity: .55; cursor: not-allowed; }
 .btn-ghost.active {
   color: var(--accent-deep);
   border-color: #bcd6fb;

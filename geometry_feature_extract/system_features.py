@@ -88,6 +88,25 @@ def _nan_min(values):
 # 几何工具: 段端方向向量
 # ============================================================
 
+def _direction_from_coords(coords, fit_length_mm):
+    """Fit one local direction over a physical centerline-length window."""
+    if len(coords) < 2:
+        return None
+    segment_lengths = np.linalg.norm(np.diff(coords, axis=0), axis=1)
+    cumulative = np.concatenate(([0.0], np.cumsum(segment_lengths)))
+    usable_length = min(float(fit_length_mm), float(cumulative[-1]))
+    if usable_length < 2.0:
+        return None
+    distances = np.linspace(0.0, usable_length, 9)
+    samples = np.column_stack([
+        np.interp(distances, cumulative, coords[:, axis]) for axis in range(3)
+    ])
+    centered_distances = distances - np.mean(distances)
+    direction = (centered_distances @ (samples - np.mean(samples, axis=0)))
+    norm = np.linalg.norm(direction)
+    return direction / norm if norm > 1e-6 else None
+
+
 def _direction_from_branchpoint(seg_path, nodes, sample_dist_mm=10.0,
                                 from_end=False):
     """
@@ -102,17 +121,37 @@ def _direction_from_branchpoint(seg_path, nodes, sample_dist_mm=10.0,
     if from_end:
         coords = coords[::-1]
 
-    base = coords[0]
-    cumlen = 0.0
-    sample_pt = coords[-1]
-    for i in range(1, len(coords)):
-        cumlen += np.linalg.norm(coords[i] - coords[i - 1])
-        if cumlen >= sample_dist_mm:
-            sample_pt = coords[i]
-            break
-    direction = sample_pt - base
-    n = np.linalg.norm(direction)
-    return direction / n if n > 1e-6 else None
+    return _direction_from_coords(coords, sample_dist_mm)
+
+
+def _shared_endpoint(*paths):
+    endpoint_sets = [{path[0], path[-1]} for path in paths if path and len(path) > 1]
+    if len(endpoint_sets) != len(paths):
+        return None
+    shared = set.intersection(*endpoint_sets)
+    return next(iter(shared)) if len(shared) == 1 else None
+
+
+def _path_from_endpoint(path, endpoint_id):
+    if path[0] == endpoint_id:
+        return path
+    if path[-1] == endpoint_id:
+        return list(reversed(path))
+    return None
+
+
+def _directions_at_shared_endpoint(paths, nodes, fit_length_mm=10.0):
+    """Return directions using one common physical window at a true junction."""
+    endpoint_id = _shared_endpoint(*paths)
+    if endpoint_id is None:
+        return [None] * len(paths)
+    oriented = [_path_from_endpoint(path, endpoint_id) for path in paths]
+    if any(path is None for path in oriented):
+        return [None] * len(paths)
+    coords = [path_to_coords(path, nodes) for path in oriented]
+    lengths = [float(np.sum(np.linalg.norm(np.diff(item, axis=0), axis=1))) for item in coords]
+    shared_length = min(float(fit_length_mm), *lengths)
+    return [_direction_from_coords(item, shared_length) for item in coords]
 
 
 def _angle_between(v1, v2):
@@ -157,36 +196,19 @@ def _angle_features(seg_dict, nodes):
     rpv = _safe_get(seg_dict, 'rpv', 'path')
     tips = _safe_get(seg_dict, 'tips', 'path')
 
-    # SV-SMV 汇合角: 两段从共同起点出发的方向夹角
-    if sv and smv and len(sv) > 1 and len(smv) > 1 and sv[0] == smv[0]:
-        d_sv = _direction_from_branchpoint(sv, nodes)
-        d_smv = _direction_from_branchpoint(smv, nodes)
-        out['angle_sv_smv'] = _angle_between(d_sv, d_smv)
-    else:
-        out['angle_sv_smv'] = None
+    d_sv, d_smv = _directions_at_shared_endpoint([sv, smv], nodes)
+    out['angle_sv_smv'] = _angle_between(d_sv, d_smv)
 
     # MPV→LPV 角: MPV 入射 (从 lpv 起点回头) vs LPV 出射
-    if mpv and lpv and len(mpv) > 1 and len(lpv) > 1:
-        mpv_in = _direction_from_branchpoint(mpv, nodes, from_end=True)
-        lpv_out = _direction_from_branchpoint(lpv, nodes)
-        out['angle_mpv_lpv'] = _angle_between(mpv_in, lpv_out)
-    else:
-        out['angle_mpv_lpv'] = None
+    mpv_lpv, lpv_out = _directions_at_shared_endpoint([mpv, lpv], nodes)
+    out['angle_mpv_lpv'] = _angle_between(mpv_lpv, lpv_out)
 
-    if mpv and rpv and len(mpv) > 1 and len(rpv) > 1:
-        mpv_in = _direction_from_branchpoint(mpv, nodes, from_end=True)
-        rpv_out = _direction_from_branchpoint(rpv, nodes)
-        out['angle_mpv_rpv'] = _angle_between(mpv_in, rpv_out)
-    else:
-        out['angle_mpv_rpv'] = None
+    mpv_rpv, rpv_out = _directions_at_shared_endpoint([mpv, rpv], nodes)
+    out['angle_mpv_rpv'] = _angle_between(mpv_rpv, rpv_out)
 
     # LPV-RPV 之间的角
-    if lpv and rpv and len(lpv) > 1 and len(rpv) > 1:
-        d_lpv = _direction_from_branchpoint(lpv, nodes)
-        d_rpv = _direction_from_branchpoint(rpv, nodes)
-        out['angle_lpv_rpv'] = _angle_between(d_lpv, d_rpv)
-    else:
-        out['angle_lpv_rpv'] = None
+    d_lpv, d_rpv = _directions_at_shared_endpoint([lpv, rpv], nodes)
+    out['angle_lpv_rpv'] = _angle_between(d_lpv, d_rpv)
 
     # MPV 分叉总角度 = LPV 角 + RPV 角 (粗略反映分叉张开)
     a1 = out['angle_mpv_lpv']
@@ -194,21 +216,12 @@ def _angle_features(seg_dict, nodes):
     out['angle_mpv_bifurc_total'] = (a1 + a2) if (a1 is not None and a2 is not None) else None
 
     # MPV 分叉非平面性
-    if mpv and lpv and rpv and len(mpv) > 1 and len(lpv) > 1 and len(rpv) > 1:
-        mpv_axis = _direction_from_branchpoint(mpv, nodes, from_end=True)
-        d_lpv = _direction_from_branchpoint(lpv, nodes)
-        d_rpv = _direction_from_branchpoint(rpv, nodes)
-        out['mpv_bifurc_planarity_deg'] = _coplanarity(mpv_axis, d_lpv, d_rpv)
-    else:
-        out['mpv_bifurc_planarity_deg'] = None
+    mpv_axis, d_lpv, d_rpv = _directions_at_shared_endpoint([mpv, lpv, rpv], nodes)
+    out['mpv_bifurc_planarity_deg'] = _coplanarity(mpv_axis, d_lpv, d_rpv)
 
     # TIPS take-off (post-tips)
-    if mpv and tips and len(mpv) > 1 and len(tips) > 1:
-        mpv_in = _direction_from_branchpoint(mpv, nodes, from_end=True)
-        tips_out = _direction_from_branchpoint(tips, nodes)
-        out['angle_mpv_tips'] = _angle_between(mpv_in, tips_out)
-    else:
-        out['angle_mpv_tips'] = None
+    mpv_tips, tips_out = _directions_at_shared_endpoint([mpv, tips], nodes)
+    out['angle_mpv_tips'] = _angle_between(mpv_tips, tips_out)
 
     return out
 
@@ -217,7 +230,67 @@ def _angle_features(seg_dict, nodes):
 # (B) 直径 / 面积比 (Murray, conservation, asymmetry)
 # ============================================================
 
-def _diameter_ratio_features(stat_features):
+def _junction_section_values(seg_dict, profile_data, vessels,
+                             offset_mm=10.0, half_window_mm=2.0,
+                             max_offset_mm=30.0):
+    """Read robust local section values at one shared vessel junction."""
+    if profile_data is None:
+        return {}
+    paths = [_safe_get(seg_dict, vessel, 'path') for vessel in vessels]
+    endpoint_id = _shared_endpoint(*paths)
+    if endpoint_id is None:
+        return {}
+    candidates = {}
+    for vessel, path in zip(vessels, paths):
+        profile = _seg_pointwise(profile_data, vessel)
+        if profile is None:
+            return {}
+        arc = np.asarray(profile.get('arc_length_mm', []), dtype=float)
+        diameter = np.asarray(profile.get('eq_diameter', []), dtype=float)
+        area = np.asarray(profile.get('area', []), dtype=float)
+        n = min(len(arc), len(diameter), len(area))
+        if n < 2:
+            return {}
+        arc, diameter, area = arc[:n], diameter[:n], area[:n]
+        total_length = _nan_max(arc)
+        if total_length is None:
+            return {}
+        from_junction = arc if path[0] == endpoint_id else total_length - arc
+        valid = (
+            np.isfinite(from_junction) & np.isfinite(diameter) & (diameter > 0)
+            & np.isfinite(area) & (area > 0)
+            & (from_junction >= float(offset_mm))
+            & (from_junction <= float(max_offset_mm))
+        )
+        if not np.any(valid):
+            return {}
+        candidates[vessel] = {
+            'distance': from_junction,
+            'diameter': diameter,
+            'area': area,
+            'first_reliable_distance': float(np.min(from_junction[valid])),
+        }
+
+    # A shared target keeps the three measurements physically comparable while
+    # allowing endpoint protection masks to exclude contaminated sections.
+    target = max(item['first_reliable_distance'] for item in candidates.values())
+    out = {}
+    for vessel, item in candidates.items():
+        window = np.abs(item['distance'] - target) <= float(half_window_mm)
+
+        def median(values):
+            valid = window & np.isfinite(values) & (values > 0)
+            return float(np.median(values[valid])) if np.any(valid) else None
+
+        local_diameter = median(item['diameter'])
+        local_area = median(item['area'])
+        if local_diameter is None or local_area is None:
+            return {}
+        out[vessel] = {'diameter': local_diameter, 'area': local_area}
+    return out
+
+
+def _diameter_ratio_features(stat_features, junction_sections=None):
     """从段统计特征 (mean_diameter, mean_area) 派生比率。"""
     out = {}
 
@@ -232,6 +305,10 @@ def _diameter_ratio_features(stat_features):
     d_lgv, d_pgv = D('lgv'), D('pgv')
     a_mpv, a_sv, a_smv = A('mpv'), A('sv'), A('smv')
     a_lpv, a_rpv = A('lpv'), A('rpv')
+    junction_sections = junction_sections or {}
+
+    def J(junction, vessel, metric):
+        return junction_sections.get(junction, {}).get(vessel, {}).get(metric)
 
     # SV/SMV 不对称
     if d_sv is not None and d_smv is not None:
@@ -246,9 +323,13 @@ def _diameter_ratio_features(stat_features):
     out['smv_mpv_diameter_ratio'] = _safe_div(d_smv, d_mpv)
 
     # 汇合 Murray-3: D_MPV^3 / (D_SV^3 + D_SMV^3) — 理想 ≈ 1
-    if d_mpv is not None and d_sv is not None and d_smv is not None:
-        num = d_mpv ** 3
-        den = d_sv ** 3 + d_smv ** 3
+    d_mpv_conf, d_sv_conf, d_smv_conf = (J('confluence', vessel, 'diameter')
+                                          for vessel in ('mpv', 'sv', 'smv'))
+    a_mpv_conf, a_sv_conf, a_smv_conf = (J('confluence', vessel, 'area')
+                                          for vessel in ('mpv', 'sv', 'smv'))
+    if d_mpv_conf is not None and d_sv_conf is not None and d_smv_conf is not None:
+        num = d_mpv_conf ** 3
+        den = d_sv_conf ** 3 + d_smv_conf ** 3
         out['confluence_murray3_ratio'] = _safe_div(num, den)
         out['confluence_murray3_deviation'] = abs(out['confluence_murray3_ratio'] - 1.0) \
             if out['confluence_murray3_ratio'] is not None else None
@@ -257,14 +338,18 @@ def _diameter_ratio_features(stat_features):
         out['confluence_murray3_deviation'] = None
 
     # 汇合面积守恒: A_MPV / (A_SV + A_SMV)
-    if a_mpv is not None and a_sv is not None and a_smv is not None:
-        out['confluence_area_ratio'] = _safe_div(a_mpv, a_sv + a_smv)
+    if a_mpv_conf is not None and a_sv_conf is not None and a_smv_conf is not None:
+        out['confluence_area_ratio'] = _safe_div(a_mpv_conf, a_sv_conf + a_smv_conf)
     else:
         out['confluence_area_ratio'] = None
 
     # MPV→LPV/RPV Murray-3
-    if d_mpv is not None and d_lpv is not None and d_rpv is not None:
-        out['mpv_bifurc_murray3_ratio'] = _safe_div(d_mpv ** 3, d_lpv ** 3 + d_rpv ** 3)
+    d_mpv_bif, d_lpv_bif, d_rpv_bif = (J('bifurcation', vessel, 'diameter')
+                                        for vessel in ('mpv', 'lpv', 'rpv'))
+    a_mpv_bif, a_lpv_bif, a_rpv_bif = (J('bifurcation', vessel, 'area')
+                                        for vessel in ('mpv', 'lpv', 'rpv'))
+    if d_mpv_bif is not None and d_lpv_bif is not None and d_rpv_bif is not None:
+        out['mpv_bifurc_murray3_ratio'] = _safe_div(d_mpv_bif ** 3, d_lpv_bif ** 3 + d_rpv_bif ** 3)
         out['mpv_bifurc_murray3_deviation'] = (
             abs(out['mpv_bifurc_murray3_ratio'] - 1.0)
             if out['mpv_bifurc_murray3_ratio'] is not None else None)
@@ -273,8 +358,8 @@ def _diameter_ratio_features(stat_features):
         out['mpv_bifurc_murray3_deviation'] = None
 
     # MPV→LPV/RPV 面积守恒
-    if a_mpv is not None and a_lpv is not None and a_rpv is not None:
-        out['mpv_bifurc_area_ratio'] = _safe_div(a_mpv, a_lpv + a_rpv)
+    if a_mpv_bif is not None and a_lpv_bif is not None and a_rpv_bif is not None:
+        out['mpv_bifurc_area_ratio'] = _safe_div(a_mpv_bif, a_lpv_bif + a_rpv_bif)
     else:
         out['mpv_bifurc_area_ratio'] = None
 
@@ -290,9 +375,9 @@ def _diameter_ratio_features(stat_features):
     out['pgv_mpv_diameter_ratio'] = _safe_div(d_pgv, d_mpv)
 
     # 脾主导指数 (r⁴ 加权): r_SV⁴/(r_SV⁴+r_SMV⁴) 近似流量分配
-    if d_sv is not None and d_smv is not None:
-        r_sv4 = (0.5 * d_sv) ** 4
-        r_smv4 = (0.5 * d_smv) ** 4
+    if d_sv_conf is not None and d_smv_conf is not None:
+        r_sv4 = (0.5 * d_sv_conf) ** 4
+        r_smv4 = (0.5 * d_smv_conf) ** 4
         out['splenic_dominance_index'] = _safe_div(r_sv4, r_sv4 + r_smv4)
     else:
         out['splenic_dominance_index'] = None
@@ -311,13 +396,18 @@ def _length_tortuosity_features(seg_dict, stat_features, nodes):
     sv = _safe_get(seg_dict, 'sv', 'path')
     mpv = _safe_get(seg_dict, 'mpv', 'path')
     if sv and mpv and len(sv) > 1 and len(mpv) > 1:
-        sv_coords = path_to_coords(sv, nodes)
-        mpv_coords = path_to_coords(mpv, nodes)
-        path_len = (path_physical_length(sv, nodes)
-                    + path_physical_length(mpv, nodes))
-        # 弦长: 脾端端点 → MPV 终点
-        chord = float(np.linalg.norm(sv_coords[-1] - mpv_coords[-1]))
-        out['splenoportal_path_chord_ratio'] = _safe_div(path_len, chord)
+        junction_id = _shared_endpoint(sv, mpv)
+        sv_from_junction = _path_from_endpoint(sv, junction_id) if junction_id is not None else None
+        mpv_from_junction = _path_from_endpoint(mpv, junction_id) if junction_id is not None else None
+        if sv_from_junction is not None and mpv_from_junction is not None:
+            path_len = (path_physical_length(sv, nodes)
+                        + path_physical_length(mpv, nodes))
+            chord = float(np.linalg.norm(
+                path_to_coords(sv_from_junction, nodes)[-1]
+                - path_to_coords(mpv_from_junction, nodes)[-1]))
+            out['splenoportal_path_chord_ratio'] = _safe_div(path_len, chord)
+        else:
+            out['splenoportal_path_chord_ratio'] = None
     else:
         out['splenoportal_path_chord_ratio'] = None
 
@@ -386,17 +476,22 @@ def _segment_resistance_integral(profile, length_mm,
     else:
         r_arr = 0.5 * eq_d  # 退回等效直径/2
 
-    valid = np.isfinite(r_arr) & (r_arr > eps)
+    valid = np.isfinite(arc) & np.isfinite(r_arr) & (r_arr > eps)
     if np.sum(valid) < 2:
         return None, 0
 
-    arc_v = arc[valid]
-    r_v = r_arr[valid]
-
-    # 中点法积分
-    dl = np.diff(arc_v)
-    r_mid = 0.5 * (r_v[:-1] + r_v[1:])
-    R = float(np.sum(dl / (r_mid ** 4)))
+    dl = np.diff(arc)
+    continuous_pairs = valid[:-1] & valid[1:] & np.isfinite(dl) & (dl > 0)
+    if not np.any(continuous_pairs):
+        return None, int(np.sum(valid))
+    valid_arc = arc[valid]
+    span = float(valid_arc[-1] - valid_arc[0])
+    covered_length = float(np.sum(dl[continuous_pairs]))
+    # Do not bridge a missing interior region with an invented radius.
+    if span <= 0 or covered_length / span < 0.98:
+        return None, int(np.sum(valid))
+    r_mid = 0.5 * (r_arr[:-1] + r_arr[1:])
+    R = float(np.sum(dl[continuous_pairs] / (r_mid[continuous_pairs] ** 4)))
     return R, int(np.sum(valid))
 
 
@@ -460,7 +555,8 @@ def _hydraulic_features(stat_features, profile_data):
 # (E) 拓扑 / 不对称 / 主干形态
 # ============================================================
 
-def _topology_features(seg_dict, stat_features, profile_data, branch_points):
+def _topology_features(seg_dict, stat_features, profile_data, branch_points,
+                       junction_sections=None):
     out = {}
 
     # 侧支负担: 体积加权 = Σ (D_c^2 · L_c) / (D_MPV^2 · L_MPV)
@@ -489,8 +585,12 @@ def _topology_features(seg_dict, stat_features, profile_data, branch_points):
 
     # 整树分叉点数 / 单位 MPV 长度
     n_bp = len(branch_points) if branch_points is not None else None
-    if n_bp is not None and L_mpv is not None and L_mpv > 1e-6:
-        out['branchpoint_density_per_cm'] = float(n_bp / (L_mpv / 10.0))
+    tree_length = sum(
+        float(stat_features.get(f'{segment}_length') or 0.0)
+        for segment in ('mpv', 'sv', 'smv', 'lpv', 'rpv', 'lgv', 'pgv', 'tips')
+    )
+    if n_bp is not None and tree_length > 1e-6:
+        out['branchpoint_density_per_cm'] = float(n_bp / (tree_length / 10.0))
     else:
         out['branchpoint_density_per_cm'] = None
 
@@ -522,15 +622,19 @@ def _topology_features(seg_dict, stat_features, profile_data, branch_points):
 
     # 整树分叉处面积守恒平均偏离: 仅汇合 + MPV 分叉点 (现有数据下)
     deviations = []
-    a_mpv = stat_features.get('mpv_mean_area')
-    a_sv = stat_features.get('sv_mean_area')
-    a_smv = stat_features.get('smv_mean_area')
-    a_lpv = stat_features.get('lpv_mean_area')
-    a_rpv = stat_features.get('rpv_mean_area')
-    if a_mpv and a_sv and a_smv:
+    junction_sections = junction_sections or {}
+    confluence = junction_sections.get('confluence', {})
+    bifurcation = junction_sections.get('bifurcation', {})
+    a_mpv = confluence.get('mpv', {}).get('area')
+    a_sv = confluence.get('sv', {}).get('area')
+    a_smv = confluence.get('smv', {}).get('area')
+    a_mpv_bif = bifurcation.get('mpv', {}).get('area')
+    a_lpv = bifurcation.get('lpv', {}).get('area')
+    a_rpv = bifurcation.get('rpv', {}).get('area')
+    if a_mpv is not None and a_sv is not None and a_smv is not None:
         deviations.append(abs(a_mpv - (a_sv + a_smv)) / a_mpv)
-    if a_mpv and a_lpv and a_rpv:
-        deviations.append(abs(a_mpv - (a_lpv + a_rpv)) / a_mpv)
+    if a_mpv_bif is not None and a_lpv is not None and a_rpv is not None:
+        deviations.append(abs(a_mpv_bif - (a_lpv + a_rpv)) / a_mpv_bif)
     out['tree_area_conservation_mean_dev'] = (
         float(np.mean(deviations)) if deviations else None)
 
@@ -552,7 +656,7 @@ _PVT_SOLIDITY_PARTIAL = 0.60            # solidity ∈ [0.6, 0.9] → 部分血�
 
 
 def _clinical_summary_features(seg_dict, stat_features, profile_data,
-                                topology_out):
+                                topology_out, junction_sections=None):
     """
     临床导向的标量摘要 (参考 PVP_feature_extraction_recommendations.md):
       - sv_max_to_mpv_max_diam_ratio: 脾静脉/门静脉最大直径比 (PVH 信号)
@@ -611,10 +715,11 @@ def _clinical_summary_features(seg_dict, stat_features, profile_data,
     # ---------- (5) MPV 分叉面积守恒偏离 ----------
     # 直接复用 (B) 的 mpv_bifurc_area_ratio: 偏差 = |ratio − 1|
     bifurc_ratio = None
-    a_mpv = stat_features.get('mpv_mean_area')
-    a_lpv = stat_features.get('lpv_mean_area')
-    a_rpv = stat_features.get('rpv_mean_area')
-    if a_mpv and a_lpv and a_rpv:
+    bifurcation = (junction_sections or {}).get('bifurcation', {})
+    a_mpv = bifurcation.get('mpv', {}).get('area')
+    a_lpv = bifurcation.get('lpv', {}).get('area')
+    a_rpv = bifurcation.get('rpv', {}).get('area')
+    if a_mpv is not None and a_lpv is not None and a_rpv is not None:
         # 文档形式: (A_lpv+A_rpv)/A_mpv, 完美守恒 ≈ 1
         bifurc_ratio = (a_lpv + a_rpv) / a_mpv
     out['area_conservation_bifurc_deviation'] = (
@@ -692,17 +797,23 @@ def compute_system_features(seg_dict, stat_features, profile_data,
     返回:
         flat dict: { 'angle_sv_smv': ..., 'confluence_murray3_ratio': ..., ... }
     """
+    junction_sections = {
+        'confluence': _junction_section_values(
+            seg_dict, profile_data, ('mpv', 'sv', 'smv')),
+        'bifurcation': _junction_section_values(
+            seg_dict, profile_data, ('mpv', 'lpv', 'rpv')),
+    }
     out = {}
     out.update(_angle_features(seg_dict, nodes))
-    out.update(_diameter_ratio_features(stat_features))
+    out.update(_diameter_ratio_features(stat_features, junction_sections))
     out.update(_length_tortuosity_features(seg_dict, stat_features, nodes))
     out.update(_hydraulic_features(stat_features, profile_data))
     topology_out = _topology_features(
-        seg_dict, stat_features, profile_data, branch_points)
+        seg_dict, stat_features, profile_data, branch_points, junction_sections)
     out.update(topology_out)
     # (F) 临床派生标量 — 依赖 topology_out 的 branchpoint_density_per_cm
     out.update(_clinical_summary_features(
-        seg_dict, stat_features, profile_data, topology_out))
+        seg_dict, stat_features, profile_data, topology_out, junction_sections))
     return out
 
 

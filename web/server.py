@@ -7,6 +7,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import mimetypes
 import os
@@ -107,6 +108,9 @@ JOBS: dict[str, dict] = {}
 LOCK = threading.Lock()
 GEOMETRY_STL_CACHE: dict[str, tuple[tuple, Path]] = {}
 GEOMETRY_STL_CACHE_LOCK = threading.Lock()
+GEOMETRY_VIEW_CACHE_NAME = ".portaflow_geometry_view.json.gz"
+GEOMETRY_VIEW_CACHE_VERSION = 3
+GEOMETRY_VIEW_CACHE_LOCK = threading.Lock()
 
 
 def _now() -> float:
@@ -892,6 +896,79 @@ def _feature_stl(patient_dir: Path) -> Path:
     return selected
 
 
+def _geometry_view_cache_signature(
+    stl_path: Path,
+    section_stride: int,
+    max_faces: int,
+    include_surface_sections: bool,
+) -> str:
+    patient_dir = stl_path.parent
+    source_paths = [stl_path]
+    features_dir = patient_dir / FEATURES_DIRNAME
+    if features_dir.is_dir():
+        source_paths.extend(path for path in features_dir.iterdir() if path.is_file())
+    sources = []
+    for path in sorted(source_paths, key=lambda item: str(item).lower()):
+        stat = path.stat()
+        sources.append((str(path.relative_to(patient_dir)), stat.st_size, stat.st_mtime_ns))
+    return json.dumps({
+        "version": GEOMETRY_VIEW_CACHE_VERSION,
+        "section_stride": section_stride,
+        "max_faces": max_faces,
+        "surface_sections": include_surface_sections,
+        "sources": sources,
+    }, ensure_ascii=False, separators=(",", ":"))
+
+
+def _geometry_view_cache_path(stl_path: Path) -> Path:
+    return stl_path.parent / GEOMETRY_VIEW_CACHE_NAME
+
+
+def _load_geometry_view_cache(stl_path: Path, signature: str) -> dict | None:
+    cache_path = _geometry_view_cache_path(stl_path)
+    if not cache_path.is_file():
+        return None
+    try:
+        with GEOMETRY_VIEW_CACHE_LOCK, gzip.open(cache_path, "rt", encoding="utf-8") as handle:
+            cached = json.load(handle)
+        if cached.get("signature") != signature or not isinstance(cached.get("data"), dict):
+            return None
+        return cached["data"]
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _store_geometry_view_cache(stl_path: Path, signature: str, data: dict) -> None:
+    cache_path = _geometry_view_cache_path(stl_path)
+    temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    try:
+        with GEOMETRY_VIEW_CACHE_LOCK, gzip.open(temp_path, "wt", encoding="utf-8", compresslevel=1) as handle:
+            json.dump({"signature": signature, "data": data}, handle, ensure_ascii=False, separators=(",", ":"))
+        temp_path.replace(cache_path)
+    except OSError:
+        temp_path.unlink(missing_ok=True)
+
+
+def _geometry_view_data(
+    stl_path: Path,
+    section_stride: int,
+    max_faces: int,
+    include_surface_sections: bool,
+) -> dict:
+    signature = _geometry_view_cache_signature(stl_path, section_stride, max_faces, include_surface_sections)
+    cached = _load_geometry_view_cache(stl_path, signature)
+    if cached is not None:
+        return cached
+    data = geometry_web.build_visualization_data(
+        stl_path,
+        section_stride=section_stride,
+        max_faces=max_faces,
+        include_surface_sections=include_surface_sections,
+    )
+    _store_geometry_view_cache(stl_path, signature, data)
+    return data
+
+
 def _run_features(patient_dir: Path, job: dict):
     stl = _feature_stl(patient_dir)
     script = f"""
@@ -1182,7 +1259,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "Not found"}, status=404, head_only=head_only)
             return
         ctype = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-        self._bytes(file_path.read_bytes(), ctype, headers={"Cache-Control": "no-store"}, head_only=head_only)
+        cache_control = "no-cache" if file_path.suffix.lower() == ".html" else "public, max-age=3600"
+        self._bytes(file_path.read_bytes(), ctype, headers={"Cache-Control": cache_control}, head_only=head_only)
 
     def _serve_plotly(self, head_only=False):
         try:
@@ -1190,7 +1268,7 @@ class Handler(BaseHTTPRequestHandler):
             file_path = Path(plotly.__file__).resolve().parent / "package_data" / "plotly.min.js"
             if file_path.exists():
                 self._bytes(file_path.read_bytes(), "application/javascript; charset=utf-8",
-                            headers={"Cache-Control": "no-store"}, head_only=head_only)
+                            headers={"Cache-Control": "public, max-age=3600"}, head_only=head_only)
                 return
         except Exception:
             pass
@@ -1203,7 +1281,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "Not found"}, status=404, head_only=head_only)
             return
         ctype = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-        self._bytes(file_path.read_bytes(), ctype, headers={"Cache-Control": "no-store"}, head_only=head_only)
+        cache_control = "no-cache" if file_path.suffix.lower() == ".html" else "public, max-age=3600"
+        self._bytes(file_path.read_bytes(), ctype, headers={"Cache-Control": cache_control}, head_only=head_only)
 
     def _geometry_create_session(self):
         payload = self._body_json()
@@ -1249,7 +1328,7 @@ class Handler(BaseHTTPRequestHandler):
         patient = geometry_web._resolve_patient(session, (qs.get("patient") or [None])[0])
         if not patient:
             raise ValueError("Patient not found")
-        data = geometry_web.build_visualization_data(
+        data = _geometry_view_data(
             Path(patient["stl_path"]),
             section_stride=geometry_web._safe_int((qs.get("section_stride") or [10])[0], 10),
             max_faces=geometry_web._safe_int((qs.get("max_faces") or [80000])[0], 80000),

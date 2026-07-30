@@ -10,13 +10,17 @@
   4. 邻接表重组 → BFS建树 → 输出 newCenterlist.txt
 """
 
+import json
 import os
 import numpy as np
 from scipy.interpolate import UnivariateSpline
+from scipy.ndimage import gaussian_filter1d
 from collections import defaultdict, deque
 
-from utils import load_raw_tree, classify_nodes, save_tree
-from features_layout import SMOOTH_CENTERLINE_NAME, feature_path
+from utils import (load_raw_tree, load_tree, classify_nodes, path_to_coords,
+                   save_tree)
+from features_layout import (SEGMENT_ASSIGNMENTS_NAME, SMOOTH_CENTERLINE_NAME,
+                             feature_path, resolve_feature_path)
 
 
 def smooth_centerline(stl_path, output_txt_path=None,
@@ -107,6 +111,86 @@ def smooth_centerline(stl_path, output_txt_path=None,
     print(f"  已保存: {output_txt_path}")
 
     return new_tree
+
+
+def smooth_existing_anatomical_segment(stl_path, segment_name, sigma_mm=3.0):
+    """Re-smooth one already segmented vessel without changing its topology.
+
+    The original node IDs, anatomical endpoints, and branch connectivity are
+    retained.  Coordinates are first made uniform in arc length, then low-pass
+    filtered in physical units and resampled back to the original node count.
+    This removes high-frequency centreline oscillation without changing the
+    segment assignment that downstream profile extraction relies on.
+    """
+    if sigma_mm <= 0:
+        raise ValueError('sigma_mm must be positive')
+
+    parentdir = os.path.dirname(stl_path)
+    assignments_path = resolve_feature_path(
+        parentdir, SEGMENT_ASSIGNMENTS_NAME)
+    if assignments_path is None:
+        raise FileNotFoundError('segment_assignments.json is required')
+    with open(assignments_path, 'r', encoding='utf-8') as handle:
+        assignments = json.load(handle)
+    info = (assignments.get('segments') or {}).get(segment_name)
+    path = [int(node_id) for node_id in (info or {}).get('path', [])]
+    if len(path) < 3:
+        raise ValueError(f'{segment_name} has fewer than three centreline nodes')
+
+    nodes, _, _ = load_tree(stl_path)
+    if any(node_id not in nodes for node_id in path):
+        raise ValueError(f'{segment_name} path does not match the active centreline')
+    coords = path_to_coords(path, nodes)
+    arc = np.concatenate(([0.0], np.cumsum(
+        np.linalg.norm(np.diff(coords, axis=0), axis=1))))
+    total = float(arc[-1])
+    if total <= 1e-9:
+        raise ValueError(f'{segment_name} has zero centreline length')
+
+    n_points = len(coords)
+    targets = np.linspace(0.0, total, n_points)
+    uniform = np.column_stack([
+        np.interp(targets, arc, coords[:, axis]) for axis in range(3)
+    ])
+    step_mm = total / (n_points - 1)
+    filtered = gaussian_filter1d(
+        uniform, sigma=float(sigma_mm) / step_mm, axis=0, mode='nearest')
+    # Junction locations are anatomical anchors and must not drift.
+    filtered[0] = coords[0]
+    filtered[-1] = coords[-1]
+
+    filtered_arc = np.concatenate(([0.0], np.cumsum(
+        np.linalg.norm(np.diff(filtered, axis=0), axis=1))))
+    if float(filtered_arc[-1]) <= 1e-9:
+        raise ValueError(f'{segment_name} smoothing collapsed the centreline')
+    resample_targets = np.linspace(0.0, float(filtered_arc[-1]), n_points)
+    smoothed = np.column_stack([
+        np.interp(resample_targets, filtered_arc, filtered[:, axis])
+        for axis in range(3)
+    ])
+    smoothed[0] = coords[0]
+    smoothed[-1] = coords[-1]
+
+    for node_id, coord in zip(path, smoothed):
+        nodes[node_id]['x'] = float(coord[0])
+        nodes[node_id]['y'] = float(coord[1])
+        nodes[node_id]['z'] = float(coord[2])
+
+    output_path = feature_path(parentdir, SMOOTH_CENTERLINE_NAME, create=True)
+    tree = [[
+        node_id,
+        node['x'], node['y'], node['z'],
+        node['parent'], node['left'], node['right'],
+    ] for node_id, node in sorted(nodes.items())]
+    save_tree(tree, str(output_path))
+    return {
+        'segment': segment_name,
+        'n_points': n_points,
+        'sigma_mm': float(sigma_mm),
+        'input_length_mm': total,
+        'output_length_mm': float(filtered_arc[-1]),
+        'output_path': str(output_path),
+    }
 
 
 # ============================================================

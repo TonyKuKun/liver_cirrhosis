@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=11" />
+  <link rel="stylesheet" href="styles.css?v=12" />
 </head>
 <body>
   <header class="topbar">
@@ -56,7 +56,10 @@
           <label>数据根目录</label>
           <input id="rootFolder" class="primary-input" type="text" placeholder="例如 E:\data\portal_vein_cases" />
           <input id="modelDir" type="hidden" value="" />
-          <button class="btn-run" id="loadBtn">加载病人目录</button>
+          <div class="session-actions">
+            <button class="btn-run" id="loadBtn">加载病人目录</button>
+            <button class="btn-ghost" id="nextPatientBtn" type="button" disabled>下一个病人</button>
+          </div>
           <div class="form-note" id="loadNote">输入根目录后，会自动扫描可用病人并判断三阶段状态。</div>
         </div>
         <div class="patient-list-head">
@@ -109,6 +112,6 @@
   </main>
 
   <script src="/assets/plotly.min.js" defer></script>
-  <script src="app.js?v=14" defer></script>
+  <script src="app.js?v=17" defer></script>
 </body>
 </html>

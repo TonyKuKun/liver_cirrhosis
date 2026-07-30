@@ -301,7 +301,7 @@ def _coords_from_pointwise_profile(profile):
 def _compute_sv_smv_angle_from_segments(seg_dict, nodes,
                                          n_fit_points=10,
                                          pointwise_data=None,
-                                         sample_dist=None):
+                                         sample_dist=10.0):
     """
     SV / SMV 段的起点应为 SV-SMV 汇合点 (confluence)。
     用每段从起点出发的方向向量计算夹角。
@@ -332,11 +332,30 @@ def _compute_sv_smv_angle_from_segments(seg_dict, nodes,
     smv_coords_full = _coords_from_pointwise_profile(smv_profile)
     if smv_coords_full is None:
         smv_coords_full = _coords_from_segment_info(smv_info, nodes)
-    sv_coords = sv_coords_full[:min(n_fit_points + 1, len(sv_coords_full))]
-    smv_coords = smv_coords_full[:min(n_fit_points + 1, len(smv_coords_full))]
+    def _arc_length(coords):
+        return float(np.sum(np.linalg.norm(np.diff(coords, axis=0), axis=1)))
+
+    # The old point-count window changed its physical extent with centerline
+    # sampling density. Fit both branches over the same local arc length.
+    fit_length_mm = min(float(sample_dist), _arc_length(sv_coords_full), _arc_length(smv_coords_full))
+    if not np.isfinite(fit_length_mm) or fit_length_mm < 2.0:
+        return None, "SV / SMV 可用于夹角拟合的共同长度不足 2 mm"
+
+    def _resample_window(coords, length_mm, n_points):
+        segment_lengths = np.linalg.norm(np.diff(coords, axis=0), axis=1)
+        cumulative = np.concatenate(([0.0], np.cumsum(segment_lengths)))
+        targets = np.linspace(0.0, length_mm, max(2, int(n_points) + 1))
+        return np.column_stack([
+            np.interp(targets, cumulative, coords[:, axis]) for axis in range(3)
+        ])
+
+    sv_coords = _resample_window(sv_coords_full, fit_length_mm, n_fit_points)
+    smv_coords = _resample_window(smv_coords_full, fit_length_mm, n_fit_points)
 
     def _fit_dir(coords):
-        d = np.mean(coords[1:] - coords[0], axis=0)
+        distances = np.linspace(0.0, fit_length_mm, len(coords))
+        centered_distances = distances - np.mean(distances)
+        d = (centered_distances @ (coords - np.mean(coords, axis=0))) / np.sum(centered_distances ** 2)
         n = np.linalg.norm(d)
         return d / n if n > 1e-8 else None
 
@@ -355,6 +374,7 @@ def _compute_sv_smv_angle_from_segments(seg_dict, nodes,
         'branch1_direction': [round(float(v), 4) for v in d1],
         'branch2_direction': [round(float(v), 4) for v in d2],
         'n_fit_points': n_fit_points,
+        'fit_length_mm': round(fit_length_mm, 2),
         '_branch1_coords': sv_coords.tolist(),
         '_branch2_coords': smv_coords.tolist(),
     }, None
@@ -474,6 +494,7 @@ def _global_features(nodes, adj, all_seg_features, seg_dict=None):
 # ============================================================
 
 def extract_all_features(stl_path, n_fit_points=10,
+                          angle_fit_length_mm=10.0,
                           curvature_window=7, sample_step=3,
                           pitch=0.5,
                           write_unified=True,
@@ -490,7 +511,8 @@ def extract_all_features(stl_path, n_fit_points=10,
 
     参数:
         stl_path:          STL 文件路径
-        n_fit_points:      SV-SMV 夹角拟合点数
+        n_fit_points:      SV-SMV 夹角的等距采样点数
+        angle_fit_length_mm: SV-SMV 两支共同的夹角拟合弧长 (mm)
         curvature_window:  曲率滑窗大小
         sample_step:       截面采样步长(每隔几个中心线点做一次截面, 仅回退用)
         pitch:             保留参数兼容旧接口(目前不用)
@@ -538,9 +560,9 @@ def extract_all_features(stl_path, n_fit_points=10,
             with open(pw_json_path, 'r', encoding='utf-8') as f:
                 pointwise_data = json.load(f)
             n_masked = pointwise_data.get('_meta', {}).get('n_total_masked', 0)
-            print(f"  ✓ 剖面已加载 (端点掩码 {n_masked} 处)")
+            print(f"  [ok] 剖面已加载 (端点掩码 {n_masked} 处)")
         except Exception as e:
-            print(f"  ✗ 剖面 JSON 解析失败: {e}, 将回退到 mesh 计算")
+            print(f"  [error] 剖面 JSON 解析失败: {e}, 将回退到 mesh 计算")
             pointwise_data = None
     else:
         print(f"  剖面 JSON 不存在, 将回退到 mesh 计算 (无端点掩码)")
@@ -596,7 +618,7 @@ def extract_all_features(stl_path, n_fit_points=10,
     # SV-SMV 夹角
     angle_result, angle_err = _compute_sv_smv_angle_from_segments(
         seg_dict, nodes, n_fit_points=n_fit_points,
-        pointwise_data=pointwise_data)
+        pointwise_data=pointwise_data, sample_dist=angle_fit_length_mm)
     if angle_result is not None:
         all_features['sv_smv_angle'] = angle_result['angle_degrees']
         # 角度详情单独保存 (保留旧文件以兼容)
@@ -613,6 +635,9 @@ def extract_all_features(stl_path, n_fit_points=10,
     branch_points = [bp['id'] for bp in seg_data.get('branch_points', [])]
     sys_feats = compute_system_features(
         seg_dict, all_features, pointwise_data, nodes, branch_points)
+    # Keep the system alias numerically identical to the canonical detailed
+    # SV-SMV measurement saved above.
+    sys_feats['angle_sv_smv'] = all_features.get('sv_smv_angle')
     all_features.update(sys_feats)
 
     n_sys_valid = sum(1 for k in SYSTEM_FEATURE_NAMES
@@ -666,6 +691,15 @@ POINTWISE_CORE_VALID_KEYS = [
     'eq_diameter',
     'perimeter',
 ]
+
+POINTWISE_ZERO_WHEN_INVALID_KEYS = {
+    'area', 'perimeter', 'eq_diameter',
+    'raw_area', 'raw_perimeter', 'raw_eq_diameter',
+    'anchor_radius', 'owned_radius', 'hydraulic_diameter',
+    'circularity', 'solidity', 'n_components',
+    'r_insc_to_r_eq_ratio', 'dA_ds_norm', 'inscribed_radius',
+    'implausibly_small_section',
+}
 
 SYSTEM_FEATURE_GROUPS = {
     'A_angles': [
@@ -986,11 +1020,12 @@ def _clean_scalar_for_json(value):
 
 def _clean_pointwise_profile_for_unified(profile):
     """
-    写 unified_features.json 前清洗逐点剖面。
+    Preserve profile alignment while serialising masked sections as zero.
 
-    extract_profiles 为了保持 100 点对齐, 会在端点/交叉保护区把截面值写成
-    NaN。统一特征文件用于训练时不再保留这些占位点: 只要核心截面通道
-    area/eq_diameter/perimeter 任一无效, 就删除该位置在所有逐点通道中的值。
+    Endpoint and side-branch masks must retain their original sample indices so
+    the Web viewer can leave a visible gap at the anatomical location.  Scalar
+    statistics are calculated before this serialisation step and therefore
+    continue to ignore the NaN-masked sections.
     """
     if not isinstance(profile, dict):
         return None
@@ -1003,56 +1038,45 @@ def _clean_pointwise_profile_for_unified(profile):
         k for k in POINTWISE_CORE_VALID_KEYS
         if _list_like(profile.get(k)) and len(profile.get(k)) == n_points
     ]
-    point_feature_keys = [
-        k for k, v in profile.items()
-        if _list_like(v) and len(v) == n_points
-    ]
-
-    keep_mask = []
+    section_valid = []
     for i in range(n_points):
-        keep = True
-        for key in point_feature_keys:
-            if _is_missing_json_value(profile[key][i]):
-                keep = False
-                break
-        if not keep:
-            keep_mask.append(False)
-            continue
+        valid = True
         for key in core_keys:
             value = profile[key][i]
             if _is_missing_json_value(value):
-                keep = False
+                valid = False
                 break
             try:
                 if float(value) <= 0:
-                    keep = False
+                    valid = False
                     break
             except Exception:
-                keep = False
+                valid = False
                 break
-        keep_mask.append(keep)
+        section_valid.append(1.0 if valid else 0.0)
 
-    kept_indices = [i for i, keep in enumerate(keep_mask) if keep]
     cleaned = {}
     for key, value in profile.items():
         if _list_like(value) and len(value) == n_points:
-            cleaned[key] = [
-                _clean_scalar_for_json(value[i])
-                for i in kept_indices
-            ]
+            serialised = [_clean_scalar_for_json(item) for item in value]
+            if key in POINTWISE_ZERO_WHEN_INVALID_KEYS:
+                serialised = [
+                    item if section_valid[i] else 0.0
+                    for i, item in enumerate(serialised)
+                ]
+            cleaned[key] = serialised
         else:
             cleaned[key] = _clean_scalar_for_json(value)
+    cleaned['section_valid'] = section_valid
 
     cleaned['_point_filter'] = {
         'original_n_points': int(n_points),
-        'kept_n_points': int(len(kept_indices)),
-        'removed_n_points': int(n_points - len(kept_indices)),
-        'removed_reason': (
-            '任一逐点通道存在 None/NaN/inf, 或核心截面通道 '
-            'area/eq_diameter/perimeter <=0, '
-            '该逐点位置已从 unified pointwise 中删除。'
+        'kept_n_points': int(n_points),
+        'masked_n_points': int(n_points - sum(section_valid)),
+        'masked_reason': (
+            '核心截面通道 area/eq_diameter/perimeter 无效或 <=0，'
+            '该位置保留并以 section_valid=0 与截面通道=0 表示。'
         ),
-        'validity_keys': point_feature_keys,
         'positive_core_keys': core_keys,
     }
     return cleaned
@@ -1461,6 +1485,7 @@ def build_feature_description():
                 'anchor_radius', 'owned_radius', 'hydraulic_diameter',
                 'circularity', 'solidity', 'r_insc_to_r_eq_ratio',
                 'n_components', 'junction_replaced',
+                'junction_endpoint_excluded',
                 'area_jump_terminal_mask', 'area_jump_interpolated',
                 'area_drop_candidate', 'curvature',
                 'torsion', 'dA_ds_norm', 'inscribed_radius',

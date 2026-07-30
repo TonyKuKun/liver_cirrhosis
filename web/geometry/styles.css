@@ -762,6 +762,10 @@ html.embed .segment-profile-panel {
   flex: 1.15 1 300px;
 }
 
+html.embed .global-feature-panel {
+  flex: 0.65 1 170px;
+}
+
 html.embed .system-feature-panel {
   flex: 1 1 260px;
 }

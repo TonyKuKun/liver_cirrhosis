@@ -14,6 +14,7 @@ RAW_CENTERLINE_NAME = "centerline.txt"
 SMOOTH_CENTERLINE_NAME = "newcenterline.txt"
 SEGMENT_ASSIGNMENTS_NAME = "segment_assignments.json"
 UNIFIED_FEATURES_NAME = "unified_features.json"
+UNIFIED_FEATURES_BACKUP_NAME = "unified_features0.json"
 POINTWISE_TEMP_NAME = ".pointwise_profiles.json"
 
 PUBLIC_FEATURE_NAMES = (
@@ -21,6 +22,7 @@ PUBLIC_FEATURE_NAMES = (
     SMOOTH_CENTERLINE_NAME,
     SEGMENT_ASSIGNMENTS_NAME,
     UNIFIED_FEATURES_NAME,
+    UNIFIED_FEATURES_BACKUP_NAME,
 )
 
 def patient_dir_from_stl(stl_path: str | Path) -> Path:

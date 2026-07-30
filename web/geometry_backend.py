@@ -141,6 +141,7 @@ DEFAULT_PARAMS = {
     "absolute_min_radius_mm": 0.5,
     "merge_bp_distance_mm": 5.0,
     "n_fit_points": 10,
+    "angle_fit_length_mm": 10.0,
     "n_profile_points": 100,
     "curvature_window": 7,
     "sample_step": 3,
@@ -967,6 +968,74 @@ def _coords_from_segment_info(info: dict, nodes: dict) -> np.ndarray | None:
     return _coords_for_path(info.get("path", []), nodes)
 
 
+def _sv_smv_angle_detail_from_segments(
+    seg_data: dict | None,
+    nodes: dict | None,
+    fit_length_mm: float = 10.0,
+) -> dict:
+    """Measure both confluence branches over one shared physical arc length."""
+    segments = (seg_data or {}).get("segments") or {}
+    sv = segments.get("sv")
+    smv = segments.get("smv")
+    if not isinstance(sv, dict) or not isinstance(smv, dict) or not nodes:
+        return {}
+    sv_path = sv.get("path") or []
+    smv_path = smv.get("path") or []
+    if len(sv_path) < 2 or len(smv_path) < 2:
+        return {}
+    common_endpoints = ({sv_path[0], sv_path[-1]} & {smv_path[0], smv_path[-1]})
+    if len(common_endpoints) != 1:
+        return {}
+    confluence_id = common_endpoints.pop()
+    sv_coords = _coords_for_path(sv_path, nodes)
+    smv_coords = _coords_for_path(smv_path, nodes)
+    if sv_coords is None or smv_coords is None:
+        return {}
+    if sv_path[-1] == confluence_id:
+        sv_coords = sv_coords[::-1]
+    if smv_path[-1] == confluence_id:
+        smv_coords = smv_coords[::-1]
+    def arc_length(coords: np.ndarray) -> float:
+        return float(np.sum(np.linalg.norm(np.diff(coords, axis=0), axis=1)))
+
+    shared_length = min(float(fit_length_mm), arc_length(sv_coords), arc_length(smv_coords))
+    if not np.isfinite(shared_length) or shared_length < 2.0:
+        return {}
+
+    def resample_window(coords: np.ndarray, length_mm: float, count: int = 9) -> np.ndarray:
+        segment_lengths = np.linalg.norm(np.diff(coords, axis=0), axis=1)
+        cumulative = np.concatenate(([0.0], np.cumsum(segment_lengths)))
+        targets = np.linspace(0.0, length_mm, count)
+        return np.column_stack([
+            np.interp(targets, cumulative, coords[:, axis]) for axis in range(3)
+        ])
+
+    sv_coords = resample_window(sv_coords, shared_length)
+    smv_coords = resample_window(smv_coords, shared_length)
+
+    def direction(coords: np.ndarray):
+        distances = np.linspace(0.0, shared_length, len(coords))
+        centered_distances = distances - np.mean(distances)
+        vector = (centered_distances @ (coords - np.mean(coords, axis=0))) / np.sum(centered_distances ** 2)
+        length = float(np.linalg.norm(vector))
+        return vector / length if length > 1e-8 else None
+
+    sv_direction = direction(sv_coords)
+    smv_direction = direction(smv_coords)
+    if sv_direction is None or smv_direction is None:
+        return {}
+    angle = float(np.degrees(np.arccos(np.clip(np.dot(sv_direction, smv_direction), -1.0, 1.0))))
+    return {
+        "angle_degrees": round(angle, 2),
+        "confluence_point_physical": [round(float(value), 2) for value in sv_coords[0]],
+        "confluence_node_id": int(confluence_id),
+        "branch1_direction": [round(float(value), 4) for value in sv_direction],
+        "branch2_direction": [round(float(value), 4) for value in smv_direction],
+        "n_fit_points": len(sv_coords) - 1,
+        "fit_length_mm": round(shared_length, 2),
+    }
+
+
 def _path_length_from_coords(coords: np.ndarray) -> float:
     coords = np.asarray(coords, dtype=float)
     if len(coords) < 2:
@@ -1333,6 +1402,32 @@ def _surface_section_arrays(mesh, point: np.ndarray, normal: np.ndarray):
     )
 
 
+def _validated_surface_section_arrays(
+    mesh,
+    point: np.ndarray,
+    normal: np.ndarray,
+    expected_diameter: float | None,
+    max_relative_diameter_error: float = 0.30,
+):
+    """Return a raw mesh contour only when it agrees with the saved clean profile."""
+    if expected_diameter is None or not math.isfinite(expected_diameter) or expected_diameter <= 0:
+        return None
+    metrics = _surface_section_metrics(
+        mesh, point, normal, nearby_radius=expected_diameter / 2.0)
+    if not metrics:
+        return None
+    measured = _safe_float(metrics.get("eq_diameter"))
+    if measured is None or measured <= 0:
+        return None
+    relative_error = abs(measured - expected_diameter) / expected_diameter
+    if relative_error > max_relative_diameter_error:
+        # The extractor measures a center-owned polygon.  A much larger raw
+        # STL loop belongs to a neighbouring branch or confluence and must not
+        # be presented as this vessel's valid cross-section.
+        return None
+    return metrics["contour"]
+
+
 def _polygon_area_2d(points: np.ndarray) -> float:
     if len(points) < 3:
         return 0.0
@@ -1408,6 +1503,87 @@ def _profile_positions(profile: dict) -> np.ndarray:
     return np.linspace(0.0, 1.0, n)
 
 
+def _profile_resample_count(positions: np.ndarray, profile: dict | None = None) -> int:
+    """Recover the original uniform profile count after endpoint filtering."""
+    if isinstance(profile, dict):
+        explicit = _safe_float(profile.get("profile_sample_count"))
+        if explicit is not None and explicit >= 2:
+            return int(explicit)
+    positions = np.asarray(positions, dtype=float)
+    diffs = np.diff(positions)
+    diffs = diffs[np.isfinite(diffs) & (diffs > 1e-9)]
+    if diffs.size:
+        inferred = int(round(1.0 / float(np.min(diffs)))) + 1
+        if 2 <= inferred <= 5000:
+            return inferred
+    return max(2, len(positions))
+
+
+def _is_original_profile_sample(positions: np.ndarray, index: int,
+                                section_stride: int,
+                                profile: dict | None = None) -> bool:
+    """Keep display sampling aligned to pre-filter resampled profile indices."""
+    count = _profile_resample_count(positions, profile)
+    sample_index = profile.get("profile_sample_index") if isinstance(profile, dict) else None
+    if isinstance(sample_index, list) and index < len(sample_index):
+        original_index = int(sample_index[index])
+    else:
+        original_index = int(round(float(positions[index]) * (count - 1)))
+    return original_index % section_stride == 0
+
+
+def _section_normal_at(profile: dict, index: int, fallback: np.ndarray) -> np.ndarray:
+    """Use the persisted extraction normal, with the tangent as an old-data fallback."""
+    values = [_valid_numeric_at(profile, key, index) for key in (
+        "section_normal_x", "section_normal_y", "section_normal_z")]
+    if all(value is not None for value in values):
+        normal = np.asarray(values, dtype=float)
+        magnitude = float(np.linalg.norm(normal))
+        if magnitude > 1e-9:
+            return normal / magnitude
+    return np.asarray(fallback, dtype=float)
+
+
+def _section_is_valid(profile: dict, index: int) -> bool:
+    """Respect explicit masks and retain inferred values for metrics only."""
+    values = profile.get("section_valid")
+    if values is not None and index < len(values):
+        value = _safe_float(values[index])
+        if value is None or value <= 0:
+            return False
+    inferred = profile.get("area_jump_interpolated")
+    if inferred is not None and index < len(inferred):
+        value = _safe_float(inferred[index])
+        if value is not None and value > 0:
+            return False
+    if values is not None:
+        return True
+    diameter = _valid_numeric_at(profile, "eq_diameter", index)
+    return diameter is not None and diameter > 0
+
+
+def _profile_centerline_coords(profile: dict) -> np.ndarray | None:
+    """Return the exact centreline locations used during profile extraction."""
+    values = [profile.get(key) for key in (
+        "centerline_x", "centerline_y", "centerline_z")]
+    if not all(isinstance(value, list) and len(value) >= 2 for value in values):
+        return None
+    coords = np.column_stack([np.asarray(value, dtype=float) for value in values])
+    return coords if np.all(np.isfinite(coords)) else None
+
+
+def _profile_point_and_tangent(coords: np.ndarray, positions: np.ndarray, index: int):
+    """Use stored profile coordinates directly; fall back to fraction lookup."""
+    if len(coords) == len(positions) and 0 <= index < len(coords):
+        lo = max(0, index - 2)
+        hi = min(len(coords) - 1, index + 2)
+        tangent = coords[hi] - coords[lo]
+        norm = float(np.linalg.norm(tangent))
+        tangent = tangent / norm if norm > 1e-9 else np.array([0.0, 0.0, 1.0])
+        return coords[index], tangent
+    return _point_and_tangent_at_fraction(coords, float(positions[index]))
+
+
 def _build_segments(seg_data: dict | None, nodes: dict | None) -> dict:
     out = {}
     if not seg_data or not nodes:
@@ -1473,8 +1649,10 @@ def _build_pointwise_layers(
         profile = pointwise.get(seg_name)
         if not seg_info or not profile:
             continue
-        coords = _coords_for_path(
-            profile.get("analysis_path") or seg_info.get("path", []), nodes)
+        coords = _profile_centerline_coords(profile)
+        if coords is None:
+            coords = _coords_for_path(
+                profile.get("analysis_path") or seg_info.get("path", []), nodes)
         if coords is None:
             continue
         positions = _profile_positions(profile)
@@ -1492,8 +1670,8 @@ def _build_pointwise_layers(
         inscribed = _finite_array(profile.get("inscribed_radius"))
 
         for i, frac in enumerate(positions):
-            point, tangent = _point_and_tangent_at_fraction(coords, frac)
-            if point is None:
+            point, tangent = _profile_point_and_tangent(coords, positions, i)
+            if point is None or not _section_is_valid(profile, i):
                 continue
             curv = _valid_numeric_at(profile, "curvature", i)
             dia = _valid_numeric_at(profile, "eq_diameter", i)
@@ -1515,15 +1693,20 @@ def _build_pointwise_layers(
                     f"circularity: {_format_metric(circ, 3)}<br>"
                     f"inscribed radius: {_format_metric(ins, 3)} mm"
                 )
-            if i % section_stride == 0:
+            # Endpoint masking removes entries from the stored profile.  Sampling
+            # by the compacted list index would immediately redraw its first
+            # retained plane and visually erase the exclusion gap.
+            if _is_original_profile_sample(positions, i, section_stride, profile):
                 dia = _valid_numeric_at(profile, "eq_diameter", i)
+                normal = _section_normal_at(profile, i, tangent)
                 if dia is not None and dia > 0:
-                    circle = _circle_arrays(point, tangent, dia / 2.0, n_pts=36)
+                    circle = _circle_arrays(point, normal, dia / 2.0, n_pts=36)
                     if circle is not None:
                         ring_x.extend(circle[:, 0].tolist() + [None])
                         ring_y.extend(circle[:, 1].tolist() + [None])
                         ring_z.extend(circle[:, 2].tolist() + [None])
-                contour = _surface_section_arrays(surface_mesh, point, tangent)
+                contour = _validated_surface_section_arrays(
+                    surface_mesh, point, normal, dia)
                 if contour is not None:
                     surface_x.extend(contour[:, 0].tolist() + [None])
                     surface_y.extend(contour[:, 1].tolist() + [None])
@@ -1602,14 +1785,17 @@ def _section_at_index(coords: np.ndarray, profile: dict, idx: int | None):
     positions = _profile_positions(profile)
     if idx < 0 or idx >= len(positions):
         return None
+    if not _section_is_valid(profile, idx):
+        return None
     dia = _valid_numeric_at(profile, "eq_diameter", idx)
     area = _valid_numeric_at(profile, "area", idx)
     if dia is None or dia <= 0:
         return None
-    point, tangent = _point_and_tangent_at_fraction(coords, float(positions[idx]))
+    point, tangent = _profile_point_and_tangent(coords, positions, idx)
     if point is None:
         return None
-    circle = _circle_arrays(point, tangent, dia / 2.0, n_pts=48)
+    normal = _section_normal_at(profile, idx, tangent)
+    circle = _circle_arrays(point, normal, dia / 2.0, n_pts=48)
     if circle is None:
         return None
     return {
@@ -1628,10 +1814,15 @@ def _surface_section_at_index(coords: np.ndarray, profile: dict, idx: int | None
     positions = _profile_positions(profile)
     if idx < 0 or idx >= len(positions):
         return None
-    point, tangent = _point_and_tangent_at_fraction(coords, float(positions[idx]))
+    if not _section_is_valid(profile, idx):
+        return None
+    point, tangent = _profile_point_and_tangent(coords, positions, idx)
     if point is None:
         return None
-    contour = _surface_section_arrays(surface_mesh, point, tangent)
+    diameter = _valid_numeric_at(profile, "eq_diameter", idx)
+    normal = _section_normal_at(profile, idx, tangent)
+    contour = _validated_surface_section_arrays(
+        surface_mesh, point, normal, diameter)
     if contour is None:
         return None
     return {
@@ -1639,7 +1830,7 @@ def _surface_section_at_index(coords: np.ndarray, profile: dict, idx: int | None
         "y": contour[:, 1].tolist(),
         "z": contour[:, 2].tolist(),
         "index": int(idx),
-        "diameter": _valid_numeric_at(profile, "eq_diameter", idx),
+        "diameter": diameter,
         "area": _valid_numeric_at(profile, "area", idx),
     }
 
@@ -1965,6 +2156,7 @@ def _load_feature_blocks(parent: Path):
             "statistical": unified.get("statistical", {}),
             "system": unified.get("system", {}),
             "global": unified.get("global", {}),
+            "sv_smv_angle": unified.get("sv_smv_angle", {}),
             "segments_meta": unified.get("segments_meta", {}),
             "pointwise_meta": unified.get("pointwise_meta", {}),
         }
@@ -1975,6 +2167,7 @@ def _load_feature_blocks(parent: Path):
         "statistical": {},
         "system": {},
         "global": {},
+        "sv_smv_angle": {},
         "segments_meta": {},
         "pointwise_meta": {},
     }
@@ -1997,6 +2190,14 @@ def build_visualization_data(
     surface_mesh = _load_surface_section_mesh(stl_path) if include_surface_sections else None
     pointwise_layers = _build_pointwise_layers(
         seg_data, nodes, pointwise, section_stride, surface_mesh=surface_mesh)
+    feature_blocks = _load_feature_blocks(parent)
+    # Recompute for the viewer so historical feature files cannot retain a
+    # point-count based direction estimate after the physical-length fix.
+    angle_detail = _sv_smv_angle_detail_from_segments(
+        seg_data, nodes, fit_length_mm=DEFAULT_PARAMS["angle_fit_length_mm"])
+    feature_blocks["sv_smv_angle"] = angle_detail
+    if angle_detail.get("angle_degrees") is not None:
+        feature_blocks.setdefault("global", {})["sv_smv_angle"] = angle_detail["angle_degrees"]
     branch_points = []
     if seg_data:
         for bp in seg_data.get("branch_points", []):
@@ -2033,7 +2234,7 @@ def build_visualization_data(
         "segments": _build_segments(seg_data, nodes),
         "branch_points": branch_points,
         "pointwise": pointwise_layers,
-        "features": _load_feature_blocks(parent),
+        "features": feature_blocks,
         "files": _available_outputs(parent),
         "step_files": _step_file_status(parent),
     })
@@ -2309,6 +2510,7 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
         extract_all_features(
             str(stl_path),
             n_fit_points=params["n_fit_points"],
+            angle_fit_length_mm=params["angle_fit_length_mm"],
             curvature_window=params["curvature_window"],
             sample_step=params["sample_step"],
             pitch=params["pitch"],
