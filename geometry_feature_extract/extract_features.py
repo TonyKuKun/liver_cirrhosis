@@ -1,5 +1,5 @@
 """
-门静脉中心线统计特征提取（v4 - NaN-aware, 适配端点掩码剖面）
+门静脉中心线统计特征提取（v4 - 适配区间置零剖面）
 ====================================================
 不再自己做解剖识别, 直接读 segment_vessels.py 写入的
 centerline_profiles.json, 按段跑特征。
@@ -12,8 +12,8 @@ centerline_profiles.json, 按段跑特征。
     total_centerline_length, sv_smv_diameter_ratio, sv_smv_angle (若可计算)
 
 v4 变更:
-    - 截面统计跳过 NaN (端点掩码区), 用 nanmean/nanmax/nanstd
-    - 与 extract_profiles.py 的 _apply_endpoint_mask 配合
+    - 截面统计只使用 area > 0 的 pointwise 位置
+    - 汇合端和侧支置零区间不进入统计
 
 输出:
     portal_vein_features.json
@@ -180,16 +180,15 @@ def _seg_curvature_features(coords, window=7):
 
 
 # ============================================================
-# 截面特征 (v4: 优先从 pointwise JSON 读取, 跳过 NaN)
+# 截面特征 (v4: 优先从 pointwise JSON 读取, 跳过置零区间)
 # ============================================================
 
 def _seg_section_features_from_profile(profile):
     """
-    从已有的 pointwise 剖面 (含端点 NaN 掩码) 计算段级统计。
-    优先用这个, 因为可以直接复用 _apply_endpoint_mask 的结果。
+    从已有的 pointwise 剖面计算段级统计。
+    area <= 0 的汇合端/侧支区间不参与统计。
 
     输入 profile: dict, 含 area, eq_diameter, perimeter, circularity 等列表
-                  (端点掩码位置的值已是 NaN)
     返回: dict
     """
     if profile is None:
@@ -200,6 +199,12 @@ def _seg_section_features_from_profile(profile):
     areas = np.asarray(profile.get('area', []), dtype=float)
     diameters = np.asarray(profile.get('eq_diameter', []), dtype=float)
     circularities = np.asarray(profile.get('circularity', []), dtype=float)
+    valid = np.isfinite(areas) & (areas > 0)
+    areas = np.where(valid, areas, np.nan)
+    if len(diameters) == len(valid):
+        diameters = np.where(valid, diameters, np.nan)
+    if len(circularities) == len(valid):
+        circularities = np.where(valid, circularities, np.nan)
 
     mean_a = _safe_nanmean(areas)
     std_a = _safe_nanstd(areas)
@@ -559,8 +564,11 @@ def extract_all_features(stl_path, n_fit_points=10,
         try:
             with open(pw_json_path, 'r', encoding='utf-8') as f:
                 pointwise_data = json.load(f)
-            n_masked = pointwise_data.get('_meta', {}).get('n_total_masked', 0)
-            print(f"  [ok] 剖面已加载 (端点掩码 {n_masked} 处)")
+            meta = pointwise_data.get('_meta', {})
+            endpoint_zeroed = meta.get('n_total_endpoint_junction_zeroed', 0)
+            side_zeroed = meta.get('n_total_side_branch_junction_zeroed', 0)
+            print(f"  [ok] 剖面已加载 (汇合端置零 {endpoint_zeroed} 处, "
+                  f"侧支置零 {side_zeroed} 处)")
         except Exception as e:
             print(f"  [error] 剖面 JSON 解析失败: {e}, 将回退到 mesh 计算")
             pointwise_data = None
@@ -1102,7 +1110,7 @@ def _seg_missing_reason(seg_name, seg_info, profile, feature_key,
                         "该段失败、路径太短或截面全部无效。")
             if _finite_positive_count(profile.get('area', [])) == 0:
                 return (f"{label} 段剖面存在, 但 area 没有有效正值; "
-                        "可能全部被端点掩码、内切半径/形状过滤、局部异常过滤剔除。")
+                        "可能全部位于汇合端或侧支置零区间。")
             if feature_key == 'area_cv':
                 return (f"{label} 的面积均值无效或接近 0, 无法计算 area_cv。")
             return (f"{label} 的 {feature_key} 缺失: 对应 pointwise 通道 "

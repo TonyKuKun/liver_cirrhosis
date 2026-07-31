@@ -329,8 +329,31 @@ def _add_max_section_actors(renderer, stl_path, seg_data, nodes, actors_dict):
         if max_info is None:
             continue
 
-        point, tangent = _interp_centerline_at_pos(
-            seg_info['path'], nodes, max_info['pos_index'], n_total=100)
+        profile_index = max(0, min(
+            len(profile.get('position', [])) - 1, max_info['pos_index']))
+        coord_keys = ('centerline_x', 'centerline_y', 'centerline_z')
+        normal_keys = ('section_normal_x', 'section_normal_y',
+                       'section_normal_z')
+        centerline_coords = None
+        if all(key in profile for key in coord_keys):
+            centerline_coords = np.column_stack([
+                np.asarray(profile[key], dtype=float) for key in coord_keys
+            ])
+        if centerline_coords is not None and len(centerline_coords) > profile_index:
+            point = centerline_coords[profile_index]
+        else:
+            point, _ = _interp_centerline_at_pos(
+                seg_info['path'], nodes, profile_index,
+                n_total=max(2, len(profile.get('position', []))))
+        if all(key in profile for key in normal_keys):
+            tangent = np.asarray([
+                profile[key][profile_index] for key in normal_keys
+            ], dtype=float)
+            tangent /= np.linalg.norm(tangent) + 1e-15
+        else:
+            _, tangent = _interp_centerline_at_pos(
+                seg_info['path'], nodes, profile_index,
+                n_total=max(2, len(profile.get('position', []))))
         if point is None:
             continue
 
@@ -338,7 +361,14 @@ def _add_max_section_actors(renderer, stl_path, seg_data, nodes, actors_dict):
         rgb = SEGMENT_COLORS.get(seg_name, (0.5, 0.5, 0.5))
 
         # ---- 真实截面圈 ----
-        ring_3d = _compute_real_cross_section_ring(mesh, point, tangent)
+        ring_3d = _compute_real_cross_section_ring(
+            mesh, point, tangent,
+            target_area=max_info['area'],
+            centerline_coords=centerline_coords,
+            centerline_index=(profile_index if centerline_coords is not None
+                              else None),
+            centerline_voronoi_exclusion_mm=float(
+                profile.get('centerline_voronoi_exclusion_mm', 5.0)))
         if ring_3d is not None and len(ring_3d) >= 3:
             ring_actor = _build_vtk_polyline_loop(ring_3d, rgb, line_width=4)
             ring_actor.SetVisibility(False)

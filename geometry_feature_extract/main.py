@@ -146,10 +146,6 @@ def _process_one_patient(stl_path, post_tips, params, steps):
                 pitch=params['pitch'],
                 curvature_window=params['curvature_window'],
                 section_step=params['sample_step'],
-                ownership_factor=params['ownership_factor'],
-                junction_policy=params['junction_policy'],
-                max_diameter_rate_per_mm=params[
-                    'max_diameter_rate_per_mm'],
                 area_jump_ratio_threshold=params[
                     'area_jump_ratio_threshold'],
                 area_jump_window_mm=params['area_jump_window_mm'],
@@ -159,8 +155,8 @@ def _process_one_patient(stl_path, post_tips, params, steps):
                     'area_jump_max_terminal_extension_mm'],
                 area_jump_reference_points=params[
                     'area_jump_reference_points'],
-                endpoint_min_distance_mm=params[
-                    'endpoint_min_distance_mm'])
+                centerline_voronoi_exclusion_mm=params[
+                    'centerline_voronoi_exclusion_mm'])
             print(f"  [Step 4] 剖面特征: {time.time()-t0:.2f}s")
             status['profiles'] = True
         except Exception as e:
@@ -447,19 +443,15 @@ DEFAULT_PARAMS = {
     'n_profile_points': 200,
     'curvature_window': 7,
     'sample_step': 3,
-    'ownership_factor': 1.8,        # 中心线锚定最大内切半径裁剪倍数:
-                                     # clean_area = raw_section ∩ circle(c, k*r_anchor)
-    'junction_policy': 'min_valid', # 分叉/交叉区不丢弃, 用本段可信最小截面替换
-    'max_diameter_rate_per_mm': 0.5,  # 沿管轴等效直径相对变化率上限 (1/mm)
-                                       # 0.5 = 每 mm 最多 50% 变化, 超阈孤立
-                                       # 点视为单点突变伪影
+    'centerline_voronoi_exclusion_mm': 5.0,
+                                     # 前后 5mm 局部中心线不限制截面; 更远的
+                                     # 回弯通过 3D Voronoi 归属裁剪, 防自相交
     # Persistent cross-section expansion: confluence spillover / internal intrusion.
     'area_jump_ratio_threshold': 1.6,
     'area_jump_window_mm': 6.0,
     'area_jump_min_persistence_mm': 4.0,
     'area_jump_max_terminal_extension_mm': 15.0,
     'area_jump_reference_points': 5,
-    'endpoint_min_distance_mm': 3.0,
 }
 
 

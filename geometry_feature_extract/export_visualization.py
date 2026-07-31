@@ -316,7 +316,10 @@ def _find_max_section(profile, edge_margin=0.05):
         'owned_radius': float(profile['owned_radius'][idx])
                         if 'owned_radius' in profile else None,
         'junction_replaced': float(junction[idx]) if len(junction) > idx else 0.0,
-        'position_pct': idx,
+        'position_pct': round(
+            100.0 * float(profile.get('position', [idx])[idx]), 1)
+            if len(profile.get('position', [])) > idx
+            else round(100.0 * idx / max(len(areas) - 1, 1), 1),
     }
 def _interp_centerline_at_pos(seg_path, nodes, pos_idx, n_total=100):
     """
@@ -365,24 +368,20 @@ def _compute_real_cross_section_ring(stl_mesh, point, normal,
                                       target_area=None,
                                       max_eq_diameter=None,
                                       max_aspect_ratio=4.0,
-                                      min_circularity=0.30):
+                                      min_circularity=0.30,
+                                      centerline_coords=None,
+                                      centerline_index=None,
+                                      centerline_voronoi_exclusion_mm=5.0):
     """
     计算 STL 在给定点 + 法线下的真实截面闭合 3D 轮廓.
 
-    与 extract_profiles._compute_cross_section 形状感知评分完全一致:
-      1. 扰动法线 (n_perturb=12, ±15°)
-      2. 形状硬过滤: aspect_ratio > max_aspect_ratio 或 circularity < min_circularity 剔除
-      3. 综合评分: area × elongation_pen × irregularity_pen, 选最小者
-      这样视觉上画出的环 与 portal_vein_features.json 中的面积来源同一候选.
-
-    若给定 target_area (训练时记录的面积), 用它做最终一致性兜底:
-      在通过形状过滤的候选里, 选 area 最接近 target_area 的那个.
-      若所有候选都被过滤掉, 退回到全局 score 最小者 (比 target 不一致好过没图).
+    使用提取时保存的唯一平滑切线法线，并在提供中心线坐标时应用相同的
+    3D Voronoi 归属裁剪，保证显示轮廓与 pointwise area 来自同一几何。
 
     参数:
         max_eq_diameter:    等效直径上限 (用于过滤穿透到邻近血管的截面)
-        target_area:        期望面积 (mm²); 给定时作为最终一致性兜底
-        max_aspect_ratio:   形状硬过滤阈值 (与 _compute_cross_section 同步)
+        target_area:        保存面积 (mm²)，保留用于调用兼容性
+        max_aspect_ratio:   形状硬过滤阈值
         min_circularity:    形状硬过滤阈值
 
     返回:
@@ -392,45 +391,24 @@ def _compute_real_cross_section_ring(stl_mesh, point, normal,
         return None
 
     try:
-        from extract_profiles import (_make_orthonormal_basis,
-                                       _section_one,
-                                       _generate_normal_candidates,
-                                       _shape_score)
+        from extract_profiles import _make_orthonormal_basis, _section_one
 
         normal = np.asarray(normal, dtype=float)
         normal /= (np.linalg.norm(normal) + 1e-15)
-        candidates = _generate_normal_candidates(normal,
-                                                  n_perturb=12,
-                                                  max_angle_deg=15)
-
-        # 收集所有通过形状过滤的候选
-        passes = []   # list of (score, area, ring_2d, normal)
-        all_valid = []  # 兜底: 有面积的所有候选 (即使形状不达标)
-        for n in candidates:
-            a, p, ar, circ, ring_2d = _section_one(
-                stl_mesh, point, n,
-                max_eq_diameter=max_eq_diameter,
-                return_metrics=True,
-                return_ring=True)
-            if a <= 0 or ring_2d is None:
-                continue
-            score = _shape_score(a, ar, circ)
-            all_valid.append((score, a, ring_2d, n))
-            if ar > max_aspect_ratio or circ < min_circularity:
-                continue
-            passes.append((score, a, ring_2d, n))
-
-        pool = passes if passes else all_valid
-        if not pool:
+        a, _, ar, circ, ring_2d = _section_one(
+            stl_mesh, point, normal,
+            max_eq_diameter=max_eq_diameter,
+            ownership_factor=None,
+            return_metrics=True,
+            return_ring=True,
+            centerline_coords=centerline_coords,
+            centerline_index=centerline_index,
+            centerline_voronoi_exclusion_mm=(
+                centerline_voronoi_exclusion_mm))
+        if (a <= 0 or ring_2d is None
+                or ar > max_aspect_ratio or circ < min_circularity):
             return None
-
-        if target_area is not None and target_area > 0:
-            chosen = min(pool, key=lambda x: abs(x[1] - target_area))
-        else:
-            chosen = min(pool, key=lambda x: x[0])
-
-        _, area_used, ring_2d, n_used = chosen
-        u_use, v_use = _make_orthonormal_basis(n_used)
+        u_use, v_use = _make_orthonormal_basis(normal)
         ring_3d = np.array([
             point + x2 * u_use + y2 * v_use for (x2, y2) in ring_2d])
         return ring_3d
@@ -483,8 +461,32 @@ def _build_max_section_traces(seg_data, pointwise_profiles, nodes, stl_mesh):
             print(f"      [{seg_name.upper()}] 无有效截面值, 跳过")
             continue
 
-        point, tangent = _interp_centerline_at_pos(
-            seg_info['path'], nodes, max_info['pos_index'], n_total=100)
+        profile_index = max(0, min(
+            len(profile.get('position', [])) - 1, max_info['pos_index']))
+        profile_coord_keys = ('centerline_x', 'centerline_y', 'centerline_z')
+        profile_normal_keys = (
+            'section_normal_x', 'section_normal_y', 'section_normal_z')
+        centerline_coords = None
+        if all(key in profile for key in profile_coord_keys):
+            centerline_coords = np.column_stack([
+                np.asarray(profile[key], dtype=float)
+                for key in profile_coord_keys
+            ])
+        if centerline_coords is not None and len(centerline_coords) > profile_index:
+            point = centerline_coords[profile_index]
+        else:
+            point, _ = _interp_centerline_at_pos(
+                seg_info['path'], nodes, profile_index,
+                n_total=max(2, len(profile.get('position', []))))
+        if all(key in profile for key in profile_normal_keys):
+            tangent = np.array([
+                float(profile[key][profile_index]) for key in profile_normal_keys
+            ])
+            tangent /= np.linalg.norm(tangent) + 1e-15
+        else:
+            _, tangent = _interp_centerline_at_pos(
+                seg_info['path'], nodes, profile_index,
+                n_total=max(2, len(profile.get('position', []))))
         if point is None:
             continue
 
@@ -508,7 +510,12 @@ def _build_max_section_traces(seg_data, pointwise_profiles, nodes, stl_mesh):
         ring_3d = _compute_real_cross_section_ring(
             stl_mesh, point, tangent,
             target_area=max_info['area'],
-            max_eq_diameter=max_eq_d)
+            max_eq_diameter=max_eq_d,
+            centerline_coords=centerline_coords,
+            centerline_index=(profile_index if centerline_coords is not None
+                              else None),
+            centerline_voronoi_exclusion_mm=float(
+                profile.get('centerline_voronoi_exclusion_mm', 5.0)))
         ring_ok = ring_3d is not None and len(ring_3d) >= 3
 
         if ring_ok:

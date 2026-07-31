@@ -45,6 +45,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from geometry_feature_extract.features_layout import (
     FEATURES_DIRNAME,
+    POINTWISE_TEMP_NAME,
     PUBLIC_FEATURE_NAMES,
     RAW_CENTERLINE_NAME,
     SMOOTH_CENTERLINE_NAME,
@@ -145,9 +146,6 @@ DEFAULT_PARAMS = {
     "n_profile_points": 100,
     "curvature_window": 7,
     "sample_step": 3,
-    "ownership_factor": 1.8,
-    "junction_policy": "min_valid",
-    "max_diameter_rate_per_mm": 0.5,
 }
 
 OUTPUT_FILES = [
@@ -1402,30 +1400,111 @@ def _surface_section_arrays(mesh, point: np.ndarray, normal: np.ndarray):
     )
 
 
-def _validated_surface_section_arrays(
+_VORONOI_SECTION_CLIPPER = None
+_VORONOI_SECTION_CLIPPER_UNAVAILABLE = False
+
+
+def _load_voronoi_section_clipper():
+    """Load the extractor's ownership clip lazily with scientific dependencies."""
+    global _VORONOI_SECTION_CLIPPER, _VORONOI_SECTION_CLIPPER_UNAVAILABLE
+    if _VORONOI_SECTION_CLIPPER is not None:
+        return _VORONOI_SECTION_CLIPPER
+    if _VORONOI_SECTION_CLIPPER_UNAVAILABLE:
+        return None
+    try:
+        app_root = str(APP_ROOT)
+        if app_root not in sys.path:
+            sys.path.insert(0, app_root)
+        from extract_profiles import _clip_section_to_centerline_voronoi
+        from shapely.geometry import Point, Polygon
+
+        _VORONOI_SECTION_CLIPPER = (
+            _clip_section_to_centerline_voronoi, Point, Polygon)
+    except Exception:
+        _VORONOI_SECTION_CLIPPER_UNAVAILABLE = True
+        return None
+    return _VORONOI_SECTION_CLIPPER
+
+
+def _voronoi_surface_section_arrays(
+    contour: np.ndarray,
+    point: np.ndarray,
+    normal: np.ndarray,
+    profile: dict | None,
+    index: int | None,
+    centerline_coords: np.ndarray | None,
+    centerline_arc_length: np.ndarray | None,
+):
+    """Apply the extractor's centerline ownership clip to a Web STL contour."""
+    if (
+        not isinstance(profile, dict)
+        or profile.get("section_assignment_method") != "centerline_voronoi"
+        or centerline_coords is None
+        or index is None
+    ):
+        return None
+    helpers = _load_voronoi_section_clipper()
+    if helpers is None:
+        return None
+    clip_section, point_type, polygon_type = helpers
+    try:
+        u, v = _basis_from_normal(normal)
+        relative = np.asarray(contour, dtype=float) - np.asarray(point, dtype=float)
+        planar = np.column_stack((relative @ u, relative @ v))
+        polygon = polygon_type(planar)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        clipped = clip_section(
+            polygon,
+            point_type(0.0, 0.0),
+            point,
+            normal,
+            centerline_coords=centerline_coords,
+            centerline_index=index,
+            local_exclusion_mm=float(
+                profile.get("centerline_voronoi_exclusion_mm", 5.0)),
+            centerline_arc_length=centerline_arc_length,
+        )
+        if clipped is None or clipped.is_empty:
+            return None
+        ring = np.asarray(clipped.exterior.coords, dtype=float)
+        if len(ring) < 3:
+            return None
+        return (
+            np.asarray(point, dtype=float)
+            + ring[:, :1] * u
+            + ring[:, 1:2] * v
+        )
+    except Exception:
+        return None
+
+
+def _pointwise_surface_section_arrays(
     mesh,
     point: np.ndarray,
     normal: np.ndarray,
     expected_diameter: float | None,
-    max_relative_diameter_error: float = 0.30,
+    *,
+    profile: dict | None = None,
+    index: int | None = None,
+    centerline_coords: np.ndarray | None = None,
+    centerline_arc_length: np.ndarray | None = None,
 ):
-    """Return a raw mesh contour only when it agrees with the saved clean profile."""
+    """Draw every valid pointwise section with no independent Web rejection."""
     if expected_diameter is None or not math.isfinite(expected_diameter) or expected_diameter <= 0:
         return None
     metrics = _surface_section_metrics(
         mesh, point, normal, nearby_radius=expected_diameter / 2.0)
-    if not metrics:
-        return None
-    measured = _safe_float(metrics.get("eq_diameter"))
-    if measured is None or measured <= 0:
-        return None
-    relative_error = abs(measured - expected_diameter) / expected_diameter
-    if relative_error > max_relative_diameter_error:
-        # The extractor measures a center-owned polygon.  A much larger raw
-        # STL loop belongs to a neighbouring branch or confluence and must not
-        # be presented as this vessel's valid cross-section.
-        return None
-    return metrics["contour"]
+    if metrics:
+        clipped = _voronoi_surface_section_arrays(
+            metrics["contour"], point, normal, profile, index,
+            centerline_coords, centerline_arc_length)
+        if clipped is not None:
+            return clipped
+        if not isinstance(profile, dict) or profile.get(
+                "section_assignment_method") != "centerline_voronoi":
+            return metrics["contour"]
+    return _circle_arrays(point, normal, expected_diameter / 2.0, n_pts=36)
 
 
 def _polygon_area_2d(points: np.ndarray) -> float:
@@ -1545,16 +1624,11 @@ def _section_normal_at(profile: dict, index: int, fallback: np.ndarray) -> np.nd
 
 
 def _section_is_valid(profile: dict, index: int) -> bool:
-    """Respect explicit masks and retain inferred values for metrics only."""
+    """Use only the validity encoded by the pointwise profile."""
     values = profile.get("section_valid")
     if values is not None and index < len(values):
         value = _safe_float(values[index])
         if value is None or value <= 0:
-            return False
-    inferred = profile.get("area_jump_interpolated")
-    if inferred is not None and index < len(inferred):
-        value = _safe_float(inferred[index])
-        if value is not None and value > 0:
             return False
     if values is not None:
         return True
@@ -1658,6 +1732,13 @@ def _build_pointwise_layers(
         positions = _profile_positions(profile)
         if len(positions) == 0:
             continue
+        centerline_arc_length = np.asarray(
+            profile.get("arc_length_mm", []), dtype=float)
+        if (
+            len(centerline_arc_length) != len(coords)
+            or not np.all(np.isfinite(centerline_arc_length))
+        ):
+            centerline_arc_length = None
 
         fx, fy, fz = [], [], []
         curvature_values, sizes, hover = [], [], []
@@ -1705,8 +1786,12 @@ def _build_pointwise_layers(
                         ring_x.extend(circle[:, 0].tolist() + [None])
                         ring_y.extend(circle[:, 1].tolist() + [None])
                         ring_z.extend(circle[:, 2].tolist() + [None])
-                contour = _validated_surface_section_arrays(
-                    surface_mesh, point, normal, dia)
+                contour = _pointwise_surface_section_arrays(
+                    surface_mesh, point, normal, dia,
+                    profile=profile,
+                    index=i,
+                    centerline_coords=coords,
+                    centerline_arc_length=centerline_arc_length)
                 if contour is not None:
                     surface_x.extend(contour[:, 0].tolist() + [None])
                     surface_y.extend(contour[:, 1].tolist() + [None])
@@ -1821,8 +1906,19 @@ def _surface_section_at_index(coords: np.ndarray, profile: dict, idx: int | None
         return None
     diameter = _valid_numeric_at(profile, "eq_diameter", idx)
     normal = _section_normal_at(profile, idx, tangent)
-    contour = _validated_surface_section_arrays(
-        surface_mesh, point, normal, diameter)
+    centerline_arc_length = np.asarray(
+        profile.get("arc_length_mm", []), dtype=float)
+    if (
+        len(centerline_arc_length) != len(coords)
+        or not np.all(np.isfinite(centerline_arc_length))
+    ):
+        centerline_arc_length = None
+    contour = _pointwise_surface_section_arrays(
+        surface_mesh, point, normal, diameter,
+        profile=profile,
+        index=idx,
+        centerline_coords=coords,
+        centerline_arc_length=centerline_arc_length)
     if contour is None:
         return None
     return {
@@ -2185,7 +2281,9 @@ def build_visualization_data(
     nodes = smooth_nodes or raw_nodes
     seg_data = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
     unified = _read_json_file(_feature_file(parent, UNIFIED_FEATURES_NAME))
-    pointwise = unified.get("pointwise") if isinstance(unified, dict) else None
+    pointwise = _read_json_file(_feature_file(parent, POINTWISE_TEMP_NAME))
+    if not isinstance(pointwise, dict):
+        pointwise = unified.get("pointwise") if isinstance(unified, dict) else None
 
     surface_mesh = _load_surface_section_mesh(stl_path) if include_surface_sections else None
     pointwise_layers = _build_pointwise_layers(
@@ -2497,9 +2595,6 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
             pitch=params["pitch"],
             curvature_window=params["curvature_window"],
             section_step=params["sample_step"],
-            ownership_factor=params["ownership_factor"],
-            junction_policy=params["junction_policy"],
-            max_diameter_rate_per_mm=params["max_diameter_rate_per_mm"],
         )
     elif step == "features":
         try:

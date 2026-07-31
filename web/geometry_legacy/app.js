@@ -11,9 +11,6 @@ const DEFAULT_PARAMS = {
   n_profile_points: 100,
   curvature_window: 7,
   sample_step: 3,
-  ownership_factor: 1.8,
-  junction_policy: "min_valid",
-  max_diameter_rate_per_mm: 0.5,
 };
 
 const PARAM_LABELS = {
@@ -29,9 +26,6 @@ const PARAM_LABELS = {
   n_profile_points: "剖面点数",
   curvature_window: "曲率窗口",
   sample_step: "截面采样步长",
-  ownership_factor: "截面归属半径倍数",
-  junction_policy: "交叉区策略",
-  max_diameter_rate_per_mm: "直径变化率上限",
 };
 
 const STEPS = [
@@ -234,22 +228,10 @@ function buildParamInputs() {
     const label = document.createElement("label");
     label.textContent = PARAM_LABELS[key] || key;
     label.title = key;
-    let input;
-    if (key === "junction_policy") {
-      input = document.createElement("select");
-      ["min_valid", "cap_min", "keep"].forEach((name) => {
-        const opt = document.createElement("option");
-        opt.value = name;
-        opt.textContent = name;
-        input.appendChild(opt);
-      });
-      input.value = value;
-    } else {
-      input = document.createElement("input");
-      input.type = "number";
-      input.step = Number.isInteger(value) ? "1" : "0.01";
-      input.value = value;
-    }
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = Number.isInteger(value) ? "1" : "0.01";
+    input.value = value;
     input.dataset.param = key;
     input.addEventListener("change", readParams);
     wrap.appendChild(label);
@@ -261,12 +243,8 @@ function readParams() {
   const next = { ...state.params };
   document.querySelectorAll("[data-param]").forEach((input) => {
     const key = input.dataset.param;
-    if (key === "junction_policy") {
-      next[key] = input.value;
-    } else {
-      const value = Number(input.value);
-      next[key] = Number.isFinite(value) ? value : DEFAULT_PARAMS[key];
-    }
+    const value = Number(input.value);
+    next[key] = Number.isFinite(value) ? value : DEFAULT_PARAMS[key];
   });
   state.params = next;
   return next;

@@ -222,44 +222,34 @@ TIPS/侧支的辅助形态评价和下游几何特征计算。
 | `curvature` | 中心线在该点的曲率(1/mm) |
 | `inscribed_radius` | 内切圆半径 |
 
-**截面计算核心**（形状感知重写）：
-1. 获取中心线点的**5 点窗口平滑**切线 (减轻分叉/抖动处法线方向异常)
-2. 构造正交基 (u, v)
-3. 用垂直平面截断 STL 网格 (`trimesh.intersections.mesh_plane`)
-4. 法线扰动: ±15° / 12 方向 + 7.5° / 6 方向 (共 ~19 候选, 由 `_generate_normal_candidates` 生成)
-5. 投影到 2D → polygonize → 候选多边形过滤
-6. **每个候选额外算两个尺度无关的形状指标**:
+**截面计算核心**（高曲率无自交）：
+1. 用 **4 mm 物理尺度高斯平滑**的中心线切线确定唯一截平面
+2. 构造正交基 (u, v)，用垂直平面截断 STL 网格 (`trimesh.intersections.mesh_plane`)
+3. 投影到 2D → polygonize → 选择包含当前中心线点的管腔多边形
+4. 将多边形限制到当前中心线采样点的 **3D Voronoi 归属单元**；前后 5 mm 的局部邻点不参与限制，以免中心线采样噪声把截面切成窄条
+5. 非局部回弯的中心线点通过垂直平分面裁掉不属于当前弧长位置的部分，避免急弯处截平面跨入同一血管的另一段
+6. 截面额外计算形状指标，但这些指标只作为逐点特征，不参与删点：
    - `aspect_ratio` = √(λ_max / λ_min) (PCA 长短轴比, 圆/正方=1, 椭圆≈1.4)
    - `circularity` = 4πA/P² (1=完美圆, 0=极不规则)
-7. **形状感知评分**选最佳候选 (`_compute_cross_section`):
-   - **硬剔除** (尺度无关, 对粗细血管同样有效):
-     - `aspect_ratio > 4.0` → 沿轴薄片切 / 跨血管切
-     - `circularity   < 0.30` → 形状极不规则
-     - `eq_diameter   > inscribed_factor·2·r_local` → 越界穿透
-   - **综合打分** `score = area × (1+1.5·max(0, AR-1.3)) × (1+(1-circ))`
-     - 真垂直切管: 面积小+圆度高 → score 双低 → 胜出
-     - 沿轴薄片: AR 大 → 被惩罚
-     - 跨血管椭圆: 圆度低 → 被惩罚
-   - **若所有候选都不合格 → 返回 0** (该点截面缺失, 比硬选错误值更安全)
 
-**三层端点 / 边界效应保护** (新):
-1. **端点保护带**：段两端 `edge_margin_pct` (默认 5%) 或 `edge_margin_mm` (默认 8mm) 内的截面置 NaN
-2. **内切半径上限过滤**:
-   - 用 `trimesh.proximity.signed_distance` 给出每个中心线点到 STL 表面的距离 = 局部内切半径 r_local
-   - 截面候选必须满足 eq_diameter ≤ `inscribed_factor × 2 r_local` (默认 inscribed_factor=1.8)
-   - 这一策略**直接在几何层面**判断截面是否合理, 不会误删真实大截面
-3. **局部一致性后处理 (全自适应, 无固定尺寸阈值)** (`_remove_local_outliers`):
-   - 沿中心线滑窗 (默认 15 点)
-   - 用**中位数 + MAD**自适应判异常: `|x_i − median| / (1.4826·MAD) > 3.5` 即剔除
-   - 阈值由数据自身分布决定 — 粗血管段容忍粗的, 细血管段容忍细的
-   - 完全对应"截面值沿管轴应缓变"这一物理先验
+方法依据：中心线法向截面见 [Liu et al., 2019](https://doi.org/10.1109/icist.2019.8836866)；
+中心线/Voronoi 血管计算几何框架见 [Antiga et al., 2003](https://doi.org/10.1109/tmi.2003.812261)。
+本项目在此基础上使用“沿弧长局部豁免的中心线 Voronoi 归属”，专门处理曲率半径接近
+管腔半径时正交截面族不可避免的非局部相交。
+
+**唯一两类截面置零规则**：
+1. **汇合端**：只在拓扑确认该端连接其他血管时检测面积临界点。若交点在索引0、临界点为20，则再向血管内部扩展6个采样点，将 `0..26`（含端点）置0；此端点判断随后结束。
+2. **段内侧支**：只在已知侧支拓扑交点附近检测左右临界点。若交点为100、临界点为80和120，则将 `80..120`（含边界）置0。
+
+置零发生在最终 pointwise 重采样之后，不做插值。除此之外，成功求得的截面不再经过尺寸、形状、MAD、变化率或“小截面”过滤。
 
 **新增剖面字段**:
 - `inscribed_radius`：直接从距离场返回真实值, 此前版本是 0 占位
-- `n_local_outliers`：局部一致性剔除的点数 (诊断用)
-- `n_section_success`：通过所有过滤的有效截面计数
+- `n_section_success`：几何求交成功的截面数
+- `n_endpoint_junction_zeroed`：汇合端区间置0的点数
+- `n_side_branch_junction_zeroed`：段内侧支区间置0的点数
 
-**可视化端 (`export_visualization.py`)** 复用同一套 `_generate_normal_candidates` + `_shape_score` 选最佳候选, 确保画出的环和 JSON 里的面积来自同一打分逻辑。
+**可视化端**直接以 `.pointwise_profiles.json` 为截面有效性的唯一数据源：数值为0的点不画，其他点全部按保存的中心线位置、法线和 Voronoi 参数重建，不再执行独立的显示过滤。显示轮廓投影面积与 pointwise `area` 一致。
 
 ---
 
@@ -526,16 +516,6 @@ export_patient_visualization(stl,            # ~10-15s
 # 浏览器打开 vis_interactive.html, 转动看每段最大截面圈是否合理
 ```
 
-**调形状参数** (默认已经够用, 必要时收紧):
-```python
-# 直接调 _compute_cross_section 的形状阈值 (改 extract_profiles.py 默认值)
-#   max_aspect_ratio=4.0   -> 收紧到 3.0 = 更激进剔除拉长截面
-#   min_circularity=0.30   -> 提高到 0.40 = 拒绝更不规则的形状
-# MAD 后处理:
-#   _remove_local_outliers(window=15, mad_factor=3.5)
-#   mad_factor=2.5 = 更严格剔除局部异常; window 调到 21 = 看更长距离的中位数
-```
-
 **性能对比** (跳过 Step 1-4 + Step 6 + Step A/B):
 - 完整流程: ~80-145 s/患者
 - 验证模式: ~30-45 s/患者 (省掉中心线 30-60s + 分段 10-20s + 统计 5-10s + 相关性整体批次)
@@ -643,18 +623,20 @@ export_patient_visualization(stl,            # ~10-15s
       "position": [0.0, 0.01, "..."],
       "arc_length_mm": [0.0, 1.25, "..."],
       "total_length_mm": 125.34,
-      "area": ["NaN", "NaN", 122.5, "..."],
-      "eq_diameter": ["NaN", "NaN", 12.4, "..."],
+      "area": [0.0, 0.0, 122.5, "..."],
+      "eq_diameter": [0.0, 0.0, 12.4, "..."],
       "perimeter": [...], "circularity": [...], "curvature": [...],
       "inscribed_radius": [6.1, 6.2, 6.0, "..."],
-      "edge_margin_pct": 0.05, "edge_margin_mm": 8.0,
-      "n_masked_endpoints": 10, "n_rejected_oversize": 2, "n_section_success": 88
+      "endpoint_junction_mask": [1.0, 1.0, 0.0, "..."],
+      "side_branch_contamination_mask": [0.0, 0.0, 0.0, "..."],
+      "n_endpoint_junction_zeroed": 2, "n_section_success": 100
     }
   },
   "pointwise_meta": {
-    "n_points": 100, "edge_margin_pct": 0.05,
-    "edge_margin_mm": 8.0, "inscribed_factor": 1.8,
-    "n_total_masked": 75, "n_total_rejected_oversize": 6
+    "n_points": 100,
+    "section_filter_policy": "endpoint_and_side_branch_zero_only",
+    "n_total_endpoint_junction_zeroed": 2,
+    "n_total_side_branch_junction_zeroed": 0
   }
 }
 ```
@@ -795,14 +777,11 @@ $$D_{eq} = 2\sqrt{\frac{A}{\pi}}$$
 
 ---
 
-**最后更新**: 2026年5月
+**最后更新**: 2026年7月
 - 新增系统/联合特征 (Murray, Hagen-Poiseuille 阻力, 侧支负担), 统一 `unified_features.json`
-- 截面边界保护升级为**形状感知 + 三层过滤**:
-  - PCA 长短轴比 + 圆度硬过滤 (尺度无关, 拦截沿轴薄片切 / 跨血管椭圆)
-  - 内切半径上限 (拦截穿透邻近血管)
-  - 沿中心线滑窗 中位数+MAD 自适应剔除局部异常 (无任何固定尺寸阈值)
-- 切线改用 5 点窗口平滑, 减少分叉/抖动处法线方向异常
-- 可视化端复用同一打分逻辑, 画出的环与 JSON 数值同源
+- 截面使用平滑切线与中心线 Voronoi 归属，解决高曲率非局部相交
+- 成功截面只在汇合端和已知侧支临界区间置0，不再执行其他过滤或插值
+- Web 直接读取 pointwise 记录并复用同一 Voronoi 轮廓，不再独立删减
 - 自动相关性解读 + 推荐特征 CSV
 - 新增"快速截面验证模式"使用指南
 

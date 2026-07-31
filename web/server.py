@@ -109,7 +109,7 @@ LOCK = threading.Lock()
 GEOMETRY_STL_CACHE: dict[str, tuple[tuple, Path]] = {}
 GEOMETRY_STL_CACHE_LOCK = threading.Lock()
 GEOMETRY_VIEW_CACHE_NAME = ".portaflow_geometry_view.json.gz"
-GEOMETRY_VIEW_CACHE_VERSION = 3
+GEOMETRY_VIEW_CACHE_VERSION = 5
 GEOMETRY_VIEW_CACHE_LOCK = threading.Lock()
 
 
@@ -987,8 +987,7 @@ extract_centerline(str(stl), pitch=0.5, min_branch_length_mm=10.0, min_relative_
                    merge_bp_distance_mm=5.0)
 smooth_centerline(str(stl))
 segment_vessels(str(stl), post_tips='#' in stl.parent.name)
-extract_profiles(str(stl), n_points=200, pitch=0.5, curvature_window=7, section_step=3,
-                 ownership_factor=1.8, junction_policy='min_valid', max_diameter_rate_per_mm=0.5)
+extract_profiles(str(stl), n_points=200, pitch=0.5, curvature_window=7, section_step=3)
 extract_all_features(str(stl), n_fit_points=10, curvature_window=7, sample_step=3, pitch=0.5)
 from features_layout import PUBLIC_FEATURE_NAMES, remove_generated_outputs
 remove_generated_outputs(stl.parent, keep_public=True)
