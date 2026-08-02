@@ -13,7 +13,7 @@
 import json
 import os
 import numpy as np
-from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import CubicHermiteSpline, UnivariateSpline
 from scipy.ndimage import gaussian_filter1d
 from collections import defaultdict, deque
 
@@ -191,6 +191,486 @@ def smooth_existing_anatomical_segment(stl_path, segment_name, sigma_mm=3.0):
         'output_length_mm': float(filtered_arc[-1]),
         'output_path': str(output_path),
     }
+
+
+def _path_arc_length(coords):
+    coords = np.asarray(coords, dtype=float)
+    if len(coords) < 2:
+        return np.asarray([0.0], dtype=float)
+    return np.concatenate(([0.0], np.cumsum(
+        np.linalg.norm(np.diff(coords, axis=0), axis=1))))
+
+
+def _unit_vector(vector):
+    vector = np.asarray(vector, dtype=float)
+    norm = float(np.linalg.norm(vector))
+    return vector / norm if norm > 1e-12 else None
+
+
+def _point_at_path_arc(coords, arc, distance):
+    distance = float(np.clip(distance, float(arc[0]), float(arc[-1])))
+    return np.asarray([
+        np.interp(distance, arc, np.asarray(coords, dtype=float)[:, axis])
+        for axis in range(3)
+    ], dtype=float)
+
+
+def _junction_turn_angle_degrees(coords, index, tangent_span_mm=2.0):
+    """Angle between fitted incoming and outgoing tangents at one path node."""
+    coords = np.asarray(coords, dtype=float)
+    index = int(index)
+    if not 0 < index < len(coords) - 1:
+        return 0.0
+    arc = _path_arc_length(coords)
+    span = max(float(tangent_span_mm), 1e-6)
+    center = coords[index]
+    left = _point_at_path_arc(coords, arc, arc[index] - span)
+    right = _point_at_path_arc(coords, arc, arc[index] + span)
+    incoming = _unit_vector(center - left)
+    outgoing = _unit_vector(right - center)
+    if incoming is None or outgoing is None:
+        return 0.0
+    return float(np.degrees(np.arccos(np.clip(
+        np.dot(incoming, outgoing), -1.0, 1.0))))
+
+
+def _vertex_turn_angle_degrees(coords, index):
+    """Immediate discrete tangent jump at one centerline node."""
+    coords = np.asarray(coords, dtype=float)
+    index = int(index)
+    if not 0 < index < len(coords) - 1:
+        return 0.0
+    incoming = _unit_vector(coords[index] - coords[index - 1])
+    outgoing = _unit_vector(coords[index + 1] - coords[index])
+    if incoming is None or outgoing is None:
+        return 0.0
+    return float(np.degrees(np.arccos(np.clip(
+        np.dot(incoming, outgoing), -1.0, 1.0))))
+
+
+def _junction_kink_metrics(coords, index, neighbor_radius=3):
+    """Measure whether a turn is a localized tangent discontinuity."""
+    coords = np.asarray(coords, dtype=float)
+    index = int(index)
+    radius = max(1, int(neighbor_radius))
+    vertex_angle = _vertex_turn_angle_degrees(coords, index)
+    neighbor_angles = [
+        _vertex_turn_angle_degrees(coords, candidate)
+        for candidate in range(
+            max(1, index - radius),
+            min(len(coords) - 1, index + radius + 1))
+        if candidate != index
+    ]
+    background = (
+        float(np.median(neighbor_angles)) if neighbor_angles else 0.0)
+    return {
+        'vertex_angle_deg': vertex_angle,
+        'neighbor_angle_median_deg': background,
+        'angle_excess_deg': vertex_angle - background,
+    }
+
+
+def _path_edges(path):
+    """Return undirected edges making up a centreline path."""
+    return {
+        tuple(sorted((int(a), int(b))))
+        for a, b in zip(path, path[1:])
+    }
+
+
+def _atomic_centerline_segments(adjacency):
+    """Return Web-compatible maximal centreline atom segments.
+
+    A segment starts at a node whose topological degree is not two and is
+    followed until the next such node.  Therefore every internal atom node is
+    guaranteed to have no attached branch, matching the editable segments
+    shown by the Web workbench.
+    """
+    if not adjacency:
+        return []
+    adjacency = {
+        int(node_id): {int(nb) for nb in neighbors}
+        for node_id, neighbors in adjacency.items()
+    }
+    anchors = sorted(
+        node_id for node_id, neighbors in adjacency.items()
+        if len(neighbors) != 2
+    )
+    seen_edges = set()
+    atoms = []
+
+    for anchor in anchors:
+        for first in sorted(adjacency.get(anchor, ())):
+            edge = tuple(sorted((anchor, first)))
+            if edge in seen_edges:
+                continue
+            path = [anchor, first]
+            seen_edges.add(edge)
+            previous, current = anchor, first
+            while len(adjacency.get(current, ())) == 2:
+                next_nodes = [
+                    nb for nb in adjacency[current] if nb != previous
+                ]
+                if not next_nodes:
+                    break
+                nxt = next_nodes[0]
+                edge = tuple(sorted((current, nxt)))
+                if edge in seen_edges:
+                    break
+                path.append(nxt)
+                seen_edges.add(edge)
+                previous, current = current, nxt
+            start_id, end_id = int(path[0]), int(path[-1])
+            atoms.append({
+                'id': f'{min(start_id, end_id)}:{max(start_id, end_id)}',
+                'start_id': start_id,
+                'end_id': end_id,
+                'path': [int(node_id) for node_id in path],
+            })
+
+    atoms.sort(key=lambda item: (item['start_id'], item['end_id']))
+    return atoms
+
+
+def _anatomical_atomic_join_candidates(assignments, adjacency,
+                                        segment_names=None):
+    """Find shared endpoints of atoms belonging to one anatomical vessel.
+
+    Manual atom assignments from Web are authoritative.  For patients without
+    manual assignments, an atom is assigned automatically when all of its
+    edges are contained in an anatomical segment path.  A node is a join
+    candidate only when at least two atoms of the same vessel terminate there;
+    this prevents a different-vessel side branch from being treated as a
+    splice of the main vessel.
+    """
+    assignments = assignments if isinstance(assignments, dict) else {}
+    adjacency = adjacency if isinstance(adjacency, dict) else {}
+    segments = assignments.get('segments') or {}
+    selected = None if segment_names is None else {str(name) for name in segment_names}
+    segment_edges = {
+        str(vessel): _path_edges(info.get('path') or [])
+        for vessel, info in segments.items()
+        if isinstance(info, dict) and info.get('path')
+        and (selected is None or str(vessel) in selected)
+    }
+    manual = assignments.get('assignments') or {}
+    if not isinstance(manual, dict):
+        manual = {}
+
+    atoms = _atomic_centerline_segments(adjacency)
+    by_vessel = defaultdict(lambda: defaultdict(list))
+    for atom in atoms:
+        atom_id = atom['id']
+        saved = manual.get(atom_id)
+        vessel = ''
+        if isinstance(saved, dict):
+            vessel = str(saved.get('vessel') or '').lower()
+        if not vessel:
+            atom_edges = _path_edges(atom['path'])
+            vessel = next(
+                (name for name, edges in segment_edges.items()
+                 if atom_edges and atom_edges <= edges),
+                '',
+            )
+        if not vessel or vessel not in segment_edges:
+            continue
+        by_vessel[vessel][atom['start_id']].append(atom_id)
+        by_vessel[vessel][atom['end_id']].append(atom_id)
+
+    candidates = defaultdict(list)
+    for vessel, endpoint_atoms in by_vessel.items():
+        path = [int(node_id) for node_id in segments[vessel].get('path', [])]
+        if len(path) < 3:
+            continue
+        path_endpoints = {path[0], path[-1]}
+        for node_id, atom_ids in endpoint_atoms.items():
+            if node_id in path_endpoints or len(atom_ids) < 2:
+                continue
+            # Preserve Web's deterministic atom ordering and remove duplicates.
+            unique_ids = sorted(set(atom_ids))
+            candidates[vessel].append({
+                'junction_node_id': int(node_id),
+                'atomic_segment_ids': unique_ids,
+            })
+    for vessel in candidates:
+        candidates[vessel].sort(key=lambda item: item['junction_node_id'])
+    return dict(candidates)
+
+
+def _endpoint_path_tangent(coords, index):
+    coords = np.asarray(coords, dtype=float)
+    index = int(index)
+    if index <= 0:
+        return _unit_vector(coords[1] - coords[0])
+    if index >= len(coords) - 1:
+        return _unit_vector(coords[-1] - coords[-2])
+    return _unit_vector(coords[index + 1] - coords[index - 1])
+
+
+def _smooth_path_at_junction(coords, index, half_window_mm=6.0,
+                             tangent_span_mm=2.0):
+    """Apply a local C1 Hermite curve while keeping the junction fixed."""
+    coords = np.asarray(coords, dtype=float)
+    index = int(index)
+    if not 1 < index < len(coords) - 2:
+        return coords.copy(), None
+
+    arc = _path_arc_length(coords)
+    center_arc = float(arc[index])
+    half_window = max(float(half_window_mm), float(tangent_span_mm), 1e-6)
+    left_index = int(np.searchsorted(
+        arc, center_arc - half_window, side='left'))
+    right_index = int(np.searchsorted(
+        arc, center_arc + half_window, side='right') - 1)
+    left_index = max(0, min(index - 2, left_index))
+    right_index = min(len(coords) - 1, max(index + 2, right_index))
+    if not left_index < index < right_index:
+        return coords.copy(), None
+
+    before_angle = _junction_turn_angle_degrees(
+        coords, index, tangent_span_mm=tangent_span_mm)
+    vertex_angle_before = _vertex_turn_angle_degrees(coords, index)
+    incoming = _unit_vector(
+        coords[index] - _point_at_path_arc(
+            coords, arc, center_arc - tangent_span_mm))
+    outgoing = _unit_vector(
+        _point_at_path_arc(
+            coords, arc, center_arc + tangent_span_mm) - coords[index])
+    center_tangent = (
+        _unit_vector(incoming + outgoing)
+        if incoming is not None and outgoing is not None else None)
+    if center_tangent is None:
+        center_tangent = _unit_vector(coords[right_index] - coords[left_index])
+    left_tangent = _endpoint_path_tangent(coords, left_index)
+    right_tangent = _endpoint_path_tangent(coords, right_index)
+    if any(item is None for item in (
+            center_tangent, left_tangent, right_tangent)):
+        return coords.copy(), None
+
+    knots = np.asarray(
+        [arc[left_index], arc[index], arc[right_index]], dtype=float)
+    values = coords[[left_index, index, right_index]]
+    derivatives = np.vstack((left_tangent, center_tangent, right_tangent))
+    curve = CubicHermiteSpline(
+        knots, values, derivatives, axis=0, extrapolate=False)
+
+    smoothed = coords.copy()
+    smoothed[left_index:right_index + 1] = curve(
+        arc[left_index:right_index + 1])
+    # These anchors define the local edit and the branch attachment.  Restoring
+    # them exactly also makes repeated profile extraction idempotent.
+    smoothed[left_index] = coords[left_index]
+    smoothed[index] = coords[index]
+    smoothed[right_index] = coords[right_index]
+    after_angle = _junction_turn_angle_degrees(
+        smoothed, index, tangent_span_mm=tangent_span_mm)
+    vertex_angle_after = _vertex_turn_angle_degrees(smoothed, index)
+    displacement = np.linalg.norm(smoothed - coords, axis=1)
+    return smoothed, {
+        'path_index': index,
+        'left_path_index': left_index,
+        'right_path_index': right_index,
+        'angle_before_deg': before_angle,
+        'angle_after_deg': after_angle,
+        'vertex_angle_before_deg': vertex_angle_before,
+        'vertex_angle_after_deg': vertex_angle_after,
+        'max_displacement_mm': float(np.max(displacement)),
+        'half_window_mm': half_window,
+        'tangent_span_mm': float(tangent_span_mm),
+    }
+
+
+def _segment_geometry_metrics(coords):
+    coords = np.asarray(coords, dtype=float)
+    arc = _path_arc_length(coords)
+    length = float(arc[-1]) if len(arc) else 0.0
+    chord = float(np.linalg.norm(coords[-1] - coords[0])) if len(coords) else 0.0
+    tortuosity = float(1.0 - chord / length) if length > 1e-9 else 0.0
+    curvature = []
+    for index in range(1, len(coords) - 1):
+        incoming = coords[index] - coords[index - 1]
+        outgoing = coords[index + 1] - coords[index]
+        incoming_length = float(np.linalg.norm(incoming))
+        outgoing_length = float(np.linalg.norm(outgoing))
+        if incoming_length <= 1e-9 or outgoing_length <= 1e-9:
+            continue
+        angle = float(np.arccos(np.clip(
+            np.dot(incoming, outgoing)
+            / (incoming_length * outgoing_length), -1.0, 1.0)))
+        curvature.append(angle / (0.5 * (
+            incoming_length + outgoing_length)))
+    return {
+        'length_mm': length,
+        'tortuosity': tortuosity,
+        'mean_curvature': float(np.mean(curvature)) if curvature else 0.0,
+    }
+
+
+def _refresh_assignment_geometry(assignments, nodes):
+    for info in (assignments.get('segments') or {}).values():
+        if not info or not info.get('path'):
+            continue
+        path = [int(node_id) for node_id in info['path']]
+        if any(node_id not in nodes for node_id in path):
+            continue
+        coords = path_to_coords(path, nodes)
+        info.update(_segment_geometry_metrics(coords))
+        info['n_points'] = len(path)
+        info['endpoints_id'] = [int(path[0]), int(path[-1])]
+        info['endpoints_coord'] = [
+            [float(value) for value in coords[0]],
+            [float(value) for value in coords[-1]],
+        ]
+        if 'smoothed_coords' in info:
+            info['smoothed_coords'] = coords.tolist()
+
+    for key in ('branch_points', 'endpoints'):
+        for item in assignments.get(key, []) or []:
+            if not isinstance(item, dict) or item.get('id') is None:
+                continue
+            node = nodes.get(int(item['id']))
+            if node is not None:
+                item['coord'] = [
+                    float(node['x']), float(node['y']), float(node['z'])]
+
+
+def smooth_internal_anatomical_junctions(
+        stl_path, segment_names=None, angle_threshold_deg=15.0,
+        local_angle_excess_threshold_deg=10.0,
+        half_window_mm=6.0, tangent_span_mm=2.0):
+    """Repair non-C1 internal joins and synchronize both Web geometry files.
+
+    Only topology junctions inside an anatomical segment are eligible.  True
+    segment endpoints are excluded, node IDs and connectivity are preserved,
+    and the shared branch attachment coordinate remains fixed.
+    """
+    parentdir = os.path.dirname(stl_path)
+    assignments_path = resolve_feature_path(
+        parentdir, SEGMENT_ASSIGNMENTS_NAME)
+    if assignments_path is None:
+        raise FileNotFoundError('segment_assignments.json is required')
+    with open(assignments_path, 'r', encoding='utf-8') as handle:
+        assignments = json.load(handle)
+
+    nodes, adjacency, _ = load_tree(stl_path)
+    segments = assignments.get('segments') or {}
+    selected_names = (
+        list(segments) if segment_names is None
+        else [str(name) for name in segment_names])
+    join_candidates = _anatomical_atomic_join_candidates(
+        assignments, adjacency, segment_names=selected_names)
+    events = []
+
+    for segment_name in selected_names:
+        info = segments.get(segment_name)
+        path = [int(node_id) for node_id in (info or {}).get('path', [])]
+        if len(path) < 5 or any(node_id not in nodes for node_id in path):
+            continue
+        coords = path_to_coords(path, nodes)
+        path_indices = {
+            int(node_id): index for index, node_id in enumerate(path)
+        }
+        for candidate in join_candidates.get(segment_name, ()):
+            node_id = int(candidate['junction_node_id'])
+            path_index = path_indices.get(node_id)
+            if path_index is None or not 1 < path_index < len(path) - 2:
+                continue
+            angle = _junction_turn_angle_degrees(
+                coords, path_index, tangent_span_mm=tangent_span_mm)
+            kink = _junction_kink_metrics(coords, path_index)
+            if (kink['vertex_angle_deg'] < float(angle_threshold_deg)
+                    or kink['angle_excess_deg']
+                    < float(local_angle_excess_threshold_deg)):
+                continue
+            updated, detail = _smooth_path_at_junction(
+                coords, path_index,
+                half_window_mm=half_window_mm,
+                tangent_span_mm=tangent_span_mm)
+            if (detail is None
+                    or detail['angle_after_deg'] >= angle
+                    or detail['vertex_angle_after_deg']
+                    >= kink['vertex_angle_deg']):
+                continue
+            coords = updated
+            for current_id, coord in zip(path, coords):
+                nodes[current_id]['x'] = float(coord[0])
+                nodes[current_id]['y'] = float(coord[1])
+                nodes[current_id]['z'] = float(coord[2])
+            events.append({
+                'segment': segment_name,
+                'junction_node_id': node_id,
+                'atomic_segment_ids': list(candidate['atomic_segment_ids']),
+                'candidate_method': (
+                    'web_atomic_segments_within_anatomical_segment'),
+                'neighbor_angle_median_deg': (
+                    kink['neighbor_angle_median_deg']),
+                'angle_excess_deg': kink['angle_excess_deg'],
+                **detail,
+            })
+
+    result = {
+        'applied': bool(events),
+        'method': 'local_c1_cubic_hermite',
+        'angle_threshold_deg': float(angle_threshold_deg),
+        'local_angle_excess_threshold_deg': float(
+            local_angle_excess_threshold_deg),
+        'half_window_mm': float(half_window_mm),
+        'tangent_span_mm': float(tangent_span_mm),
+        'candidate_generation_method': (
+            'web_atomic_segments_within_anatomical_segment'),
+        'candidate_count': int(sum(
+            len(items) for items in join_candidates.values())),
+        'events': events,
+    }
+    if not events:
+        previous = assignments.get('junction_smoothing')
+        if isinstance(previous, dict) and previous.get('applied'):
+            result = dict(previous)
+            candidate_lookup = {
+                (str(vessel), int(item['junction_node_id'])): item
+                for vessel, items in join_candidates.items()
+                for item in items
+            }
+            result['events'] = []
+            for previous_event in previous.get('events', ()):
+                event = dict(previous_event)
+                candidate = candidate_lookup.get((
+                    str(event.get('segment')),
+                    int(event.get('junction_node_id', -1)),
+                ))
+                if candidate is not None:
+                    event['atomic_segment_ids'] = list(
+                        candidate['atomic_segment_ids'])
+                    event['candidate_method'] = (
+                        'web_atomic_segments_within_anatomical_segment')
+                result['events'].append(event)
+            result['reused_existing'] = True
+            result['candidate_generation_method'] = (
+                'web_atomic_segments_within_anatomical_segment')
+            result['candidate_count'] = int(sum(
+                len(items) for items in join_candidates.values()))
+        return result
+
+    _refresh_assignment_geometry(assignments, nodes)
+    assignments['junction_smoothing'] = result
+    tree = [[
+        int(node_id),
+        float(node['x']), float(node['y']), float(node['z']),
+        int(node['parent']), int(node['left']), int(node['right']),
+    ] for node_id, node in sorted(nodes.items())]
+
+    centerline_path = feature_path(
+        parentdir, SMOOTH_CENTERLINE_NAME, create=True)
+    centerline_tmp = str(centerline_path) + '.tmp'
+    assignments_tmp = str(assignments_path) + '.tmp'
+    save_tree(tree, centerline_tmp)
+    with open(assignments_tmp, 'w', encoding='utf-8') as handle:
+        json.dump(assignments, handle, ensure_ascii=False, indent=2)
+    os.replace(centerline_tmp, centerline_path)
+    os.replace(assignments_tmp, assignments_path)
+    result['centerline_path'] = str(centerline_path)
+    result['segment_assignments_path'] = str(assignments_path)
+    return result
 
 
 # ============================================================

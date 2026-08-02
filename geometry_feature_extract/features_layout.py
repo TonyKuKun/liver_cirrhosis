@@ -1,6 +1,6 @@
 """Canonical on-disk layout for per-patient geometry results.
 
-Only the four public files are kept in ``<patient>/features``.
+Only canonical public files are kept in ``<patient>/features``.
 """
 
 from __future__ import annotations
@@ -15,12 +15,13 @@ SMOOTH_CENTERLINE_NAME = "newcenterline.txt"
 SEGMENT_ASSIGNMENTS_NAME = "segment_assignments.json"
 UNIFIED_FEATURES_NAME = "unified_features.json"
 UNIFIED_FEATURES_BACKUP_NAME = "unified_features0.json"
-POINTWISE_TEMP_NAME = ".pointwise_profiles.json"
+POINTWISE_TEMP_NAME = "pointwise_profiles.json"
 
 PUBLIC_FEATURE_NAMES = (
     RAW_CENTERLINE_NAME,
     SMOOTH_CENTERLINE_NAME,
     SEGMENT_ASSIGNMENTS_NAME,
+    POINTWISE_TEMP_NAME,
     UNIFIED_FEATURES_NAME,
     UNIFIED_FEATURES_BACKUP_NAME,
 )

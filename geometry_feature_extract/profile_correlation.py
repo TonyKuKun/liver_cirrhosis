@@ -3,7 +3,7 @@
 ============================================================
 新版变化:
   - 每个位置单独过滤 NaN 后再做 Spearman (跳过端点掩码)
-  - 输入文件: centerline_pointwise_profiles.json (与分段 JSON 区分)
+  - 输入文件: pointwise_profiles.json (与分段 JSON 区分)
   - 支持的分支: MPV / SV / SMV / LPV / RPV / TIPS / LGV / PGV
     (任何在 JSON 中存在的非 None 段都会被分析)
   - 自动跳过该患者缺失的段
@@ -75,7 +75,7 @@ TARGET_INFO = {
     'PCG': {'cn': '门静脉压力梯度', 'unit': 'mmHg'},
 }
 
-PROFILE_FILENAME = "centerline_pointwise_profiles.json"
+PROFILE_FILENAME = "pointwise_profiles.json"
 
 
 # ============================================================

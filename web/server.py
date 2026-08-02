@@ -109,7 +109,7 @@ LOCK = threading.Lock()
 GEOMETRY_STL_CACHE: dict[str, tuple[tuple, Path]] = {}
 GEOMETRY_STL_CACHE_LOCK = threading.Lock()
 GEOMETRY_VIEW_CACHE_NAME = ".portaflow_geometry_view.json.gz"
-GEOMETRY_VIEW_CACHE_VERSION = 5
+GEOMETRY_VIEW_CACHE_VERSION = 6
 GEOMETRY_VIEW_CACHE_LOCK = threading.Lock()
 
 

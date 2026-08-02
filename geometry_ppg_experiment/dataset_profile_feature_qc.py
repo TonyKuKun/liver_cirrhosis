@@ -33,7 +33,6 @@ PROFILE_ARRAY_KEYS = (
     "circularity",
     "solidity",
     "r_insc_to_r_eq_ratio",
-    "n_components",
     "junction_replaced",
     "curvature",
     "torsion",

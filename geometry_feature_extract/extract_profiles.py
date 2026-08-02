@@ -4,7 +4,7 @@
 不再做解剖识别, 直接读 centerline_profiles.json 拿到每段路径,
 对每段提取逐点剖面 (面积/周长/直径/圆度/曲率/内切半径)。
 
-输出文件: centerline_pointwise_profiles.json
+输出文件: pointwise_profiles.json
         (注意: 与分段文件 centerline_profiles.json 区分)
 
 支持的段:
@@ -29,6 +29,7 @@ from features_layout import (
     feature_path,
     resolve_feature_path,
 )
+from smooth_centerline import smooth_internal_anatomical_junctions
 
 
 # ============================================================
@@ -125,7 +126,9 @@ def _clip_convex_polygon_2d(vertices, normal, limit, tolerance=1e-9):
 def _centerline_voronoi_cell_2d(point, normal, centerline_coords,
                                 centerline_index, extent,
                                 local_exclusion_mm=5.0,
-                                centerline_arc_length=None):
+                                centerline_arc_length=None,
+                                competing_centerlines=None,
+                                site_radius_mm=0.0):
     """Return the current centerline site's 3-D Voronoi cell on a plane.
 
     Nearby sites along the curve are ignored because their bisectors would
@@ -156,25 +159,54 @@ def _centerline_voronoi_cell_2d(point, normal, centerline_coords,
     ], dtype=float)
     site = coords[index]
     local_exclusion_mm = max(0.0, float(local_exclusion_mm))
-    for other_index, other in enumerate(coords):
-        if other_index == index:
-            continue
-        if abs(float(arc[other_index] - arc[index])) <= local_exclusion_mm:
-            continue
+    def clip_against_site(vertices, other, other_radius_mm=0.0,
+                          weighted=False):
+        other = np.asarray(other, dtype=float)
+        if other.shape != (3,) or not np.all(np.isfinite(other)):
+            return vertices
         delta = other - site
         halfplane_normal = np.array([
             float(np.dot(delta, u)), float(np.dot(delta, v))
         ])
         if np.linalg.norm(halfplane_normal) <= 1e-10:
-            continue
+            return vertices
         limit = 0.5 * (
             float(np.dot(other - point, other - point))
             - float(np.dot(site - point, site - point))
         )
-        vertices = _clip_convex_polygon_2d(
-            vertices, halfplane_normal, limit)
+        if weighted:
+            limit += 0.5 * (
+                max(float(site_radius_mm), 0.0) ** 2
+                - max(float(other_radius_mm), 0.0) ** 2)
+        return _clip_convex_polygon_2d(vertices, halfplane_normal, limit)
+
+    for other_index, other in enumerate(coords):
+        if other_index == index:
+            continue
+        if abs(float(arc[other_index] - arc[index])) <= local_exclusion_mm:
+            continue
+        vertices = clip_against_site(vertices, other)
         if len(vertices) < 3:
             return None
+
+    # Internal side branches compete with the parent centreline at every
+    # section. Junction-local branch samples were removed when the network was
+    # built, so the remaining sites need no parent-arc exclusion here.
+    for competitor in competing_centerlines or []:
+        competitor_coords = (
+            competitor.get('centerline_coords')
+            if isinstance(competitor, dict) else competitor)
+        competitor_coords = np.asarray(competitor_coords, dtype=float)
+        if competitor_coords.ndim != 2 or competitor_coords.shape[1] != 3:
+            continue
+        for other in competitor_coords:
+            competitor_radius = (
+                float(competitor.get('radius_mm', 0.0))
+                if isinstance(competitor, dict) else 0.0)
+            vertices = clip_against_site(
+                vertices, other, competitor_radius, weighted=True)
+            if len(vertices) < 3:
+                return None
 
     cell = Polygon(vertices)
     if not cell.is_valid:
@@ -186,7 +218,9 @@ def _clip_section_to_centerline_voronoi(poly, center, point, normal,
                                         centerline_coords=None,
                                         centerline_index=None,
                                         local_exclusion_mm=5.0,
-                                        centerline_arc_length=None):
+                                        centerline_arc_length=None,
+                                        competing_centerlines=None,
+                                        site_radius_mm=0.0):
     """Keep only the section area owned by this centerline arc location."""
     if centerline_coords is None or centerline_index is None:
         return poly
@@ -195,7 +229,9 @@ def _clip_section_to_centerline_voronoi(poly, center, point, normal,
     cell = _centerline_voronoi_cell_2d(
         point, normal, centerline_coords, centerline_index, extent,
         local_exclusion_mm=local_exclusion_mm,
-        centerline_arc_length=centerline_arc_length)
+        centerline_arc_length=centerline_arc_length,
+        competing_centerlines=competing_centerlines,
+        site_radius_mm=site_radius_mm)
     if cell is None:
         return None
     return _pick_polygon_from_geometry(poly.intersection(cell), center)
@@ -306,7 +342,9 @@ def _section_one(mesh, point, normal, max_eq_diameter=None,
                  return_raw=False, return_extras=False,
                  centerline_coords=None, centerline_index=None,
                  centerline_voronoi_exclusion_mm=5.0,
-                 centerline_arc_length=None):
+                 centerline_arc_length=None,
+                 competing_centerlines=None,
+                 centerline_site_radius_mm=0.0):
     """
     用一个法线做截面, 返回截面几何 + 形状质量指标。
 
@@ -321,8 +359,6 @@ def _section_one(mesh, point, normal, max_eq_diameter=None,
       - circularity:  4πA/P². 1.0 = 完美圆; <0.3 形状极不规则.
 
     额外形状感知量 (return_extras=True, 用于 PVT / 血栓识别):
-      - n_components: 切平面下"有效闭合多边形"个数. 正常血管 = 1;
-                      血栓把管腔从中间隔断 → 2+; 圆环形血栓 = 1 (仍连通).
       - solidity:     所选多边形面积 / 其凸包面积 ∈ (0, 1].
                       凸截面 (圆/椭圆) = 1; 月牙/凹缺口形 < 1; 越小代表
                       凹缺口越深 (典型 PVT 边缘血栓).
@@ -343,7 +379,7 @@ def _section_one(mesh, point, normal, max_eq_diameter=None,
         return_ring:     是否同时返回 2D 多边形轮廓 (用于可视化)
         return_metrics:  是否同时返回 (aspect_ratio, circularity)
         return_raw:      是否追加原始未裁剪的 area/perimeter 与锚定半径
-        return_extras:   是否同时返回 (n_components, solidity)
+        return_extras:   是否同时返回 (solidity,)
 
     返回 (按 flag 组合, extras 永远放在末尾, 不影响既有调用方):
         默认                                            (area, peri)
@@ -351,11 +387,11 @@ def _section_one(mesh, point, normal, max_eq_diameter=None,
         return_ring=True                                (area, peri, ring_2d)
         return_ring=True, return_metrics=True           (area, peri, AR, circ, ring_2d)
         return_raw=True 时, 再追加 (raw_area, raw_peri, anchor_r, owned_r)
-        return_extras=True 时, 最后追加 (n_components, solidity)
+        return_extras=True 时, 最后追加 (solidity,)
         失败时各位置填 0/0/999/0/None/0/0
     """
     base_fail = (0.0, 0.0)
-    extras_fail = (0, 0.0)
+    extras_fail = (0.0,)
     if return_ring and return_metrics:
         fail = (0.0, 0.0, 999.0, 0.0, None)
     elif return_metrics:
@@ -461,7 +497,9 @@ def _section_one(mesh, point, normal, max_eq_diameter=None,
                 centerline_coords=centerline_coords,
                 centerline_index=centerline_index,
                 local_exclusion_mm=centerline_voronoi_exclusion_mm,
-                centerline_arc_length=centerline_arc_length)
+                centerline_arc_length=centerline_arc_length,
+                competing_centerlines=competing_centerlines,
+                site_radius_mm=centerline_site_radius_mm)
             if section_poly is None or section_poly.is_empty:
                 continue
             effective_ownership_factor = (
@@ -524,10 +562,6 @@ def _section_one(mesh, point, normal, max_eq_diameter=None,
                 circularity = 0.0
 
         if return_extras:
-            # n_components: 切平面下"有效非微小"多边形数 (lumen 是否被血栓隔断)
-            # 不考虑跨血管 — 跨血管候选会在后续 shape filter 中被剔除
-            n_components = int(len(nontrivial)) if nontrivial else 1
-
             # solidity: 所选多边形面积 / 其凸包面积
             # 凸 (圆/椭圆) = 1.0; 月牙/凹缺口 < 1.0
             solidity = 1.0
@@ -541,7 +575,7 @@ def _section_one(mesh, point, normal, max_eq_diameter=None,
                         solidity = float(min(1.0, area / hull_area))
             except Exception:
                 solidity = 1.0
-            extras_tuple = (n_components, solidity)
+            extras_tuple = (solidity,)
 
         if return_ring and return_metrics:
             base = (area, peri, aspect_ratio, circularity, owned_ring_2d_list)
@@ -734,7 +768,8 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
                                 branch_coords=None,
                                 max_section_samples=None,
                                 normal_search_policy=None,
-                                centerline_voronoi_exclusion_mm=5.0):
+                                centerline_voronoi_exclusion_mm=5.0,
+                                network_voronoi_centerlines=None):
     """
     沿一段中心线提取逐点剖面.
 
@@ -771,7 +806,6 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
     anchor_radius = np.zeros(M)
     owned_radius = np.zeros(M)
     solidity = np.zeros(M)            # (新) area / convex_hull_area
-    n_components = np.zeros(M, dtype=np.int16)  # (新) lumen 连通分量数
     # Persist the selected plane normal so the Web surface contour can replay
     # the same section rather than falling back to a tangent-derived circle.
     section_normal = tangents.copy()
@@ -788,7 +822,7 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
     normal_search_counts = {'deterministic': len(indices)}
     normal_search_candidates = len(indices)
     for idx in indices:
-        a, p, ar, circ, raw_a, raw_p, anchor_r, owned_r, ncomp, sol = _section_one(
+        a, p, ar, circ, raw_a, raw_p, anchor_r, owned_r, sol = _section_one(
             mesh, coords[idx], tangents[idx],
             max_eq_diameter=None,
             min_eq_diameter=None,
@@ -799,7 +833,9 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
             centerline_coords=coords,
             centerline_index=idx,
             centerline_voronoi_exclusion_mm=centerline_voronoi_exclusion_mm,
-            centerline_arc_length=arc_length)
+            centerline_arc_length=arc_length,
+            competing_centerlines=network_voronoi_centerlines,
+            centerline_site_radius_mm=float(inscribed_radius[idx]))
         area[idx] = a
         perimeter[idx] = p
         raw_area[idx] = raw_a
@@ -807,7 +843,6 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
         anchor_radius[idx] = anchor_r
         owned_radius[idx] = owned_r
         solidity[idx] = sol
-        n_components[idx] = ncomp
         section_normal[idx] = tangents[idx]
         section_normal_offset_deg[idx] = 0.0
         if a > 0:
@@ -879,7 +914,6 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
         'hydraulic_diameter': hydraulic_diameter,
         'circularity': circularity,
         'solidity': solidity,
-        'n_components': n_components.astype(float),  # 便于和其它通道共用插值
         'r_insc_to_r_eq_ratio': r_insc_to_r_eq_ratio,
         'curvature': curvature,
         'torsion': torsion,
@@ -889,7 +923,9 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
         '_normal_search_policy': search_policy,
         '_normal_search_counts': normal_search_counts,
         '_normal_search_candidate_count': int(normal_search_candidates),
-        '_section_assignment_method': 'centerline_voronoi',
+        '_section_assignment_method': (
+            'centerline_network_voronoi'
+            if network_voronoi_centerlines else 'centerline_voronoi'),
         '_centerline_voronoi_exclusion_mm': float(
             centerline_voronoi_exclusion_mm),
         '_n_success': n_success,
@@ -902,26 +938,75 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
     }
 
 
+def _contiguous_index_runs(mask):
+    indices = np.where(np.asarray(mask, dtype=bool))[0]
+    if len(indices) == 0:
+        return []
+    split_at = np.where(np.diff(indices) > 1)[0] + 1
+    return [group for group in np.split(indices, split_at) if len(group)]
+
+
+def _resample_valid_section_runs(t_raw, values, valid, t_target,
+                                 kind='linear'):
+    """Resample only inside contiguous successful runs, never across gaps."""
+    values = np.asarray(values, dtype=float)
+    output = np.zeros(len(t_target), dtype=float)
+    if len(values) != len(t_raw):
+        return output
+    if len(t_target) == len(t_raw) and np.allclose(
+            t_target, t_raw, rtol=0.0, atol=1e-12):
+        output[:] = values
+        output[~np.asarray(valid, dtype=bool)] = 0.0
+        return output
+    for run in _contiguous_index_runs(valid):
+        if len(run) == 1:
+            nearest = int(np.argmin(np.abs(t_target - t_raw[run[0]])))
+            output[nearest] = float(values[run[0]])
+            continue
+        target_mask = (
+            (t_target >= t_raw[run[0]]) & (t_target <= t_raw[run[-1]])
+        )
+        if not np.any(target_mask):
+            continue
+        output[target_mask] = interp1d(
+            t_raw[run], values[run], kind=kind,
+            bounds_error=False, fill_value=0.0)(t_target[target_mask])
+    return np.clip(output, 0.0, None)
+
+
+def _normalized_area_gradient(area, arc):
+    """Compute (dA/ds)/A independently inside each valid section run."""
+    area = np.asarray(area, dtype=float)
+    arc = np.asarray(arc, dtype=float)
+    output = np.zeros(len(area), dtype=float)
+    if (len(area) != len(arc) or len(area) < 2
+            or not np.all(np.diff(arc) > 0)):
+        return output
+    valid = np.isfinite(area) & (area > 0) & np.isfinite(arc)
+    for run in _contiguous_index_runs(valid):
+        if len(run) < 2:
+            continue
+        grad = np.gradient(area[run], arc[run])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            normalized = grad / area[run]
+        normalized[~np.isfinite(normalized)] = 0.0
+        output[run] = normalized
+    return output
+
+
 def _refresh_dA_ds_norm(profile):
     """根据当前 area 重新计算归一化面积变化率。"""
     try:
         area = np.asarray(profile.get('area', []), dtype=float)
         arc = np.asarray(profile.get('arc_length_mm', []), dtype=float)
-        if len(area) != len(arc) or len(area) < 3 or not np.all(np.diff(arc) > 0):
+        if len(area) != len(arc) or len(area) < 2:
             return
-        if np.sum(np.isfinite(area) & (area > 0)) < 3:
-            profile['dA_ds_norm'] = [0.0] * len(area)
-            return
-        grad = np.gradient(area, arc)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            dA_ds = grad / np.where(area > 1e-6, area, np.nan)
-        dA_ds[(area <= 0) | ~np.isfinite(area)] = 0.0
-        profile['dA_ds_norm'] = dA_ds.tolist()
+        profile['dA_ds_norm'] = _normalized_area_gradient(area, arc).tolist()
     except Exception:
         return
 
 
-def _resample_profile(raw_profile, n_points=100):
+def _resample_profile(raw_profile, n_points=200):
     """
     重采样到 n_points (沿弧长均匀)。
 
@@ -1026,60 +1111,32 @@ def _resample_profile(raw_profile, n_points=100):
         elif len(values) == 1:
             result[key] = [float(values[0])] * n_points
 
-    # 哪些 key 需要"只用有效值插值"(截面计算的, 0 值代表缺失)
+    # Section-derived channels retain explicit zero gaps. They are interpolated
+    # only within contiguous successful runs when the output grid changes.
     section_keys = {'area', 'perimeter', 'eq_diameter', 'circularity',
                     'hydraulic_diameter', 'solidity',
                     'raw_area', 'raw_perimeter', 'raw_eq_diameter',
-                    'anchor_radius', 'owned_radius'}
+                    'anchor_radius', 'owned_radius',
+                    'r_insc_to_r_eq_ratio'}
     # 哪些 key 直接用所有点(中心线本身的几何, 没有 0 值问题)
-    geometry_keys = {'curvature', 'inscribed_radius', 'r_insc_to_r_eq_ratio'}
+    geometry_keys = {'curvature', 'inscribed_radius'}
     # 整数离散 (lumen 分量数), 用最近邻
-    integer_keys = {'n_components'}
     # 含 NaN 的几何 (挠率), 单独处理 — NaN 不参与插值
     nanable_keys = {'torsion'}
 
     # 用 area > 0 作为"截面成功"的掩码
     area_arr = np.asarray(raw_profile['area'])
     success_mask = area_arr > 0
-    n_success = int(np.sum(success_mask))
 
-    available_keys = section_keys | geometry_keys | integer_keys | nanable_keys
+    available_keys = section_keys | geometry_keys | nanable_keys
     available_keys = {k for k in available_keys if k in raw_profile}
 
     for key in available_keys:
         values = np.asarray(raw_profile[key])
         try:
             if key in section_keys:
-                # 只用截面成功的原始点插值
-                if n_success >= 2:
-                    t_valid = t_raw[success_mask]
-                    v_valid = values[success_mask]
-                    # 去重 (单调要求)
-                    mask = np.concatenate(([True], np.diff(t_valid) > 1e-10))
-                    t_c, v_c = t_valid[mask], v_valid[mask]
-                    f = interp1d(t_c, v_c, kind='linear',
-                                 bounds_error=False,
-                                 fill_value=(v_c[0], v_c[-1]))
-                    resampled = np.clip(f(t_uniform), 0, None)
-                elif n_success == 1:
-                    resampled = np.full(n_points, float(values[success_mask][0]))
-                else:
-                    resampled = np.full(n_points, np.nan)
-            elif key in integer_keys:
-                # 离散整数: 用最近邻插值 (取整) + 端点延拓
-                if n_success >= 2:
-                    t_valid = t_raw[success_mask]
-                    v_valid = values[success_mask]
-                    mask = np.concatenate(([True], np.diff(t_valid) > 1e-10))
-                    t_c, v_c = t_valid[mask], v_valid[mask]
-                    f = interp1d(t_c, v_c, kind='nearest',
-                                 bounds_error=False,
-                                 fill_value=(v_c[0], v_c[-1]))
-                    resampled = np.clip(f(t_uniform), 0, None)
-                elif n_success == 1:
-                    resampled = np.full(n_points, float(values[success_mask][0]))
-                else:
-                    resampled = np.full(n_points, np.nan)
+                resampled = _resample_valid_section_runs(
+                    t_raw, values, success_mask, t_uniform, kind='linear')
             elif key in nanable_keys:
                 # NaN-aware: 跳过 NaN 做线性插值, 不可信处仍保留 NaN
                 finite = np.isfinite(values)
@@ -1116,23 +1173,15 @@ def _resample_profile(raw_profile, n_points=100):
             result[key] = ([float('nan')] * n_points
                            if key in nanable_keys else [0.0] * n_points)
 
-    # ---- dA/ds 归一化变化率 (沿重采样均匀点计算, 数值稳定) ----
+    # ---- dA/ds is computed independently inside each successful run ----
     try:
         area_uniform = np.asarray(result.get('area', [0.0] * n_points),
                                    dtype=float)
         arc_uniform = np.asarray(result['arc_length_mm'], dtype=float)
-        if np.sum(area_uniform > 0) >= 3 and np.all(np.diff(arc_uniform) > 0):
-            grad = np.gradient(area_uniform, arc_uniform)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                dA_ds = grad / np.where(area_uniform > 1e-6,
-                                         area_uniform, np.nan)
-            # 缺失区段置 NaN, 不污染下游
-            dA_ds[area_uniform <= 0] = np.nan
-            result['dA_ds_norm'] = dA_ds.tolist()
-        else:
-            result['dA_ds_norm'] = [float('nan')] * n_points
+        result['dA_ds_norm'] = _normalized_area_gradient(
+            area_uniform, arc_uniform).tolist()
     except Exception:
-        result['dA_ds_norm'] = [float('nan')] * n_points
+        result['dA_ds_norm'] = [0.0] * n_points
 
     return result
 
@@ -1345,7 +1394,11 @@ def _build_clinical_junction_plan(seg_data, nodes, coords_by_seg, radii_by_seg,
             if not connected:
                 continue
             receiving = _choose_receiving_vessel(vessel, node_id, paths)
-            radius_sources = ([receiving] if receiving else connected)
+            internal_receivers = [
+                name for name in connected
+                if _path_internal_contains(paths[name], node_id)
+            ]
+            radius_sources = [vessel, *connected]
             candidate_radii = [
                 radii_by_seg.get(name) for name in radius_sources
                 if radii_by_seg.get(name) is not None
@@ -1354,21 +1407,22 @@ def _build_clinical_junction_plan(seg_data, nodes, coords_by_seg, radii_by_seg,
             radius = max(candidate_radii) if candidate_radii else None
             if radius is None or radius <= 0:
                 continue
-            max_distance = float(2.0 * endpoint_factor * radius)
             plan[vessel]['endpoint_junctions'].append({
                 'side': side,
                 'junction_node_id': int(node_id),
+                'junction_type': (
+                    'side_branch_endpoint'
+                    if internal_receivers else 'shared_endpoint'),
                 'receiving_vessel': receiving,
                 'connected_vessels': connected,
                 'receiving_median_radius_mm': float(radius),
-                'max_search_distance_mm': max_distance,
             })
 
     for side_vessel, side_path in paths.items():
         side_radius = radii_by_seg.get(side_vessel)
         if side_radius is None or side_radius <= 0:
             continue
-        for node_id in (side_path[0], side_path[-1]):
+        for side, node_id in (('start', side_path[0]), ('end', side_path[-1])):
             node = nodes.get(int(node_id))
             if node is None:
                 continue
@@ -1388,6 +1442,7 @@ def _build_clinical_junction_plan(seg_data, nodes, coords_by_seg, radii_by_seg,
                 main_radius = radii_by_seg.get(main_vessel)
                 plan[main_vessel]['side_branch_anchors'].append({
                     'side_branch': side_vessel,
+                    'side_branch_junction_side': side,
                     'junction_node_id': int(node_id),
                     'side_branch_median_radius_mm': float(side_radius),
                     'parent_median_radius_mm': (
@@ -1410,129 +1465,47 @@ def _shift_side_branch_anchors(anchors, arc_offset_mm, effective_total_mm):
     return shifted
 
 
-def _contiguous_true_runs(mask):
-    """Return inclusive index ranges for each contiguous True run."""
-    indices = np.where(np.asarray(mask, dtype=bool))[0]
-    if len(indices) == 0:
-        return []
-    splits = np.where(np.diff(indices) > 1)[0] + 1
-    return [(int(group[0]), int(group[-1]))
-            for group in np.split(indices, splits) if len(group)]
-
-
-def _mask_side_branch_junction_sections(
-        profile, anchors, ratio_threshold=1.8, min_persistence_mm=1.0):
-    """Zero the detected interval around each known side-branch junction.
-
-    The two critical indices are detected from the high-area run connected to
-    the anatomical junction. The inclusive interval between them is the only
-    internal interval removed from the pointwise profile.
-    """
-    n = len(profile.get('position', []))
-    area = np.asarray(profile.get('area', []), dtype=float)
-    arc = np.asarray(profile.get('arc_length_mm', []), dtype=float)
-    if n < 5 or len(area) != n or len(arc) != n or not anchors:
-        profile['side_branch_contamination_mask'] = [0.0] * n
-        profile['side_branch_contamination_events'] = []
-        profile['n_side_branch_contamination_masked'] = 0
-        profile['n_side_branch_junction_zeroed'] = 0
-        return profile
-
-    ratio_threshold = max(float(ratio_threshold), 1.01)
-    min_persistence_mm = max(float(min_persistence_mm), 0.0)
-    spacing = float(np.median(np.diff(arc)))
-    valid = np.isfinite(area) & (area > 0)
-    combined_mask = np.zeros(n, dtype=bool)
-    events = []
-
-    for anchor in anchors:
-        center = float(anchor.get('arc_center_mm', -1.0))
-        side_radius = float(anchor.get('side_branch_median_radius_mm') or 0.0)
-        parent_radius = float(anchor.get('parent_median_radius_mm') or 0.0)
-        margin_factor = float(anchor.get('local_margin_factor') or 1.25)
-        if not (0.0 < center < float(arc[-1])) or side_radius <= 0:
+def _build_network_voronoi_centerlines(
+        anchors, coords_by_seg, radii_by_seg, n_points,
+        junction_exclusion_mm=5.0):
+    """Return unique side-branch centrelines competing with a parent vessel."""
+    competitors = []
+    seen = set()
+    for anchor in anchors or []:
+        segment = str(anchor.get('side_branch') or '')
+        if not segment or segment in seen:
             continue
-
-        # The search band is deliberately local.  Reference windows start
-        # outside it, preventing the contaminated overlap from biasing the
-        # parent-vessel baseline.
-        search_half = max(2.0 * spacing, margin_factor * side_radius,
-                          0.75 * parent_radius, 2.0)
-        max_half = max(search_half, 2.0 * margin_factor * side_radius,
-                       1.25 * parent_radius, 4.0)
-        max_half = min(max_half, 0.20 * float(arc[-1]))
-        reference_width = max(2.0 * spacing, side_radius, 2.0)
-        left_ref = _window_median(
-            area, arc, valid, center - max_half - reference_width,
-            center - max_half)
-        right_ref = _window_median(
-            area, arc, valid, center + max_half,
-            center + max_half + reference_width)
-        if left_ref is None and right_ref is None:
+        coords = coords_by_seg.get(segment)
+        if coords is None or len(coords) < 2:
             continue
-
-        local = valid & (np.abs(arc - center) <= max_half)
-        expected = np.full(n, np.nan, dtype=float)
-        if left_ref is not None and right_ref is not None:
-            span = max(2.0 * max_half, np.finfo(float).eps)
-            weight = np.clip((arc - (center - max_half)) / span, 0.0, 1.0)
-            expected = left_ref + weight * (right_ref - left_ref)
+        sampled = _resample_coords_by_arc(coords, n_points)
+        if sampled is None or len(sampled) < 2:
+            continue
+        arc = _arc_length_for_coords(sampled)
+        exclusion = max(0.0, float(junction_exclusion_mm))
+        if anchor.get('side_branch_junction_side') == 'end':
+            keep = (float(arc[-1]) - arc) > exclusion
         else:
-            expected[:] = left_ref if left_ref is not None else right_ref
-        high = local & (area >= ratio_threshold * expected)
-
-        # Select only a high-area run connected to the anatomical insertion.
-        # Remote high runs inside the search band remain untouched.
-        anchor_tolerance = max(1.5 * spacing, 0.5 * side_radius)
-        selected = []
-        for start, end in _contiguous_true_runs(high):
-            run_start, run_end = float(arc[start]), float(arc[end])
-            if run_end - run_start + spacing < min_persistence_mm:
-                continue
-            if run_start - anchor_tolerance <= center <= run_end + anchor_tolerance:
-                selected.append((start, end))
-        if not selected:
+            keep = arc > exclusion
+        sampled = sampled[keep]
+        if len(sampled) < 1:
             continue
-
-        for start, end in selected:
-            combined_mask[start:end + 1] = True
-            junction_index = int(np.argmin(np.abs(arc - center)))
-            baseline_values = [x for x in (left_ref, right_ref) if x is not None]
-            events.append({
-                'type': 'side_branch_interval_zeroed',
-                'side_branch': anchor.get('side_branch'),
-                'junction_node_id': anchor.get('junction_node_id'),
-                'junction_index': junction_index,
-                'critical_start_index': int(start),
-                'critical_end_index': int(end),
-                'arc_center_mm': center,
-                'arc_start_mm': float(arc[start]),
-                'arc_end_mm': float(arc[end]),
-                'area_ratio': float(np.median(area[start:end + 1]) /
-                                    np.median(baseline_values)),
-            })
-
-    _mask_profile_sections(profile, combined_mask)
-    marker = np.asarray(profile.get('junction_replaced', [0.0] * n), dtype=float)
-    if len(marker) != n:
-        marker = np.zeros(n, dtype=float)
-    marker[combined_mask] = 1.0
-    profile['junction_replaced'] = marker.tolist()
-    profile['side_branch_contamination_mask'] = combined_mask.astype(float).tolist()
-    profile['side_branch_contamination_events'] = events
-    profile['n_side_branch_contamination_masked'] = int(np.sum(combined_mask))
-    profile['n_side_branch_junction_zeroed'] = int(np.sum(combined_mask))
-    profile['n_junction_replaced'] = int(np.sum(marker > 0))
-    profile['junction_policy'] = 'side_branch_critical_interval_zeroed'
-    _refresh_dA_ds_norm(profile)
-    return profile
+        competitors.append({
+            'segment': segment,
+            'junction_node_id': int(anchor.get('junction_node_id')),
+            'junction_exclusion_mm': exclusion,
+            'radius_mm': float(radii_by_seg.get(segment) or 0.0),
+            'centerline_coords': np.asarray(sampled, dtype=float),
+        })
+        seen.add(segment)
+    return competitors
 
 
 _SECTION_MASK_KEYS = [
     'area', 'perimeter', 'eq_diameter',
     'anchor_radius', 'owned_radius',
     'circularity', 'hydraulic_diameter', 'solidity',
-    'r_insc_to_r_eq_ratio', 'n_components',
+    'r_insc_to_r_eq_ratio',
     'raw_area', 'raw_perimeter', 'raw_eq_diameter',
     'inscribed_radius', 'dA_ds_norm',
 ]
@@ -1564,133 +1537,157 @@ def _window_median(values, arc, valid, start_mm, end_mm):
 
 
 def _adjacent_valid_median(values, valid, boundary, side, n_points=5):
-    """Median of the nearest valid samples on the interior side of a boundary."""
+    """Median of up to ``n_points`` interior samples nearest a boundary."""
     count = max(1, int(n_points))
     valid_indices = np.where(np.asarray(valid, dtype=bool))[0]
     if side == 'start':
         nearby = valid_indices[valid_indices > int(boundary)][:count]
     else:
         nearby = valid_indices[valid_indices < int(boundary)][-count:]
-    if len(nearby) < min(3, count):
+    if len(nearby) == 0:
+        return None
+    return float(np.median(np.asarray(values, dtype=float)[nearby]))
+
+
+def _terminal_valid_median(values, valid, boundary, side, n_points=5):
+    """Median of available samples immediately on the junction side."""
+    count = max(1, int(n_points))
+    valid_indices = np.where(np.asarray(valid, dtype=bool))[0]
+    if side == 'start':
+        nearby = valid_indices[valid_indices <= int(boundary)][-count:]
+    else:
+        nearby = valid_indices[valid_indices >= int(boundary)][:count]
+    if len(nearby) == 0:
         return None
     return float(np.median(np.asarray(values, dtype=float)[nearby]))
 
 
 def _detect_terminal_area_jump(area, arc, valid, side, ratio_threshold,
-                               window_mm, min_persistence_mm,
-                               max_terminal_extension_mm,
                                reference_points=5):
-    """Find a persistent high-area terminal run relative to the segment interior."""
+    """Find an area transition that is actually anchored at a terminal end.
+
+    The previous implementation only compared the median of the complete
+    endpoint prefix/suffix with the next interior samples.  A gradual taper
+    could therefore make a remote low-area section look like an endpoint
+    junction and mask most of the vessel.  First require the physical endpoint
+    itself to be enlarged relative to the vessel's valid median area.  Only
+    then scan the complete path with the existing area-ratio policy.  This
+    preserves long or gradual true junction transitions without allowing a
+    low area near the opposite end to create a false terminal event.
+    """
     total = float(arc[-1]) if len(arc) else 0.0
-    max_extent = min(float(max_terminal_extension_mm), 0.35 * total)
-    if total <= 0 or max_extent < min_persistence_mm:
+    if total <= 0:
+        return None
+
+    valid_indices = np.where(np.asarray(valid, dtype=bool))[0]
+    if len(valid_indices) == 0:
+        return None
+    endpoint_index = int(valid_indices[0] if side == 'start'
+                         else valid_indices[-1])
+    endpoint_value = float(area[endpoint_index])
+    interior_reference = float(np.median(area[valid_indices]))
+    if (interior_reference <= 0
+            or endpoint_value / interior_reference < ratio_threshold):
         return None
 
     candidates = []
     if side == 'start':
-        boundary_indices = np.where(
-            (arc >= min_persistence_mm) & (arc <= max_extent))[0]
+        boundary_indices = np.arange(len(arc), dtype=int)
         for boundary in boundary_indices:
             edge = valid & (arc <= arc[boundary])
             reference = _adjacent_valid_median(
                 area, valid, boundary, 'start', reference_points)
-            if np.sum(edge) < 2 or reference is None or reference <= 0:
+            terminal = _terminal_valid_median(
+                area, valid, boundary, 'start', reference_points)
+            if (np.sum(edge) < 1 or reference is None or reference <= 0
+                    or terminal is None):
                 continue
             edge_values = area[edge]
             edge_median = float(np.median(edge_values))
-            ratio = edge_median / reference
-            far_reference = _window_median(
-                area, arc, valid, total - window_mm, total)
-            if (far_reference is not None and far_reference > 0
-                    and edge_median / far_reference <= 1.35):
-                # A high-low-high pattern is a possible stenosis/thrombus,
-                # not a terminal transition into a larger vessel.
-                continue
-            high_fraction = float(np.mean(
-                edge_values >= ratio_threshold * reference))
-            if ratio >= ratio_threshold and high_fraction >= 0.60:
-                candidates.append((int(boundary), ratio))
+            overall_ratio = edge_median / reference
+            local_ratio = terminal / reference
+            if overall_ratio >= ratio_threshold:
+                candidates.append(
+                    (int(boundary), overall_ratio, local_ratio))
     else:
-        boundary_indices = np.where(
-            (total - arc >= min_persistence_mm)
-            & (total - arc <= max_extent))[0]
+        boundary_indices = np.arange(len(arc), dtype=int)
         for boundary in boundary_indices:
             edge = valid & (arc >= arc[boundary])
             reference = _adjacent_valid_median(
                 area, valid, boundary, 'end', reference_points)
-            if np.sum(edge) < 2 or reference is None or reference <= 0:
+            terminal = _terminal_valid_median(
+                area, valid, boundary, 'end', reference_points)
+            if (np.sum(edge) < 1 or reference is None or reference <= 0
+                    or terminal is None):
                 continue
             edge_values = area[edge]
             edge_median = float(np.median(edge_values))
-            ratio = edge_median / reference
-            far_reference = _window_median(area, arc, valid, 0.0, window_mm)
-            if (far_reference is not None and far_reference > 0
-                    and edge_median / far_reference <= 1.35):
-                continue
-            high_fraction = float(np.mean(
-                edge_values >= ratio_threshold * reference))
-            if ratio >= ratio_threshold and high_fraction >= 0.60:
-                candidates.append((int(boundary), ratio))
+            overall_ratio = edge_median / reference
+            local_ratio = terminal / reference
+            if overall_ratio >= ratio_threshold:
+                candidates.append(
+                    (int(boundary), overall_ratio, local_ratio))
 
     if not candidates:
         return None
-    # The first threshold crossing from the junction is the clinical boundary.
-    # Continuing the scan can consume normal vessel taper beyond the transition.
+    # Multi-step confluences can produce several valid candidates. Select the
+    # strongest local area transition; for equal ratios prefer the boundary
+    # farthest from the junction before applying the fixed six-point padding.
     if side == 'start':
-        return min(candidates, key=lambda item: item[0])
-    return max(candidates, key=lambda item: item[0])
+        selected = max(candidates, key=lambda item: (item[2], item[0]))
+    else:
+        selected = max(candidates, key=lambda item: (item[2], -item[0]))
+    return selected[0], selected[1]
 
 
 def _mask_endpoint_junction_sections(
-        profile, ratio_threshold=1.6, window_mm=6.0,
-        min_persistence_mm=4.0, max_terminal_extension_mm=15.0,
+        profile, ratio_threshold=1.6,
         allow_terminal_start=True, allow_terminal_end=True,
-        max_terminal_start_extension_mm=None,
-        max_terminal_end_extension_mm=None,
-        terminal_padding_sections=6, terminal_reference_points=5):
-    """Zero each junction endpoint through its critical index plus padding."""
+        terminal_padding_sections=6, terminal_reference_points=5,
+        protected_side_branch_arcs=None,
+        side_branch_protection_mm=5.0):
+    """Zero each junction endpoint using the unowned STL section area."""
     if profile is None:
         return profile
     n = len(profile.get('position', []))
-    area = np.asarray(profile.get('area', []), dtype=float)
+    raw_area = np.asarray(profile.get('raw_area', []), dtype=float)
     arc = np.asarray(profile.get('arc_length_mm', []), dtype=float)
-    if n < 5 or len(area) != n or len(arc) != n or not np.all(np.diff(arc) > 0):
+    if (n < 5 or len(raw_area) != n or len(arc) != n
+            or not np.all(np.diff(arc) > 0)):
         return profile
 
     ratio_threshold = max(float(ratio_threshold), 1.01)
-    window_mm = max(float(window_mm), 0.1)
-    min_persistence_mm = max(float(min_persistence_mm), 0.0)
-    max_terminal_extension_mm = max(
-        float(max_terminal_extension_mm), min_persistence_mm)
-    start_extension_mm = max(
-        min_persistence_mm,
-        float(max_terminal_start_extension_mm)
-        if max_terminal_start_extension_mm is not None
-        else max_terminal_extension_mm)
-    end_extension_mm = max(
-        min_persistence_mm,
-        float(max_terminal_end_extension_mm)
-        if max_terminal_end_extension_mm is not None
-        else max_terminal_extension_mm)
     terminal_padding_sections = max(0, int(terminal_padding_sections))
-    terminal_reference_points = max(3, int(terminal_reference_points))
+    terminal_reference_points = max(1, int(terminal_reference_points))
+    protected_arcs = sorted(
+        float(value) for value in (protected_side_branch_arcs or [])
+        if np.isfinite(value) and float(arc[0]) < float(value) < float(arc[-1]))
+    side_branch_protection_mm = max(0.0, float(side_branch_protection_mm))
     existing_junction = np.asarray(
         profile.get('junction_replaced', [0.0] * n), dtype=float)
     if len(existing_junction) != n:
         existing_junction = np.zeros(n, dtype=float)
-    valid = np.isfinite(area) & (area > 0) & (existing_junction <= 0)
+    valid = (
+        np.isfinite(raw_area) & (raw_area > 0) & (existing_junction <= 0))
 
     terminal_mask = np.zeros(n, dtype=bool)
     events = []
     start_event = None
     if allow_terminal_start:
         start_event = _detect_terminal_area_jump(
-            area, arc, valid, 'start', ratio_threshold, window_mm,
-            min_persistence_mm, start_extension_mm,
+            raw_area, arc, valid, 'start', ratio_threshold,
             reference_points=terminal_reference_points)
     if start_event is not None:
         boundary, ratio = start_event
         padded_boundary = min(n - 1, boundary + terminal_padding_sections)
+        original_padded_boundary = padded_boundary
+        protected_arc = None
+        if protected_arcs:
+            protected_arc = protected_arcs[0]
+            maximum_mask_arc = protected_arc - side_branch_protection_mm
+            topology_limit = int(np.searchsorted(
+                arc, maximum_mask_arc, side='right') - 1)
+            padded_boundary = min(padded_boundary, max(0, topology_limit))
         terminal_mask[:padded_boundary + 1] = True
         events.append({
             'type': 'endpoint_start_interval_zeroed',
@@ -1702,17 +1699,28 @@ def _mask_endpoint_junction_sections(
             'detected_arc_end_mm': float(arc[boundary]),
             'endpoint_padding_sections': terminal_padding_sections,
             'area_ratio': float(ratio),
+            'side_branch_topology_clamped': bool(
+                padded_boundary != original_padded_boundary),
+            'protected_side_branch_arc_mm': protected_arc,
         })
 
     end_event = None
     if allow_terminal_end:
         end_event = _detect_terminal_area_jump(
-            area, arc, valid, 'end', ratio_threshold, window_mm,
-            min_persistence_mm, end_extension_mm,
+            raw_area, arc, valid, 'end', ratio_threshold,
             reference_points=terminal_reference_points)
     if end_event is not None:
         boundary, ratio = end_event
         padded_boundary = max(0, boundary - terminal_padding_sections)
+        original_padded_boundary = padded_boundary
+        protected_arc = None
+        if protected_arcs:
+            protected_arc = protected_arcs[-1]
+            minimum_mask_arc = protected_arc + side_branch_protection_mm
+            topology_limit = int(np.searchsorted(
+                arc, minimum_mask_arc, side='left'))
+            padded_boundary = max(
+                padded_boundary, min(n - 1, topology_limit))
         terminal_mask[padded_boundary:] = True
         events.append({
             'type': 'endpoint_end_interval_zeroed',
@@ -1723,6 +1731,9 @@ def _mask_endpoint_junction_sections(
             'detected_arc_start_mm': float(arc[boundary]),
             'arc_end_mm': float(arc[-1]), 'area_ratio': float(ratio),
             'endpoint_padding_sections': terminal_padding_sections,
+            'side_branch_topology_clamped': bool(
+                padded_boundary != original_padded_boundary),
+            'protected_side_branch_arc_mm': protected_arc,
         })
 
     _mask_profile_sections(profile, terminal_mask)
@@ -1740,16 +1751,14 @@ def _mask_endpoint_junction_sections(
     profile['n_area_jump_interpolated'] = 0
     profile['n_area_drop_candidates'] = 0
     profile['area_jump_parameters'] = {
+        'area_channel': 'raw_area',
         'ratio_threshold': ratio_threshold,
-        'window_mm': window_mm,
-        'min_persistence_mm': min_persistence_mm,
-        'max_terminal_extension_mm': max_terminal_extension_mm,
-        'max_terminal_start_extension_mm': start_extension_mm,
-        'max_terminal_end_extension_mm': end_extension_mm,
         'allow_terminal_start': bool(allow_terminal_start),
         'allow_terminal_end': bool(allow_terminal_end),
         'terminal_padding_sections': terminal_padding_sections,
         'terminal_reference_points': terminal_reference_points,
+        'protected_side_branch_arcs_mm': protected_arcs,
+        'side_branch_protection_mm': side_branch_protection_mm,
     }
     profile['area_jump_events'] = events
     profile['area_drop_events'] = []
@@ -1800,31 +1809,33 @@ def _trim_path_for_analysis(seg_path, nodes, range_info):
     )
 
 
-def extract_profiles(stl_path, n_points=100, pitch=0.5,
+def extract_profiles(stl_path, n_points=200, pitch=0.5,
                      curvature_window=7, section_step=3,
                      area_jump_ratio_threshold=1.6,
-                     area_jump_window_mm=6.0,
-                     area_jump_min_persistence_mm=4.0,
-                     area_jump_max_terminal_extension_mm=15.0,
                      area_jump_reference_points=5,
                      max_section_samples_per_segment=None,
                      normal_search_policy=None,
-                     centerline_voronoi_exclusion_mm=5.0):
+                     centerline_voronoi_exclusion_mm=5.0,
+                     smooth_segment_junctions=True,
+                     junction_kink_angle_threshold_deg=15.0,
+                     junction_kink_excess_threshold_deg=10.0,
+                     junction_smoothing_half_window_mm=6.0,
+                     junction_tangent_span_mm=2.0):
     """
-    为每个解剖段提取 100 点剖面 (含截面特征)。
+    为每个解剖段提取 200 点剖面 (含截面特征)。
 
     输出:
-        <patient_dir>/centerline_pointwise_profiles.json
+        <patient_dir>/pointwise_profiles.json
 
     参数:
         stl_path:          vessel.stl 路径
-        n_points:          重采样点数 (默认 100)
+        n_points:          重采样点数 (默认 200)
         pitch:             体素化分辨率 mm
         curvature_window:  曲率计算窗口
         section_step:      原始截面采样步长 (每隔 N 个中心线点算一次截面)
 
-        成功截面只允许两类区间置 0: 汇合端临界点加 6 点，以及已知
-        侧支交点两侧临界点之间。其他成功截面不做过滤或插值。
+        只有共享端点或侧枝自身端点可按面积比例置 0。主干内部侧枝
+        使用血管网络 Voronoi 裁剪，不再删除交点附近的主干截面。
     """
     parentdir = os.path.dirname(stl_path)
     if max_section_samples_per_segment is None:
@@ -1835,6 +1846,30 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
     if seg_path is None:
         print(f"  跳过 (无分段文件): {seg_path}")
         return
+
+    junction_smoothing = {
+        'applied': False,
+        'method': 'local_c1_cubic_hermite',
+        'events': [],
+    }
+    if smooth_segment_junctions:
+        try:
+            junction_smoothing = smooth_internal_anatomical_junctions(
+                stl_path,
+                angle_threshold_deg=junction_kink_angle_threshold_deg,
+                local_angle_excess_threshold_deg=(
+                    junction_kink_excess_threshold_deg),
+                half_window_mm=junction_smoothing_half_window_mm,
+                tangent_span_mm=junction_tangent_span_mm)
+            if (junction_smoothing.get('applied')
+                    and not junction_smoothing.get('reused_existing')):
+                print(
+                    "  中心线内部拼接平滑: "
+                    f"{len(junction_smoothing.get('events', []))} 处")
+            elif junction_smoothing.get('reused_existing'):
+                print("  中心线内部拼接平滑: 复用已保存结果")
+        except Exception as exc:
+            print(f"  [warn] 中心线内部拼接平滑失败: {exc}")
 
     with open(seg_path, 'r', encoding='utf-8') as f:
         seg_data = json.load(f)
@@ -1852,7 +1887,7 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
     profiles = {}
     n_total_section_failures = 0
     n_total_endpoint_zeroed = 0
-    n_total_side_branch_zeroed = 0
+    n_total_side_branch_voronoi = 0
     original_paths = {
         name: [int(nid) for nid in info.get('path', [])]
         for name, info in (seg_data.get('segments') or {}).items()
@@ -1901,6 +1936,9 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
             side_branch_anchors = _shift_side_branch_anchors(
                 plan.get('side_branch_anchors', []),
                 actual_start * original_total, effective_total)
+            network_voronoi_centerlines = _build_network_voronoi_centerlines(
+                side_branch_anchors, coords_by_seg, radii_by_seg, n_points,
+                junction_exclusion_mm=centerline_voronoi_exclusion_mm)
             raw_profile = _extract_branch_raw_profile(
                 seg_path_ids, nodes, mesh,
                 curvature_window=curvature_window,
@@ -1909,7 +1947,8 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
                 max_section_samples=n_points,
                 normal_search_policy=normal_search_policy,
                 centerline_voronoi_exclusion_mm=(
-                    centerline_voronoi_exclusion_mm))
+                    centerline_voronoi_exclusion_mm),
+                network_voronoi_centerlines=network_voronoi_centerlines)
 
             if raw_profile is None:
                 profiles[seg_name] = None
@@ -1923,7 +1962,8 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
             if resampled is None:
                 profiles[seg_name] = None
                 continue
-            # 仅保留两类区间置零: 已知侧支区间、汇合端临界点加 6 点。
+            # Internal side branches use network Voronoi ownership.  Only
+            # actual vessel endpoints are eligible for interval masking.
             endpoint_junctions = plan.get('endpoint_junctions', [])
             start_junction = next(
                 (item for item in endpoint_junctions
@@ -1931,26 +1971,35 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
             end_junction = next(
                 (item for item in endpoint_junctions
                  if item.get('side') == 'end'), None)
-            resampled = _mask_side_branch_junction_sections(
-                resampled, side_branch_anchors,
-                ratio_threshold=area_jump_ratio_threshold,
-                min_persistence_mm=area_jump_min_persistence_mm)
+            resampled['side_branch_contamination_mask'] = [0.0] * n_points
+            resampled['side_branch_contamination_events'] = []
+            resampled['n_side_branch_contamination_masked'] = 0
+            resampled['n_side_branch_junction_zeroed'] = 0
+            resampled['side_branch_network_voronoi'] = bool(
+                network_voronoi_centerlines)
+            resampled['network_voronoi_competitors'] = [
+                {
+                    'segment': item['segment'],
+                    'junction_node_id': item['junction_node_id'],
+                    'junction_exclusion_mm': item['junction_exclusion_mm'],
+                    'radius_mm': item['radius_mm'],
+                    'centerline_coords': item['centerline_coords'].tolist(),
+                }
+                for item in network_voronoi_centerlines
+            ]
             resampled = _mask_endpoint_junction_sections(
                 resampled,
                 ratio_threshold=area_jump_ratio_threshold,
-                window_mm=area_jump_window_mm,
-                min_persistence_mm=area_jump_min_persistence_mm,
-                max_terminal_extension_mm=area_jump_max_terminal_extension_mm,
                 allow_terminal_start=(start_junction is not None and actual_start <= 0.0),
                 allow_terminal_end=(end_junction is not None and actual_end >= 1.0),
-                max_terminal_start_extension_mm=(
-                    start_junction.get('max_search_distance_mm')
-                    if start_junction is not None else None),
-                max_terminal_end_extension_mm=(
-                    end_junction.get('max_search_distance_mm')
-                    if end_junction is not None else None),
                 terminal_padding_sections=6,
-                terminal_reference_points=area_jump_reference_points)
+                terminal_reference_points=area_jump_reference_points,
+                protected_side_branch_arcs=[
+                    item['arc_center_mm'] for item in side_branch_anchors
+                    if item.get('arc_center_mm') is not None
+                ],
+                side_branch_protection_mm=(
+                    centerline_voronoi_exclusion_mm))
             endpoint_mask = list(resampled.get(
                 'area_jump_terminal_mask', [0.0] * n_points))
             endpoint_count = int(resampled.get(
@@ -1960,8 +2009,7 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
             resampled['n_junction_endpoint_excluded'] = endpoint_count
             resampled['junction_endpoint_values_masked'] = True
             n_total_endpoint_zeroed += endpoint_count
-            n_total_side_branch_zeroed += int(resampled.get(
-                'n_side_branch_junction_zeroed', 0))
+            n_total_side_branch_voronoi += len(network_voronoi_centerlines)
             if endpoint_junctions:
                 n_total_clinical_endpoint_junctions += len(endpoint_junctions)
             resampled['clinical_junction_plan'] = {
@@ -1970,7 +2018,8 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
                 'endpoint_junctions': endpoint_junctions,
                 'side_branch_anchors': side_branch_anchors,
                 'radius_factor': 1.25,
-                'method': 'endpoint_and_side_branch_intervals_zeroed',
+                'method': (
+                    'endpoint_raw_area_ratio_and_side_branch_network_voronoi'),
             }
 
             resampled['n_section_success_final'] = int(
@@ -2015,23 +2064,22 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
         'is_post_tips': seg_data.get('is_post_tips'),
         'n_points': n_points,
         'area_jump_ratio_threshold': float(area_jump_ratio_threshold),
-        'area_jump_window_mm': float(area_jump_window_mm),
-        'area_jump_min_persistence_mm': float(area_jump_min_persistence_mm),
-        'area_jump_max_terminal_extension_mm': float(
-            area_jump_max_terminal_extension_mm),
         'area_jump_reference_points': int(area_jump_reference_points),
         'max_section_samples_per_segment': int(
             max_section_samples_per_segment),
         'normal_search_policy': _normal_search_policy(normal_search_policy),
         'section_assignment_method': 'centerline_voronoi',
+        'side_branch_assignment_method': 'centerline_network_voronoi',
         'centerline_voronoi_exclusion_mm': float(
             centerline_voronoi_exclusion_mm),
-        'section_filter_policy': 'endpoint_and_side_branch_zero_only',
+        'section_filter_policy': 'endpoint_zero_only',
         'n_total_section_failures': int(n_total_section_failures),
         'n_total_endpoint_junction_zeroed': int(n_total_endpoint_zeroed),
-        'n_total_side_branch_junction_zeroed': int(
-            n_total_side_branch_zeroed),
-        'clinical_junction_method': 'endpoint_and_side_branch_intervals_zeroed',
+        'n_total_side_branch_junction_zeroed': 0,
+        'n_total_side_branch_network_voronoi': int(
+            n_total_side_branch_voronoi),
+        'clinical_junction_method': (
+            'endpoint_raw_area_ratio_and_side_branch_network_voronoi'),
         'clinical_radius_factor': 1.25,
         'n_total_clinical_endpoint_junctions': int(
             n_total_clinical_endpoint_junctions),
@@ -2041,6 +2089,7 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
         },
         'analysis_ranges_file': SEGMENT_ASSIGNMENTS_NAME if analysis_ranges else None,
         'analysis_ranges_applied': sorted(analysis_ranges.keys()),
+        'junction_smoothing': junction_smoothing,
         # 新增逐点通道清单 (便于训练侧统一索引)
         'pointwise_channels': [
             'position', 'arc_length_mm',
@@ -2051,7 +2100,6 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
             'circularity',
             'solidity',                  # A / 凸包面积, ∈ (0,1], 1=凸
             'r_insc_to_r_eq_ratio',      # 2r_insc / D_eq, 瓶颈程度
-            'n_components',              # lumen 分量数 (1=正常, 2+=被血栓隔断)
             'endpoint_junction_mask',
             'side_branch_contamination_mask',
             'section_valid',             # unified export: 1=draw/statistically valid
@@ -2076,7 +2124,7 @@ def extract_profiles(stl_path, n_points=100, pitch=0.5,
     print(f"  剖面提取完成: {len(valid_segs)} 个段, "
           f"求交失败 {n_total_section_failures} 处, "
           f"汇合端置零 {n_total_endpoint_zeroed} 处, "
-          f"侧支区间置零 {n_total_side_branch_zeroed} 处")
+          f"侧支网络 Voronoi {n_total_side_branch_voronoi} 处")
     return profiles
 
 def _diagnose_centerline_mesh(branch_path, nodes, mesh):
@@ -2120,7 +2168,7 @@ def _diagnose_centerline_mesh(branch_path, nodes, mesh):
 # 批量
 # ============================================================
 
-def batch_extract_profiles(root_folder, n_points=100, pitch=0.5,
+def batch_extract_profiles(root_folder, n_points=200, pitch=0.5,
                            section_step=3, stl_name="vessel.stl"):
     print(f"\n{'='*60}")
     print(f"批量剖面提取: {root_folder}")
@@ -2156,4 +2204,4 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         extract_profiles(sys.argv[1])
     else:
-        batch_extract_profiles(r"F:\PCG data\dataset\zhengzhou_vkan_qian47")
+        batch_extract_profiles(r"F:\PCG data\dataset\test4all_sample")

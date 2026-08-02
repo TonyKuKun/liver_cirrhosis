@@ -143,7 +143,7 @@ DEFAULT_PARAMS = {
     "merge_bp_distance_mm": 5.0,
     "n_fit_points": 10,
     "angle_fit_length_mm": 10.0,
-    "n_profile_points": 100,
+    "n_profile_points": 200,
     "curvature_window": 7,
     "sample_step": 3,
 }
@@ -744,7 +744,8 @@ def save_manual_segment_assignments(
             from extract_profiles import extract_profiles
             from extract_features import extract_all_features
 
-        extract_profiles(str(stl_path))
+        extract_profiles(
+            str(stl_path), n_points=DEFAULT_PARAMS["n_profile_points"])
         extract_all_features(str(stl_path), write_legacy=False)
         remove_generated_outputs(parent, keep_public=True)
         features_recomputed = feature_path(
@@ -1402,6 +1403,10 @@ def _surface_section_arrays(mesh, point: np.ndarray, normal: np.ndarray):
 
 _VORONOI_SECTION_CLIPPER = None
 _VORONOI_SECTION_CLIPPER_UNAVAILABLE = False
+_VORONOI_ASSIGNMENT_METHODS = {
+    "centerline_voronoi",
+    "centerline_network_voronoi",
+}
 
 
 def _load_voronoi_section_clipper():
@@ -1438,7 +1443,8 @@ def _voronoi_surface_section_arrays(
     """Apply the extractor's centerline ownership clip to a Web STL contour."""
     if (
         not isinstance(profile, dict)
-        or profile.get("section_assignment_method") != "centerline_voronoi"
+        or profile.get(
+            "section_assignment_method") not in _VORONOI_ASSIGNMENT_METHODS
         or centerline_coords is None
         or index is None
     ):
@@ -1454,6 +1460,22 @@ def _voronoi_surface_section_arrays(
         polygon = polygon_type(planar)
         if not polygon.is_valid:
             polygon = polygon.buffer(0)
+        competing_centerlines = []
+        for competitor in profile.get("network_voronoi_competitors", []):
+            values = (
+                competitor.get("centerline_coords")
+                if isinstance(competitor, dict) else competitor)
+            coords = np.asarray(values, dtype=float)
+            if (coords.ndim == 2 and coords.shape[1] == 3
+                    and np.all(np.isfinite(coords))):
+                competing_centerlines.append({
+                    "centerline_coords": coords,
+                    "radius_mm": _safe_float(competitor.get("radius_mm")) or 0.0,
+                })
+        radii = profile.get("inscribed_radius") or []
+        site_radius = (
+            _safe_float(radii[index])
+            if index < len(radii) else 0.0)
         clipped = clip_section(
             polygon,
             point_type(0.0, 0.0),
@@ -1464,6 +1486,8 @@ def _voronoi_surface_section_arrays(
             local_exclusion_mm=float(
                 profile.get("centerline_voronoi_exclusion_mm", 5.0)),
             centerline_arc_length=centerline_arc_length,
+            competing_centerlines=competing_centerlines,
+            site_radius_mm=site_radius or 0.0,
         )
         if clipped is None or clipped.is_empty:
             return None
@@ -1502,7 +1526,7 @@ def _pointwise_surface_section_arrays(
         if clipped is not None:
             return clipped
         if not isinstance(profile, dict) or profile.get(
-                "section_assignment_method") != "centerline_voronoi":
+                "section_assignment_method") not in _VORONOI_ASSIGNMENT_METHODS:
             return metrics["contour"]
     return _circle_arrays(point, normal, expected_diameter / 2.0, n_pts=36)
 
@@ -2056,7 +2080,6 @@ def suggest_analysis_ranges(stl_path: Path) -> dict:
                 stable.append(False)
                 continue
             owned_area = _profile_value_at_fraction(profile, "area", float(fractions[idx]))
-            n_components = _profile_value_at_fraction(profile, "n_components", float(fractions[idx]))
             ratio = _profile_value_at_fraction(profile, "r_insc_to_r_eq_ratio", float(fractions[idx]))
             diameter_deviation = _local_relative_deviation(diameters, idx)
             checks = [
@@ -2068,8 +2091,6 @@ def suggest_analysis_ranges(stl_path: Path) -> dict:
             ]
             if owned_area is not None and surface["area"] > 1e-9:
                 checks.append(owned_area / surface["area"] >= thresholds["owned_to_surface_area_min"])
-            if n_components is not None:
-                checks.append(n_components <= 1)
             if ratio is not None:
                 checks.append(ratio >= thresholds["inscribed_to_eq_min"])
             stable.append(all(checks))

@@ -6,10 +6,15 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from web.geometry_backend import (
+    DEFAULT_PARAMS,
     _apply_manual_segment_smoothing,
     _build_segments,
     _rebuild_smoothed_assignment_tree,
 )
+
+
+def test_web_profile_sampling_default_is_200():
+    assert DEFAULT_PARAMS["n_profile_points"] == 200
 
 
 def _nodes(coords):

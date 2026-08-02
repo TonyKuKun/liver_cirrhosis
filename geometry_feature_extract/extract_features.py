@@ -395,8 +395,8 @@ def _features_for_one_segment(seg_name, seg_info, nodes, mesh,
     """
     对单段算所有几何特征, 返回 flat dict, 键带前缀 seg_name_。
 
-    pointwise_data: 若提供 centerline_pointwise_profiles.json 的字典,
-                    截面特征优先从该数据读取(已含端点 NaN 掩码)。
+    pointwise_data: 若提供 pointwise_profiles.json 的字典,
+                    截面特征优先从该数据读取(已含端点零值掩码)。
                     否则回退到从 mesh 现场计算(无掩码)。
     """
     prefix = seg_name + '_'
@@ -435,7 +435,11 @@ def _features_for_one_segment(seg_name, seg_info, nodes, mesh,
             sec = _seg_section_features_from_profile(profile)
     if sec is None:
         sec = _seg_section_features_from_mesh(coords, mesh, sample_step)
-    if profile is not None and profile.get('total_length_mm') is not None:
+    profile_is_unified_export = (
+        profile is not None and isinstance(profile.get('_point_filter'), dict)
+    )
+    if (profile is not None and not profile_is_unified_export
+            and profile.get('total_length_mm') is not None):
         length = profile.get('total_length_mm')
         tort = profile.get('centerline_arc_chord_tortuosity', tort)
         mean_curv = profile.get('centerline_mean_curvature', mean_curv)
@@ -463,15 +467,20 @@ def _global_features(nodes, adj, all_seg_features, seg_dict=None):
 
     seg_dict: 若提供, 加入代偿血管/TIPS 存在性二值特征。
     """
-    # 总中心线长度
-    visited_edges = set()
-    total = 0.0
-    for nid in nodes:
-        for nb in adj[nid]:
-            edge = (min(nid, nb), max(nid, nb))
-            if edge not in visited_edges:
-                visited_edges.add(edge)
-                total += node_distance(nodes[nid], nodes[nb])
+    # Use the assigned anatomical segments, matching branchpoint-density and
+    # all other system features. Fall back to the raw tree for legacy inputs.
+    total = sum(
+        float(all_seg_features.get(f'{segment}_length') or 0.0)
+        for segment in ALL_SEG_NAMES
+    )
+    if total <= 0:
+        visited_edges = set()
+        for nid in nodes:
+            for nb in adj[nid]:
+                edge = (min(nid, nb), max(nid, nb))
+                if edge not in visited_edges:
+                    visited_edges.add(edge)
+                    total += node_distance(nodes[nid], nodes[nb])
 
     sv_d = all_seg_features.get('sv_mean_diameter')
     smv_d = all_seg_features.get('smv_mean_diameter')
@@ -510,8 +519,8 @@ def extract_all_features(stl_path, n_fit_points=10,
       - portal_vein_features.json  (扁平字段, 旧版 schema, 供旧的 correlation 工具)
       - unified_features.json      (新, 单文件统一格式; 推荐用于训练)
 
-    若同目录下存在 centerline_pointwise_profiles.json,
-    截面统计优先从其中读取 (含端点 NaN 掩码, 跳过端点不可信值)。
+    若同目录下存在 pointwise_profiles.json,
+    截面统计优先从其中读取 (含端点零值掩码, 跳过端点不可信值)。
     否则回退到从 STL mesh 现场计算 (无掩码)。
 
     参数:
@@ -557,7 +566,7 @@ def extract_all_features(stl_path, n_fit_points=10,
     print(f"  含血管段: {loaded}")
 
     # ---------- 3. 加载 pointwise 剖面 JSON (优先源) ----------
-    print("[3/5] 加载剖面 JSON (centerline_pointwise_profiles.json)...")
+    print("[3/5] 加载剖面 JSON (pointwise_profiles.json)...")
     pw_json_path = resolve_feature_path(parentdir, POINTWISE_TEMP_NAME)
     pointwise_data = None
     if pw_json_path is not None:
@@ -566,14 +575,29 @@ def extract_all_features(stl_path, n_fit_points=10,
                 pointwise_data = json.load(f)
             meta = pointwise_data.get('_meta', {})
             endpoint_zeroed = meta.get('n_total_endpoint_junction_zeroed', 0)
-            side_zeroed = meta.get('n_total_side_branch_junction_zeroed', 0)
+            side_voronoi = meta.get('n_total_side_branch_network_voronoi', 0)
             print(f"  [ok] 剖面已加载 (汇合端置零 {endpoint_zeroed} 处, "
-                  f"侧支置零 {side_zeroed} 处)")
+                  f"侧支网络 Voronoi {side_voronoi} 处)")
         except Exception as e:
             print(f"  [error] 剖面 JSON 解析失败: {e}, 将回退到 mesh 计算")
             pointwise_data = None
     else:
-        print(f"  剖面 JSON 不存在, 将回退到 mesh 计算 (无端点掩码)")
+        unified_path = resolve_feature_path(parentdir, UNIFIED_FEATURES_NAME)
+        if unified_path is not None:
+            try:
+                with open(unified_path, 'r', encoding='utf-8') as f:
+                    previous_unified = json.load(f)
+                previous_pointwise = previous_unified.get('pointwise')
+                if isinstance(previous_pointwise, dict) and previous_pointwise:
+                    pointwise_data = dict(previous_pointwise)
+                    previous_meta = previous_unified.get('pointwise_meta')
+                    if isinstance(previous_meta, dict):
+                        pointwise_data['_meta'] = previous_meta
+                    print("  [ok] 临时剖面不存在，复用旧 unified pointwise")
+            except Exception as e:
+                print(f"  [error] 旧 unified pointwise 读取失败: {e}")
+        if pointwise_data is None:
+            print(f"  剖面 JSON 不存在, 将回退到 mesh 计算 (无端点掩码)")
 
     # ---------- 4. 加载 STL 网格 (回退用) ----------
     mesh = None
@@ -704,7 +728,7 @@ POINTWISE_ZERO_WHEN_INVALID_KEYS = {
     'area', 'perimeter', 'eq_diameter',
     'raw_area', 'raw_perimeter', 'raw_eq_diameter',
     'anchor_radius', 'owned_radius', 'hydraulic_diameter',
-    'circularity', 'solidity', 'n_components',
+    'circularity', 'solidity',
     'r_insc_to_r_eq_ratio', 'dA_ds_norm', 'inscribed_radius',
     'implausibly_small_section',
 }
@@ -760,7 +784,10 @@ SYSTEM_FEATURE_DEPENDENCIES = {
     'angle_lpv_rpv': {'required_vessels': ['lpv', 'rpv']},
     'angle_mpv_bifurc_total': {'required_vessels': ['mpv', 'lpv', 'rpv']},
     'mpv_bifurc_planarity_deg': {'required_vessels': ['mpv', 'lpv', 'rpv']},
-    'angle_mpv_tips': {'required_vessels': ['mpv', 'tips']},
+    'angle_mpv_tips': {
+        'required_vessels': ['tips'],
+        'required_any_vessels': ['mpv', 'lpv', 'rpv'],
+    },
     'sv_smv_diameter_asymmetry': {
         'required_vessels': ['sv', 'smv'],
         'source_features': ['sv_mean_diameter', 'smv_mean_diameter'],
@@ -775,8 +802,7 @@ SYSTEM_FEATURE_DEPENDENCIES = {
     },
     'confluence_murray3_ratio': {
         'required_vessels': ['mpv', 'sv', 'smv'],
-        'source_features': [
-            'mpv_mean_diameter', 'sv_mean_diameter', 'smv_mean_diameter'],
+        'requires_pointwise': True,
     },
     'confluence_murray3_deviation': {
         'required_vessels': ['mpv', 'sv', 'smv'],
@@ -784,12 +810,11 @@ SYSTEM_FEATURE_DEPENDENCIES = {
     },
     'confluence_area_ratio': {
         'required_vessels': ['mpv', 'sv', 'smv'],
-        'source_features': ['mpv_mean_area', 'sv_mean_area', 'smv_mean_area'],
+        'requires_pointwise': True,
     },
     'mpv_bifurc_murray3_ratio': {
         'required_vessels': ['mpv', 'lpv', 'rpv'],
-        'source_features': [
-            'mpv_mean_diameter', 'lpv_mean_diameter', 'rpv_mean_diameter'],
+        'requires_pointwise': True,
     },
     'mpv_bifurc_murray3_deviation': {
         'required_vessels': ['mpv', 'lpv', 'rpv'],
@@ -797,7 +822,7 @@ SYSTEM_FEATURE_DEPENDENCIES = {
     },
     'mpv_bifurc_area_ratio': {
         'required_vessels': ['mpv', 'lpv', 'rpv'],
-        'source_features': ['mpv_mean_area', 'lpv_mean_area', 'rpv_mean_area'],
+        'requires_pointwise': True,
     },
     'lpv_rpv_diameter_asymmetry': {
         'required_vessels': ['lpv', 'rpv'],
@@ -900,9 +925,7 @@ SYSTEM_FEATURE_DEPENDENCIES = {
     'tree_area_conservation_mean_dev': {
         'required_vessel_sets_any': [
             ['mpv', 'sv', 'smv'], ['mpv', 'lpv', 'rpv']],
-        'source_features': [
-            'mpv_mean_area', 'sv_mean_area', 'smv_mean_area',
-            'lpv_mean_area', 'rpv_mean_area'],
+        'requires_pointwise': True,
     },
     'sv_max_to_mpv_max_diam_ratio': {
         'required_vessels': ['sv', 'mpv'],
@@ -928,7 +951,7 @@ SYSTEM_FEATURE_DEPENDENCIES = {
     'max_collateral_diameter_mm': {'optional_vessels': ['lgv', 'pgv']},
     'area_conservation_bifurc_deviation': {
         'required_vessels': ['mpv', 'lpv', 'rpv'],
-        'source_features': ['mpv_mean_area', 'lpv_mean_area', 'rpv_mean_area'],
+        'requires_pointwise': True,
     },
     'tips_stent_diameter_mm': {
         'required_vessels': ['tips'], 'source_features': ['tips_mean_diameter'],
@@ -1026,28 +1049,76 @@ def _clean_scalar_for_json(value):
     return value
 
 
-def _clean_pointwise_profile_for_unified(profile):
-    """
-    Preserve profile alignment while serialising masked sections as zero.
+_POINTWISE_NEAREST_RESAMPLE_KEYS = {
+    'side_branch_contamination_mask',
+    'area_jump_terminal_mask',
+    'endpoint_junction_mask',
+    'area_jump_interpolated',
+    'area_drop_candidate',
+    'junction_endpoint_excluded',
+    'junction_replaced',
+    'implausibly_small_section',
+}
 
-    Endpoint and side-branch masks must retain their original sample indices so
-    the Web viewer can leave a visible gap at the anatomical location.  Scalar
-    statistics are calculated before this serialisation step and therefore
-    continue to ignore the NaN-masked sections.
+_POINTWISE_DROPPED_KEYS = {'n_components'}
+
+
+def _nearest_resample_indices(source_x, target_x):
+    """Return nearest-neighbour indices on a sorted one-dimensional axis."""
+    right = np.searchsorted(source_x, target_x, side='left')
+    right = np.clip(right, 0, len(source_x) - 1)
+    left = np.clip(right - 1, 0, len(source_x) - 1)
+    choose_left = (
+        np.abs(target_x - source_x[left])
+        <= np.abs(source_x[right] - target_x)
+    )
+    return np.where(choose_left, left, right)
+
+
+def _clean_pointwise_profile_for_unified(profile, target_n_points=None):
+    """Remove invalid sections and resample the retained vessel to its full size.
+
+    The extraction output keeps endpoint masks and failures at their original
+    indices. Unified model input instead uses only valid sections, distributes
+    the original number of samples uniformly over that retained arc, and
+    interpolates the missing count inside the retained vessel interval.
     """
     if not isinstance(profile, dict):
         return None
 
-    n_points = _infer_point_count(profile)
-    if n_points <= 0:
+    source_n_points = _infer_point_count(profile)
+    if source_n_points <= 0:
         return dict(profile)
+
+    requested_target = target_n_points
+    target_n_points = source_n_points
+    if requested_target is not None:
+        try:
+            target_n_points = max(source_n_points, int(requested_target))
+        except (TypeError, ValueError):
+            target_n_points = source_n_points
+    previous_filter = profile.get('_point_filter')
+    if requested_target is None and isinstance(previous_filter, dict):
+        try:
+            target_n_points = max(
+                source_n_points,
+                int(previous_filter.get('original_n_points') or 0))
+        except (TypeError, ValueError):
+            target_n_points = source_n_points
+    if requested_target is None:
+        try:
+            target_n_points = max(
+                target_n_points, int(profile.get('profile_sample_count') or 0))
+        except (TypeError, ValueError):
+            pass
 
     core_keys = [
         k for k in POINTWISE_CORE_VALID_KEYS
-        if _list_like(profile.get(k)) and len(profile.get(k)) == n_points
+        if (_list_like(profile.get(k))
+            and len(profile.get(k)) == source_n_points)
     ]
     section_valid = []
-    for i in range(n_points):
+    for i in range(source_n_points):
         valid = True
         for key in core_keys:
             value = profile[key][i]
@@ -1063,28 +1134,155 @@ def _clean_pointwise_profile_for_unified(profile):
                 break
         section_valid.append(1.0 if valid else 0.0)
 
-    cleaned = {}
-    for key, value in profile.items():
-        if _list_like(value) and len(value) == n_points:
-            serialised = [_clean_scalar_for_json(item) for item in value]
-            if key in POINTWISE_ZERO_WHEN_INVALID_KEYS:
-                serialised = [
-                    item if section_valid[i] else 0.0
-                    for i, item in enumerate(serialised)
-                ]
-            cleaned[key] = serialised
-        else:
-            cleaned[key] = _clean_scalar_for_json(value)
-    cleaned['section_valid'] = section_valid
+    valid_mask = np.asarray(section_valid, dtype=bool)
+    valid_indices = np.flatnonzero(valid_mask)
+    if len(valid_indices) < 2:
+        cleaned = {}
+        for key, value in profile.items():
+            if key in _POINTWISE_DROPPED_KEYS:
+                continue
+            if _list_like(value) and len(value) == source_n_points:
+                serialised = [_clean_scalar_for_json(item) for item in value]
+                if key in POINTWISE_ZERO_WHEN_INVALID_KEYS:
+                    serialised = [
+                        item if valid_mask[i] else 0.0
+                        for i, item in enumerate(serialised)
+                    ]
+                cleaned[key] = serialised
+            else:
+                cleaned[key] = _clean_scalar_for_json(value)
+        cleaned['section_valid'] = section_valid
+        cleaned['_point_filter'] = {
+            'method': 'preserve_zero_mask_insufficient_valid_sections',
+            'original_n_points': int(target_n_points),
+            'source_serialized_n_points': int(source_n_points),
+            'source_valid_n_points': int(len(valid_indices)),
+            'output_n_points': int(source_n_points),
+            'interpolated_n_points': 0,
+            'positive_core_keys': core_keys,
+        }
+        return cleaned
 
+    try:
+        original_arc = np.asarray(profile.get('arc_length_mm', []), dtype=float)
+    except Exception:
+        original_arc = np.array([], dtype=float)
+    if (len(original_arc) != source_n_points
+            or not np.all(np.isfinite(original_arc[valid_indices]))):
+        original_arc = np.arange(source_n_points, dtype=float)
+
+    source_x = original_arc[valid_indices]
+    order = np.argsort(source_x, kind='stable')
+    source_x = source_x[order]
+    valid_indices = valid_indices[order]
+    source_x, unique_at = np.unique(source_x, return_index=True)
+    valid_indices = valid_indices[unique_at]
+    if len(source_x) < 2 or source_x[-1] <= source_x[0]:
+        return _clean_pointwise_profile_for_unified(
+            {
+                **profile,
+                'arc_length_mm': list(range(source_n_points)),
+            },
+            target_n_points=target_n_points)
+
+    target_x = np.linspace(
+        source_x[0], source_x[-1], target_n_points)
+    target_nearest = _nearest_resample_indices(source_x, target_x)
+    cleaned = {}
+    special_keys = {
+        'position', 'arc_length_mm', 'profile_sample_index', 'section_valid'
+    }
+    for key, value in profile.items():
+        if key in _POINTWISE_DROPPED_KEYS:
+            continue
+        if not (_list_like(value) and len(value) == source_n_points):
+            cleaned[key] = _clean_scalar_for_json(value)
+            continue
+        if key in special_keys:
+            continue
+        try:
+            numeric = np.asarray(value, dtype=float)[valid_indices]
+        except (TypeError, ValueError):
+            retained = [value[int(index)] for index in valid_indices]
+            cleaned[key] = [
+                _clean_scalar_for_json(retained[int(index)])
+                for index in target_nearest
+            ]
+            continue
+
+        finite = np.isfinite(numeric)
+        if not np.any(finite):
+            cleaned[key] = [0.0] * target_n_points
+            continue
+        numeric_x = source_x[finite]
+        numeric_values = numeric[finite]
+        if len(numeric_x) == 1:
+            resampled = np.full(
+                target_n_points, float(numeric_values[0]))
+        elif key in _POINTWISE_NEAREST_RESAMPLE_KEYS:
+            nearest = _nearest_resample_indices(numeric_x, target_x)
+            resampled = numeric_values[nearest]
+        else:
+            resampled = np.interp(target_x, numeric_x, numeric_values)
+        cleaned[key] = [float(item) for item in resampled]
+
+    effective_length = float(source_x[-1] - source_x[0])
+    cleaned['position'] = np.linspace(
+        0.0, 1.0, target_n_points).tolist()
+    cleaned['arc_length_mm'] = (target_x - source_x[0]).tolist()
+    cleaned['total_length_mm'] = effective_length
+    cleaned['profile_sample_index'] = list(range(target_n_points))
+    cleaned['profile_sample_count'] = int(target_n_points)
+    cleaned['section_valid'] = [1.0] * target_n_points
+
+    for keys in (
+        ('section_normal_x', 'section_normal_y', 'section_normal_z'),
+        ('section_normal_reference_x', 'section_normal_reference_y',
+         'section_normal_reference_z'),
+    ):
+        if not all(key in cleaned for key in keys):
+            continue
+        vectors = np.column_stack([cleaned[key] for key in keys])
+        norms = np.linalg.norm(vectors, axis=1)
+        good = np.isfinite(norms) & (norms > 1e-9)
+        vectors[good] /= norms[good, None]
+        vectors[~good] = np.array([0.0, 0.0, 1.0])
+        for axis, key in enumerate(keys):
+            cleaned[key] = vectors[:, axis].tolist()
+
+    area = np.asarray(cleaned.get('area', []), dtype=float)
+    arc = np.asarray(cleaned['arc_length_mm'], dtype=float)
+    if len(area) == target_n_points and effective_length > 0:
+        gradient = np.gradient(area, arc)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            gradient = gradient / area
+        gradient[~np.isfinite(gradient)] = 0.0
+        cleaned['dA_ds_norm'] = gradient.tolist()
+
+    if all(key in cleaned for key in ('centerline_x', 'centerline_y',
+                                      'centerline_z')):
+        coords = np.column_stack([
+            cleaned['centerline_x'], cleaned['centerline_y'],
+            cleaned['centerline_z']])
+        chord = float(np.linalg.norm(coords[-1] - coords[0]))
+        cleaned['centerline_chord_mm'] = chord
+        cleaned['centerline_arc_chord_tortuosity'] = (
+            float(effective_length / chord) if chord > 1e-9 else 1.0)
+
+    source_valid_count = int(np.sum(valid_mask))
+    missing_count = max(0, target_n_points - source_valid_count)
     cleaned['_point_filter'] = {
-        'original_n_points': int(n_points),
-        'kept_n_points': int(n_points),
-        'masked_n_points': int(n_points - sum(section_valid)),
-        'masked_reason': (
-            '核心截面通道 area/eq_diameter/perimeter 无效或 <=0，'
-            '该位置保留并以 section_valid=0 与截面通道=0 表示。'
-        ),
+        'method': 'valid_arc_length_linear_resample',
+        'original_n_points': int(target_n_points),
+        'source_serialized_n_points': int(source_n_points),
+        'source_valid_n_points': source_valid_count,
+        'dropped_invalid_n_points': int(missing_count),
+        'output_n_points': int(target_n_points),
+        'interpolated_n_points': int(missing_count),
+        'output_masked_n_points': 0,
+        'source_arc_start_mm': float(source_x[0]),
+        'source_arc_end_mm': float(source_x[-1]),
+        'effective_length_mm': effective_length,
         'positive_core_keys': core_keys,
     }
     return cleaned
@@ -1105,7 +1303,7 @@ def _seg_missing_reason(seg_name, seg_info, profile, feature_key,
     if feature_key in section_keys:
         if pointwise_data is not None:
             if profile is None:
-                return (f"{label} 段存在, 但 centerline_pointwise_profiles.json "
+                return (f"{label} 段存在, 但 pointwise_profiles.json "
                         "中该段剖面为 None 或缺失; 通常是 extract_profiles "
                         "该段失败、路径太短或截面全部无效。")
             if _finite_positive_count(profile.get('area', [])) == 0:
@@ -1136,14 +1334,12 @@ def _system_missing_reason(name, flat, seg_dict, pointwise_data,
         'sv_smv_diameter_asymmetry': ['sv_mean_diameter', 'smv_mean_diameter'],
         'sv_mpv_diameter_ratio': ['sv_mean_diameter', 'mpv_mean_diameter'],
         'smv_mpv_diameter_ratio': ['smv_mean_diameter', 'mpv_mean_diameter'],
-        'confluence_murray3_ratio': [
-            'mpv_mean_diameter', 'sv_mean_diameter', 'smv_mean_diameter'],
+        'confluence_murray3_ratio': [],
         'confluence_murray3_deviation': ['confluence_murray3_ratio'],
-        'confluence_area_ratio': ['mpv_mean_area', 'sv_mean_area', 'smv_mean_area'],
-        'mpv_bifurc_murray3_ratio': [
-            'mpv_mean_diameter', 'lpv_mean_diameter', 'rpv_mean_diameter'],
+        'confluence_area_ratio': [],
+        'mpv_bifurc_murray3_ratio': [],
         'mpv_bifurc_murray3_deviation': ['mpv_bifurc_murray3_ratio'],
-        'mpv_bifurc_area_ratio': ['mpv_mean_area', 'lpv_mean_area', 'rpv_mean_area'],
+        'mpv_bifurc_area_ratio': [],
         'lpv_rpv_diameter_asymmetry': ['lpv_mean_diameter', 'rpv_mean_diameter'],
         'lgv_mpv_diameter_ratio': ['lgv_mean_diameter', 'mpv_mean_diameter'],
         'pgv_mpv_diameter_ratio': ['pgv_mean_diameter', 'mpv_mean_diameter'],
@@ -1172,8 +1368,7 @@ def _system_missing_reason(name, flat, seg_dict, pointwise_data,
         'tree_area_conservation_mean_dev': [],
         'sv_max_to_mpv_max_diam_ratio': ['sv_max_diameter', 'mpv_max_diameter'],
         'mpv_trunk_length_mm': ['mpv_length'],
-        'area_conservation_bifurc_deviation': [
-            'mpv_mean_area', 'lpv_mean_area', 'rpv_mean_area'],
+        'area_conservation_bifurc_deviation': [],
         'tips_stent_diameter_mm': ['tips_mean_diameter'],
         'tips_stent_length_mm': ['tips_length'],
         'min_lumen_area_to_max_ratio_mpv': [],
@@ -1186,7 +1381,7 @@ def _system_missing_reason(name, flat, seg_dict, pointwise_data,
         'angle_lpv_rpv': ['lpv', 'rpv'],
         'angle_mpv_bifurc_total': ['mpv', 'lpv', 'rpv'],
         'mpv_bifurc_planarity_deg': ['mpv', 'lpv', 'rpv'],
-        'angle_mpv_tips': ['mpv', 'tips'],
+        'angle_mpv_tips': ['tips'],
     }
     if name in angle_deps:
         missing = [s.upper() for s in angle_deps[name]
@@ -1214,13 +1409,13 @@ def _system_missing_reason(name, flat, seg_dict, pointwise_data,
             'mpv_effective_radius', 'min_lumen_area_to_max_ratio_mpv',
             'pvt_severity_grade'}:
         if pointwise_data is None:
-            return "需要 centerline_pointwise_profiles.json, 但剖面数据缺失。"
+            return "需要 pointwise_profiles.json, 但剖面数据缺失。"
         if name.startswith('mpv') and not pointwise_data.get('mpv'):
             return "需要 MPV pointwise 剖面, 但该剖面缺失或为 None。"
         return "剖面有效点不足、半径非正或积分分母退化。"
 
     if name == 'tree_area_conservation_mean_dev':
-        return "汇合或分叉面积守恒所需的 MPV/SV/SMV 或 MPV/LPV/RPV 平均面积不完整。"
+        return "汇合或分叉处缺少共同可靠的 pointwise 截面窗口。"
     if name == 'diameter_weighted_tortuosity':
         return "可用段少于 2 条, 或所有段缺少平均直径/曲折度。"
     if name == 'collateral_length_mpv_ratio':
@@ -1448,7 +1643,7 @@ def build_feature_description():
                 '依赖血管存在, 但中心线、截面、pointwise 或几何拟合质量不足。'
             ),
             'pointwise_missing_or_failed': (
-                '特征需要 centerline_pointwise_profiles.json 中的逐点剖面, '
+                '特征需要 pointwise_profiles.json 中的逐点剖面, '
                 '但文件或对应血管剖面缺失。'
             ),
             'source_feature_missing': (
@@ -1483,7 +1678,7 @@ def build_feature_description():
         },
         'pointwise': {
             'description': (
-                '逐点剖面, 每个 segment 依赖同名血管存在且 extract_profiles 成功。'
+                '逐点剖面。写入 unified 时先删除无效截面，再沿保留弧段线性重采样回原始点数。'
             ),
             'segments': ALL_SEG_NAMES,
             'feature_keys': [
@@ -1492,7 +1687,7 @@ def build_feature_description():
                 'raw_area', 'raw_eq_diameter', 'raw_perimeter',
                 'anchor_radius', 'owned_radius', 'hydraulic_diameter',
                 'circularity', 'solidity', 'r_insc_to_r_eq_ratio',
-                'n_components', 'junction_replaced',
+                'junction_replaced',
                 'junction_endpoint_excluded',
                 'area_jump_terminal_mask', 'area_jump_interpolated',
                 'area_drop_candidate', 'curvature',
@@ -1568,7 +1763,7 @@ def _build_missing_report(flat, statistical, system, global_block,
                 reason = (f"{seg_name.upper()} 段未识别或解剖上不存在, "
                           "因此没有 pointwise 剖面。")
             elif pointwise_data is None:
-                reason = "centerline_pointwise_profiles.json 缺失或解析失败。"
+                reason = "pointwise_profiles.json 缺失或解析失败。"
             elif profile is None:
                 reason = "该段 pointwise 剖面为 None, extract_profiles 该段失败。"
             else:
@@ -1625,14 +1820,26 @@ def build_unified_features(flat_features, pointwise_data, seg_data,
     # ---- pointwise (剥掉 _meta 单独处理, 内部有 inscribed_radius 等) ----
     pointwise_block = {}
     pointwise_meta = {}
+    pointwise_target_points = 200
     if pointwise_data is not None:
+        source_meta = pointwise_data.get('_meta')
+        if isinstance(source_meta, dict):
+            try:
+                pointwise_target_points = max(
+                    2, int(source_meta.get('n_points') or 200))
+            except (TypeError, ValueError):
+                pointwise_target_points = 200
         for k, v in pointwise_data.items():
             if k == '_meta':
-                pointwise_meta = v
+                pointwise_meta = dict(v) if isinstance(v, dict) else {}
             elif v is not None:
-                cleaned_profile = _clean_pointwise_profile_for_unified(v)
+                cleaned_profile = _clean_pointwise_profile_for_unified(
+                    v, target_n_points=pointwise_target_points)
                 if cleaned_profile is not None:
                     pointwise_block[k] = cleaned_profile
+    pointwise_meta['unified_resample_policy'] = (
+        'remove_invalid_sections_then_linear_resample_inside_retained_arc')
+    pointwise_meta['unified_target_n_points'] = int(pointwise_target_points)
 
     # ---- segments_meta: 每段的 path / 长度 / 起止节点 ----
     seg_meta_block = {}
@@ -1654,7 +1861,7 @@ def build_unified_features(flat_features, pointwise_data, seg_data,
     # ---- _index: 文档说明 ----
     index = {
         'statistical': {
-            'description': '每段 9 个标量统计特征 (从 centerline_pointwise_profiles 派生, 含端点 NaN 掩码)',
+            'description': '每段 9 个标量统计特征 (从 pointwise 剖面派生, 含端点零值掩码)',
             'segments': list(statistical.keys()),
             'feature_keys': PER_SEG_FEATURE_KEYS,
             'flat_key_pattern': '<seg>_<feature>  e.g. mpv_mean_diameter',
@@ -1712,7 +1919,7 @@ def build_unified_features(flat_features, pointwise_data, seg_data,
             'description': 'SV-SMV 汇合处的几何细节 (汇合点坐标 + 两支单位向量)',
         },
         'pointwise': {
-            'description': '逐点剖面 (重采样到 n_points), 真实末端 NaN 掩码; 交叉区用可信最小截面替换/封顶',
+            'description': '逐点剖面；删除无效截面后沿有效弧长线性重采样到原始点数',
             'segments': list(pointwise_block.keys()),
             'feature_keys': ['position', 'arc_length_mm', 'total_length_mm',
                              'area', 'eq_diameter', 'perimeter',
@@ -1722,7 +1929,6 @@ def build_unified_features(flat_features, pointwise_data, seg_data,
                              'circularity',
                              'solidity',                  # A / 凸包面积 (PVT)
                              'r_insc_to_r_eq_ratio',      # 瓶颈程度
-                             'n_components',              # lumen 分量数
                              'junction_replaced',         # 1=交叉区已替换/封顶
                              'area_jump_terminal_mask',
                              'area_jump_interpolated',
@@ -1749,7 +1955,6 @@ def build_unified_features(flat_features, pointwise_data, seg_data,
                 'circularity': '圆度 4πA/P²',
                 'solidity': '凸包实心度 (PVT指标)',
                 'r_insc_to_r_eq_ratio': '内切/等效半径比 (瓶颈)',
-                'n_components': 'lumen 连通分量数',
                 'junction_replaced': '交叉区替换/封顶标记',
                 'area_jump_terminal_mask': '持续面积增大导致的端点排除标记',
                 'area_jump_interpolated': '段内持续面积增大后的插值标记',
@@ -1760,10 +1965,9 @@ def build_unified_features(flat_features, pointwise_data, seg_data,
                 'inscribed_radius': '内切球半径 mm',
             },
             'mask_explanation': (
-                '真实血管末端保护带内仍为 NaN; 分叉/交叉点保护带内不再丢弃, '
-                '默认用该段非交叉可信区域的最小 clean area 对应截面替换, '
-                '并用 junction_replaced=1 标记。raw_* 保留原始STL切面, '
-                'area/eq_diameter/perimeter 用于统计与训练。'
+                'extract_profiles 原始文件保留端点置零和求交失败位置。'
+                'unified pointwise 仅取 area/eq_diameter/perimeter 均为正的截面，'
+                '然后在保留弧段内部线性插值回原始点数；不在被删除的端点外推补点。'
             ),
         },
         'segments_meta': {

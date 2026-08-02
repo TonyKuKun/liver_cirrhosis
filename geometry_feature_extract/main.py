@@ -5,7 +5,7 @@
   Step 1:    中心线提取        → CenterlinePoints.txt
   Step 2:    中心线平滑        → newCenterlist.txt
   Step 3:    解剖分段          → centerline_profiles.json
-  Step 4:    剖面特征          → centerline_pointwise_profiles.json
+  Step 4:    剖面特征          → pointwise_profiles.json
   Step 5:    统计/统一特征     → portal_vein_features.json + unified_features.json + feature_description.json
   Step 5.5:  导出可视化        → vis_interactive.html + vis_overview.png
   Step 6:    VTK 弹窗 (可选)
@@ -148,11 +148,6 @@ def _process_one_patient(stl_path, post_tips, params, steps):
                 section_step=params['sample_step'],
                 area_jump_ratio_threshold=params[
                     'area_jump_ratio_threshold'],
-                area_jump_window_mm=params['area_jump_window_mm'],
-                area_jump_min_persistence_mm=params[
-                    'area_jump_min_persistence_mm'],
-                area_jump_max_terminal_extension_mm=params[
-                    'area_jump_max_terminal_extension_mm'],
                 area_jump_reference_points=params[
                     'area_jump_reference_points'],
                 centerline_voronoi_exclusion_mm=params[
@@ -377,7 +372,7 @@ def run_correlation_analysis(root_folder, target="PVP",
     跨患者相关性分析。需要每个 patient 文件夹下:
       label/<TARGET>.txt                  (PVP 或 PCG 数值)
       portal_vein_features.json           (统计特征, Step 4 输出)
-      centerline_pointwise_profiles.json  (剖面特征, Step 5 输出)
+      pointwise_profiles.json  (剖面特征, Step 5 输出)
     """
     target = target.upper()
     print(f"\n{'='*60}")
@@ -448,9 +443,6 @@ DEFAULT_PARAMS = {
                                      # 回弯通过 3D Voronoi 归属裁剪, 防自相交
     # Persistent cross-section expansion: confluence spillover / internal intrusion.
     'area_jump_ratio_threshold': 1.6,
-    'area_jump_window_mm': 6.0,
-    'area_jump_min_persistence_mm': 4.0,
-    'area_jump_max_terminal_extension_mm': 15.0,
     'area_jump_reference_points': 5,
 }
 

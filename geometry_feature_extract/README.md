@@ -119,7 +119,7 @@ TIPS/侧支的辅助形态评价和下游几何特征计算。
 ---
 
 #### **Step 4: 统计特征 + 系统特征提取** (`extract_features.py` + `system_features.py`)
-**输入**：`centerline_profiles.json`（分段）+ 平滑后中心线 + STL + `centerline_pointwise_profiles.json`
+**输入**：`centerline_profiles.json`（分段）+ 平滑后中心线 + STL + `pointwise_profiles.json`
 **输出**：
 - `unified_features.json`（**新, 推荐**, 单文件统一所有特征 — 训练用）
 - `portal_vein_features.json`（兼容旧版扁平 schema, 让旧的 correlation 脚本继续可用）
@@ -139,13 +139,13 @@ TIPS/侧支的辅助形态评价和下游几何特征计算。
 | `mean_circularity` | 平均圆度 = 4π×A/P² | 截面形状规则度 |
 
 **全局特征 (`global` 块)**：
-- `total_centerline_length`：全中心线总长
+- `total_centerline_length`：已分配解剖血管段总长
 - `sv_smv_diameter_ratio`：SV/SMV 平均直径比
 - `sv_smv_angle`：SV-SMV 夹角(度)
 - `has_lgv` / `has_pgv` / `has_compensation_vessel` / `has_tips`：二值存在性
 
-**NaN处理**：
-- 截面统计跳过 NaN（端点掩码区），使用 nanmean/nanmax/nanstd
+**无效截面处理**：
+- 端点掩码和求交失败点保留原索引并置 0，统计时统一按 `area > 0` 排除
 
 ##### 系统/联合特征 (`system` 块, 由 `system_features.py` 计算)
 
@@ -157,11 +157,15 @@ TIPS/侧支的辅助形态评价和下游几何特征计算。
 | `angle_sv_smv` | SV-SMV 汇合角 |
 | `angle_mpv_lpv` / `angle_mpv_rpv` | MPV 入射方向 vs LPV/RPV 出射方向 |
 | `angle_lpv_rpv` | LPV 与 RPV 张开角 |
-| `angle_mpv_bifurc_total` | LPV 角 + RPV 角 (反映分叉张开) |
+| `angle_mpv_bifurc_total` | LPV-RPV 子分支真实开角 |
 | `mpv_bifurc_planarity_deg` | LPV-RPV 分叉平面相对 MPV 轴的非平面度 (理想 T 形≈0°) |
-| `angle_mpv_tips` | TIPS 入射角 (术后) |
+| `angle_mpv_tips` | TIPS 与局部门静脉母血管夹角 (支持内部交点) |
 
 **(B) 直径 / 面积比 (Murray 定律 & 不对称)**
+
+交点直径和面积分别取每根血管从共享交点向内的第一个有效截面
+(`area > 0` 且 `eq_diameter > 0`)；不再设置固定毫米偏移、共同测量距离或局部窗口。
+
 | 字段 | 公式 | 物理含义 |
 |------|------|---------|
 | `confluence_murray3_ratio` | D_MPV³ / (D_SV³ + D_SMV³) | 理想≈1, 偏离反映重塑 |
@@ -183,7 +187,7 @@ TIPS/侧支的辅助形态评价和下游几何特征计算。
 | `diameter_weighted_tortuosity` | Σ τᵢ Dᵢ⁴ / Σ Dᵢ⁴ | 大血管主导的整树弯曲 |
 
 **(D) 1D Hagen-Poiseuille 阻力 (无 CFD)**
-> R_seg = ∫ dl / r⁴ (省略 8μ/π 常数因子, 单位 mm⁻³)。优先用内切半径 (来自 STL 表面距离), 否则用 eq_diameter/2。
+> R_seg = ∫ dl / r⁴ (省略 8μ/π 常数因子, 单位 mm⁻³)。使用最终 Voronoi 截面的 `hydraulic_diameter/2`，并按实际有效覆盖长度计算等效半径。
 
 | 字段 | 含义 |
 |------|------|
@@ -204,13 +208,15 @@ TIPS/侧支的辅助形态评价和下游几何特征计算。
 | `mpv_min_max_diameter_ratio` | min/max 直径 (MPV 沿线狭窄指标) |
 | `tree_area_conservation_mean_dev` | 各分叉处面积守恒平均偏离 |
 
+其中 MPV 近端固定为 SV/SMV 汇合侧，远端固定为 LPV/RPV 分叉侧；两端直径分别取首尾有效 5 mm 的中位数，不受中心线路径存储方向影响。
+
 **文献依据**：Peng *QIMS* 2019, Qi *Hepatology* 2014 / *Radiology* 2018, Kassab *AJP-Heart* 2006, Maruyama *QIMS* 2021, Mostafa *CEG* 2015, Berzigotti *J Hepatol* 2016, Ciurică *Hypertension* 2019。
 
 ---
 
 #### **Step 5: 剖面特征提取** (`extract_profiles.py`)
 **输入**：`centerline_profiles.json` + STL
-**输出**：`centerline_pointwise_profiles.json`
+**输出**：`pointwise_profiles.json`
 
 **每个中心线点提取的6个特征**：
 | 特征 | 计算方式 |
@@ -237,9 +243,9 @@ TIPS/侧支的辅助形态评价和下游几何特征计算。
 本项目在此基础上使用“沿弧长局部豁免的中心线 Voronoi 归属”，专门处理曲率半径接近
 管腔半径时正交截面族不可避免的非局部相交。
 
-**唯一两类截面置零规则**：
-1. **汇合端**：只在拓扑确认该端连接其他血管时检测面积临界点。若交点在索引0、临界点为20，则再向血管内部扩展6个采样点，将 `0..26`（含端点）置0；此端点判断随后结束。
-2. **段内侧支**：只在已知侧支拓扑交点附近检测左右临界点。若交点为100、临界点为80和120，则将 `80..120`（含边界）置0。
+**交点处理规则**：
+1. **共享端点**：组成交点的每根血管都检测自己的端点面积比例。若交点在索引0、临界点为20，则再向血管内部扩展6个采样点，将 `0..26`（含端点）置0；此端点判断随后结束。
+2. **段内侧支**：侧枝自身使用同一端点面积比例检测。连续主干不置0，而是把侧枝中心线加入主干的半径加权网络 Voronoi 竞争集合；共同节点后5 mm的侧枝局部点不参与限制，只裁掉归属于侧枝远端的截面部分。主干和侧枝半径差异通过 power distance 处理，避免细侧枝把粗主干截面压凹。
 
 置零发生在最终 pointwise 重采样之后，不做插值。除此之外，成功求得的截面不再经过尺寸、形状、MAD、变化率或“小截面”过滤。
 
@@ -247,9 +253,10 @@ TIPS/侧支的辅助形态评价和下游几何特征计算。
 - `inscribed_radius`：直接从距离场返回真实值, 此前版本是 0 占位
 - `n_section_success`：几何求交成功的截面数
 - `n_endpoint_junction_zeroed`：汇合端区间置0的点数
-- `n_side_branch_junction_zeroed`：段内侧支区间置0的点数
+- `n_side_branch_junction_zeroed`：兼容字段，网络 Voronoi 策略下固定为0
+- `n_total_side_branch_network_voronoi`：使用侧支网络 Voronoi 的主干-侧枝关系数
 
-**可视化端**直接以 `.pointwise_profiles.json` 为截面有效性的唯一数据源：数值为0的点不画，其他点全部按保存的中心线位置、法线和 Voronoi 参数重建，不再执行独立的显示过滤。显示轮廓投影面积与 pointwise `area` 一致。
+**可视化端**直接以 `pointwise_profiles.json` 为截面有效性的唯一数据源：数值为0的点不画，其他点全部按保存的中心线位置、法线和 Voronoi 参数重建，不再执行独立的显示过滤。显示轮廓投影面积与 pointwise `area` 一致。
 
 ---
 
@@ -342,7 +349,7 @@ correlation_pvp/
 **前提条件**：
 ```
 patient_001/
-  ├── centerline_pointwise_profiles.json  ← Step 5 输出
+  ├── pointwise_profiles.json             ← Step 5 输出
   └── label/
       └── PVP.txt or PCG.txt
 ```
@@ -396,7 +403,7 @@ patient_001/
 ├── CenterlinePoints.txt                       [Step 1输出: 原始中心线]
 ├── newCenterlist.txt                          [Step 2输出: 平滑中心线]
 ├── centerline_profiles.json                   [Step 3输出: 分段信息]
-├── centerline_pointwise_profiles.json         [Step 5输出: 逐点剖面 (含真实 inscribed_radius)]
+├── pointwise_profiles.json                    [Step 5输出: 逐点剖面 (含真实 inscribed_radius)]
 ├── portal_vein_features.json                  [Step 4输出: 扁平 schema, 兼容旧脚本]
 ├── unified_features.json                      [Step 4输出: 统一特征 (训练用) ★]
 ├── sv_smv_angle.json                          [补充: SV-SMV夹角]
@@ -581,8 +588,8 @@ export_patient_visualization(stl,            # ~10-15s
     "sv_smv_angle":   { "description": "SV-SMV 汇合几何细节" },
     "pointwise":      { "description": "逐点剖面",
                          "feature_keys": ["position", "area", "eq_diameter", "...",
-                                           "inscribed_radius", "n_rejected_oversize"],
-                         "mask_explanation": "端点带 + 内切超限 → NaN" },
+                                           "inscribed_radius", "section_valid"],
+                         "mask_explanation": "端点和求交失败位置保留索引并置 0" },
     "segments_meta":  { "description": "每段路径的几何概览" }
   },
   "statistical": {
@@ -623,23 +630,27 @@ export_patient_visualization(stl,            # ~10-15s
       "position": [0.0, 0.01, "..."],
       "arc_length_mm": [0.0, 1.25, "..."],
       "total_length_mm": 125.34,
-      "area": [0.0, 0.0, 122.5, "..."],
-      "eq_diameter": [0.0, 0.0, 12.4, "..."],
+      "area": [122.5, 123.1, 123.8, "..."],
+      "eq_diameter": [12.4, 12.43, 12.47, "..."],
       "perimeter": [...], "circularity": [...], "curvature": [...],
       "inscribed_radius": [6.1, 6.2, 6.0, "..."],
-      "endpoint_junction_mask": [1.0, 1.0, 0.0, "..."],
+      "endpoint_junction_mask": [0.0, 0.0, 0.0, "..."],
       "side_branch_contamination_mask": [0.0, 0.0, 0.0, "..."],
-      "n_endpoint_junction_zeroed": 2, "n_section_success": 100
+      "side_branch_network_voronoi": true,
+      "n_endpoint_junction_zeroed": 2, "n_section_success": 200
     }
   },
   "pointwise_meta": {
-    "n_points": 100,
-    "section_filter_policy": "endpoint_and_side_branch_zero_only",
+    "n_points": 200,
+    "section_filter_policy": "endpoint_zero_only",
     "n_total_endpoint_junction_zeroed": 2,
-    "n_total_side_branch_junction_zeroed": 0
+    "n_total_side_branch_junction_zeroed": 0,
+    "n_total_side_branch_network_voronoi": 1
   }
 }
 ```
+
+`unified_features.json` 中的逐点剖面会先删除端点置零和求交失败点，再沿剩余有效弧段线性重采样回原始点数。例如原始 200 点删除前 30 点后，剩余 170 点会在其内部插值增加 30 点，最终仍为 200 点；不会在已删除端点处补零或向外外推。
 
 **字段定位指南** (训练时如何索引):
 | 想要 | 路径 |
@@ -647,12 +658,12 @@ export_patient_visualization(stl,            # ~10-15s
 | MPV 平均直径 | `unified["statistical"]["mpv"]["mean_diameter"]` |
 | 汇合 Murray-3 偏离 | `unified["system"]["confluence_murray3_deviation"]` |
 | 入流阻力不对称 | `unified["system"]["inflow_resistance_asymmetry"]` |
-| MPV 沿线截面积曲线 (100 点) | `unified["pointwise"]["mpv"]["area"]` |
+| MPV 沿线截面积曲线 (200 点) | `unified["pointwise"]["mpv"]["area"]` |
 | MPV 长度 | `unified["statistical"]["mpv"]["length"]` 或 `unified["segments_meta"]["mpv"]["length_mm"]` |
 | 是否术后 | `unified["_meta"]["is_post_tips"]` |
 | 任意系统特征中文名 | `unified["_index"]["system"]["labels_cn"][字段名]` |
 
-### `centerline_pointwise_profiles.json`（逐点剖面）
+### `pointwise_profiles.json`（逐点剖面）
 ```json
 {
   "segments": {
@@ -709,7 +720,7 @@ result = compute_sv_smv_angle(
 | `min_radius_ratio` | 0.4 | 最小半径比例 |
 | `merge_bp_distance_mm` | 5.0 | 分支点合并距离(mm) |
 | `n_fit_points` | 10 | 曲率拟合点数 |
-| `n_profile_points` | 100 | 剖面采样点数 |
+| `n_profile_points` | 200 | 剖面采样点数 |
 | `curvature_window` | 7 | 曲率滑动窗口大小 |
 | `sample_step` | 3 | 采样步长 |
 

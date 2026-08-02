@@ -287,7 +287,7 @@ def _add_max_section_actors(renderer, stl_path, seg_data, nodes, actors_dict):
     # 加载 pointwise 数据
     pw_path = resolve_feature_path(parentdir, POINTWISE_TEMP_NAME)
     if pw_path is None:
-        print("  [Max sections] 缺少 centerline_pointwise_profiles.json")
+        print("  [Max sections] 缺少 pointwise_profiles.json")
         return
 
     with open(pw_path, 'r', encoding='utf-8') as f:

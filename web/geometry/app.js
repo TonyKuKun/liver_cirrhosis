@@ -9,7 +9,7 @@ const DEFAULT_PARAMS = {
   merge_bp_distance_mm: 5.0,
   n_fit_points: 10,
   angle_fit_length_mm: 10.0,
-  n_profile_points: 100,
+  n_profile_points: 200,
   curvature_window: 7,
   sample_step: 3,
 };

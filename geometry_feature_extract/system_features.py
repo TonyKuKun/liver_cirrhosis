@@ -22,7 +22,7 @@
 
 所有特征都从已有的:
   centerline_profiles.json     (分段路径)
-  centerline_pointwise_profiles.json (逐点 area / eq_diameter / inscribed_radius)
+  pointwise_profiles.json (逐点 area / eq_diameter / inscribed_radius)
   + 平滑后的中心线 nodes
 派生, 无需 CFD。
 
@@ -57,7 +57,7 @@ def _safe_get(d, *keys, default=None):
 
 
 def _seg_pointwise(profile_data, seg_name):
-    """从 centerline_pointwise_profiles.json 中取某段逐点剖面 (NaN-aware)。"""
+    """从 pointwise_profiles.json 中取某段逐点剖面 (NaN-aware)。"""
     if profile_data is None:
         return None
     return profile_data.get(seg_name)
@@ -82,6 +82,20 @@ def _nan_min(values):
     if arr.size == 0 or not np.any(np.isfinite(arr)):
         return None
     return float(np.nanmin(arr))
+
+
+def _section_valid_mask(profile, n, require_area=True):
+    """Return the final pointwise-section validity mask for aligned channels."""
+    valid = np.ones(int(n), dtype=bool)
+    if require_area:
+        area = np.asarray(profile.get('area', []), dtype=float)
+        if len(area) != n:
+            return np.zeros(int(n), dtype=bool)
+        valid &= np.isfinite(area) & (area > 0)
+    section_valid = np.asarray(profile.get('section_valid', []), dtype=float)
+    if len(section_valid) == n:
+        valid &= np.isfinite(section_valid) & (section_valid > 0)
+    return valid
 
 
 # ============================================================
@@ -154,6 +168,52 @@ def _directions_at_shared_endpoint(paths, nodes, fit_length_mm=10.0):
     return [_direction_from_coords(item, shared_length) for item in coords]
 
 
+def _directions_from_path_node(path, node_id, nodes, fit_length_mm=10.0):
+    """Return all outward local directions from a node on a vessel path."""
+    if not path or node_id not in path:
+        return []
+    index = path.index(node_id)
+    coords = path_to_coords(path, nodes)
+    directions = []
+    if index > 0:
+        directions.append(_direction_from_coords(
+            coords[:index + 1][::-1], fit_length_mm))
+    if index < len(path) - 1:
+        directions.append(_direction_from_coords(
+            coords[index:], fit_length_mm))
+    return [direction for direction in directions if direction is not None]
+
+
+def _tips_takeoff_angle(seg_dict, nodes, fit_length_mm=10.0):
+    """Measure TIPS against its local portal parent, including internal joins."""
+    tips = _safe_get(seg_dict, 'tips', 'path')
+    if not tips or len(tips) < 2:
+        return None
+    for node_id in (tips[0], tips[-1]):
+        tips_directions = _directions_from_path_node(
+            tips, node_id, nodes, fit_length_mm)
+        if not tips_directions:
+            continue
+        tips_direction = tips_directions[0]
+        for parent_name in ('mpv', 'lpv', 'rpv'):
+            parent = _safe_get(seg_dict, parent_name, 'path')
+            parent_directions = _directions_from_path_node(
+                parent, node_id, nodes, fit_length_mm)
+            if not parent_directions:
+                continue
+            angles = [
+                _angle_between(tips_direction, direction)
+                for direction in parent_directions
+            ]
+            angles = [angle for angle in angles if angle is not None]
+            if angles:
+                # A vessel tangent is an unoriented line. Internal joins expose
+                # both rays; endpoint joins use the acute line-to-branch angle.
+                return float(min(
+                    min(angle, 180.0 - angle) for angle in angles))
+    return None
+
+
 def _angle_between(v1, v2):
     """两单位向量夹角 (度)。任一为 None 返回 None。"""
     if v1 is None or v2 is None:
@@ -210,18 +270,16 @@ def _angle_features(seg_dict, nodes):
     d_lpv, d_rpv = _directions_at_shared_endpoint([lpv, rpv], nodes)
     out['angle_lpv_rpv'] = _angle_between(d_lpv, d_rpv)
 
-    # MPV 分叉总角度 = LPV 角 + RPV 角 (粗略反映分叉张开)
-    a1 = out['angle_mpv_lpv']
-    a2 = out['angle_mpv_rpv']
-    out['angle_mpv_bifurc_total'] = (a1 + a2) if (a1 is not None and a2 is not None) else None
+    # The daughter-to-daughter angle is the actual bifurcation opening. Adding
+    # the two outward MPV angles produces impossible values above 180 degrees.
+    out['angle_mpv_bifurc_total'] = out['angle_lpv_rpv']
 
     # MPV 分叉非平面性
     mpv_axis, d_lpv, d_rpv = _directions_at_shared_endpoint([mpv, lpv, rpv], nodes)
     out['mpv_bifurc_planarity_deg'] = _coplanarity(mpv_axis, d_lpv, d_rpv)
 
-    # TIPS take-off (post-tips)
-    mpv_tips, tips_out = _directions_at_shared_endpoint([mpv, tips], nodes)
-    out['angle_mpv_tips'] = _angle_between(mpv_tips, tips_out)
+    # TIPS can join the interior of MPV, LPV, or RPV rather than a shared end.
+    out['angle_mpv_tips'] = _tips_takeoff_angle(seg_dict, nodes)
 
     return out
 
@@ -230,17 +288,15 @@ def _angle_features(seg_dict, nodes):
 # (B) 直径 / 面积比 (Murray, conservation, asymmetry)
 # ============================================================
 
-def _junction_section_values(seg_dict, profile_data, vessels,
-                             offset_mm=10.0, half_window_mm=2.0,
-                             max_offset_mm=30.0):
-    """Read robust local section values at one shared vessel junction."""
+def _junction_section_values(seg_dict, profile_data, vessels):
+    """Read each vessel's first valid section away from a shared junction."""
     if profile_data is None:
         return {}
     paths = [_safe_get(seg_dict, vessel, 'path') for vessel in vessels]
     endpoint_id = _shared_endpoint(*paths)
     if endpoint_id is None:
         return {}
-    candidates = {}
+    out = {}
     for vessel, path in zip(vessels, paths):
         profile = _seg_pointwise(profile_data, vessel)
         if profile is None:
@@ -249,7 +305,7 @@ def _junction_section_values(seg_dict, profile_data, vessels,
         diameter = np.asarray(profile.get('eq_diameter', []), dtype=float)
         area = np.asarray(profile.get('area', []), dtype=float)
         n = min(len(arc), len(diameter), len(area))
-        if n < 2:
+        if n < 1:
             return {}
         arc, diameter, area = arc[:n], diameter[:n], area[:n]
         total_length = _nan_max(arc)
@@ -257,36 +313,18 @@ def _junction_section_values(seg_dict, profile_data, vessels,
             return {}
         from_junction = arc if path[0] == endpoint_id else total_length - arc
         valid = (
-            np.isfinite(from_junction) & np.isfinite(diameter) & (diameter > 0)
+            np.isfinite(from_junction)
+            & np.isfinite(diameter) & (diameter > 0)
             & np.isfinite(area) & (area > 0)
-            & (from_junction >= float(offset_mm))
-            & (from_junction <= float(max_offset_mm))
         )
         if not np.any(valid):
             return {}
-        candidates[vessel] = {
-            'distance': from_junction,
-            'diameter': diameter,
-            'area': area,
-            'first_reliable_distance': float(np.min(from_junction[valid])),
+        valid_indices = np.flatnonzero(valid)
+        first = int(valid_indices[np.argmin(from_junction[valid_indices])])
+        out[vessel] = {
+            'diameter': float(diameter[first]),
+            'area': float(area[first]),
         }
-
-    # A shared target keeps the three measurements physically comparable while
-    # allowing endpoint protection masks to exclude contaminated sections.
-    target = max(item['first_reliable_distance'] for item in candidates.values())
-    out = {}
-    for vessel, item in candidates.items():
-        window = np.abs(item['distance'] - target) <= float(half_window_mm)
-
-        def median(values):
-            valid = window & np.isfinite(values) & (values > 0)
-            return float(np.median(values[valid])) if np.any(valid) else None
-
-        local_diameter = median(item['diameter'])
-        local_area = median(item['area'])
-        if local_diameter is None or local_area is None:
-            return {}
-        out[vessel] = {'diameter': local_diameter, 'area': local_area}
     return out
 
 
@@ -450,49 +488,55 @@ def _length_tortuosity_features(seg_dict, stat_features, nodes):
 # (D) Hydraulic 阻力 (Poiseuille-like)
 # ============================================================
 
-def _segment_resistance_integral(profile, length_mm,
-                                  use_inscribed=True, eps=1e-3):
+def _segment_resistance_integral(profile, length_mm, eps=1e-3):
     """
     沿一段中心线积分 ∫ dl / r^4, 单位: 1/mm^3 (省略 8μ/π 常数因子)。
 
-    优先用 inscribed_radius (来自距离变换, 较稳健),
-    否则回退 eq_diameter / 2。
+    优先使用最终 Voronoi 截面的 hydraulic_diameter / 2；旧数据缺少
+    该通道时依次回退 eq_diameter / 2 和 inscribed_radius。
 
-    跳过 NaN / 半径太小的位置。返回 (R_int, n_used) 或 (None, 0)。
+    跳过无效截面且不跨缺口补半径。返回
+    (R_int, n_used, covered_length_mm)。
     """
     if profile is None:
-        return None, 0
+        return None, 0, 0.0
     n_pts = len(profile.get('arc_length_mm', []))
     if n_pts < 2 or length_mm is None or length_mm < 1e-6:
-        return None, 0
+        return None, 0, 0.0
 
     arc = np.asarray(profile['arc_length_mm'], dtype=float)
-    r_inscribed = np.asarray(profile.get('inscribed_radius', []), dtype=float)
-    eq_d = np.asarray(profile.get('eq_diameter', []), dtype=float)
+    radius_candidates = (
+        ('hydraulic_diameter', 0.5),
+        ('eq_diameter', 0.5),
+        ('inscribed_radius', 1.0),
+    )
+    r_arr = None
+    for channel, scale in radius_candidates:
+        values = np.asarray(profile.get(channel, []), dtype=float)
+        if len(values) != n_pts:
+            continue
+        candidate = float(scale) * values
+        if np.any(np.isfinite(candidate) & (candidate > eps)):
+            r_arr = candidate
+            break
+    if r_arr is None:
+        return None, 0, 0.0
 
-    # 选择半径序列
-    if use_inscribed and np.any(np.isfinite(r_inscribed) & (r_inscribed > eps)):
-        r_arr = r_inscribed
-    else:
-        r_arr = 0.5 * eq_d  # 退回等效直径/2
-
-    valid = np.isfinite(arc) & np.isfinite(r_arr) & (r_arr > eps)
+    valid = (
+        np.isfinite(arc) & np.isfinite(r_arr) & (r_arr > eps)
+        & _section_valid_mask(profile, n_pts)
+    )
     if np.sum(valid) < 2:
-        return None, 0
+        return None, int(np.sum(valid)), 0.0
 
     dl = np.diff(arc)
     continuous_pairs = valid[:-1] & valid[1:] & np.isfinite(dl) & (dl > 0)
     if not np.any(continuous_pairs):
-        return None, int(np.sum(valid))
-    valid_arc = arc[valid]
-    span = float(valid_arc[-1] - valid_arc[0])
+        return None, int(np.sum(valid)), 0.0
     covered_length = float(np.sum(dl[continuous_pairs]))
-    # Do not bridge a missing interior region with an invented radius.
-    if span <= 0 or covered_length / span < 0.98:
-        return None, int(np.sum(valid))
     r_mid = 0.5 * (r_arr[:-1] + r_arr[1:])
     R = float(np.sum(dl[continuous_pairs] / (r_mid[continuous_pairs] ** 4)))
-    return R, int(np.sum(valid))
+    return R, int(np.sum(valid)), covered_length
 
 
 def _hydraulic_features(stat_features, profile_data):
@@ -510,11 +554,13 @@ def _hydraulic_features(stat_features, profile_data):
 
     # 各段阻力积分
     seg_R = {}
+    seg_covered_length = {}
     for seg in ['mpv', 'sv', 'smv', 'lpv', 'rpv', 'tips']:
         L = stat_features.get(f"{seg}_length")
         prof = _seg_pointwise(profile_data, seg)
-        R, _ = _segment_resistance_integral(prof, L)
+        R, _, covered_length = _segment_resistance_integral(prof, L)
         seg_R[seg] = R
+        seg_covered_length[seg] = covered_length
         out[f"{seg}_resistance_integral"] = R
 
     # 入流并联阻力 R_in = (1/R_SV + 1/R_SMV)^{-1}
@@ -533,7 +579,7 @@ def _hydraulic_features(stat_features, profile_data):
         out['inflow_resistance_asymmetry'] = None
 
     # MPV 等效半径: r_eff^4 = L / R_int
-    L_mpv = stat_features.get('mpv_length')
+    L_mpv = seg_covered_length.get('mpv')
     R_mpv = seg_R.get('mpv')
     if L_mpv is not None and R_mpv is not None and R_mpv > 1e-12:
         out['mpv_effective_radius'] = float((L_mpv / R_mpv) ** 0.25)
@@ -583,27 +629,49 @@ def _topology_features(seg_dict, stat_features, profile_data, branch_points,
                     if seg_dict.get(cn) is not None)
     out['n_collaterals_detected'] = int(n_collat)
 
-    # 整树分叉点数 / 单位 MPV 长度
+    # Branch points per assigned anatomical-tree length.
     n_bp = len(branch_points) if branch_points is not None else None
-    tree_length = sum(
-        float(stat_features.get(f'{segment}_length') or 0.0)
-        for segment in ('mpv', 'sv', 'smv', 'lpv', 'rpv', 'lgv', 'pgv', 'tips')
-    )
+    tree_length = stat_features.get('total_centerline_length')
+    if tree_length is None or tree_length <= 0:
+        tree_length = sum(
+            float(stat_features.get(f'{segment}_length') or 0.0)
+            for segment in (
+                'mpv', 'sv', 'smv', 'lpv', 'rpv', 'lgv', 'pgv', 'tips')
+        )
     if n_bp is not None and tree_length > 1e-6:
         out['branchpoint_density_per_cm'] = float(n_bp / (tree_length / 10.0))
     else:
         out['branchpoint_density_per_cm'] = None
 
-    # MPV 锥度系数: (D_proximal - D_distal) / L
+    # MPV 锥度系数: (D_confluence - D_bifurcation) / L. Normalize the
+    # anatomical direction because serialized MPV paths may run either way.
     pw_mpv = _seg_pointwise(profile_data, 'mpv')
     if pw_mpv is not None and L_mpv is not None and L_mpv > 1e-6:
         eq_d = np.asarray(pw_mpv.get('eq_diameter', []), dtype=float)
-        valid = np.isfinite(eq_d) & (eq_d > 0)
+        arc = np.asarray(pw_mpv.get('arc_length_mm', []), dtype=float)
+        valid = (
+            np.isfinite(eq_d) & (eq_d > 0)
+            & _section_valid_mask(pw_mpv, len(eq_d))
+        )
+        if len(arc) != len(eq_d):
+            valid = np.zeros(len(eq_d), dtype=bool)
         if np.any(valid):
             idx_first = int(np.argmax(valid))
             idx_last = len(eq_d) - 1 - int(np.argmax(valid[::-1]))
-            d_prox = float(eq_d[idx_first])
-            d_dist = float(eq_d[idx_last])
+            start_window = valid & (arc <= arc[idx_first] + 5.0)
+            end_window = valid & (arc >= arc[idx_last] - 5.0)
+            d_start = float(np.median(eq_d[start_window]))
+            d_end = float(np.median(eq_d[end_window]))
+            mpv_path = _safe_get(seg_dict, 'mpv', 'path')
+            confluence_id = _shared_endpoint(
+                mpv_path,
+                _safe_get(seg_dict, 'sv', 'path'),
+                _safe_get(seg_dict, 'smv', 'path'))
+            if (mpv_path and confluence_id is not None
+                    and mpv_path[-1] == confluence_id):
+                d_prox, d_dist = d_end, d_start
+            else:
+                d_prox, d_dist = d_start, d_end
             out['mpv_taper_coefficient'] = float((d_prox - d_dist) / L_mpv)
             out['mpv_proximal_diameter'] = d_prox
             out['mpv_distal_diameter'] = d_dist
@@ -740,9 +808,15 @@ def _clinical_summary_features(seg_dict, stat_features, profile_data,
     pvt_grade = None
     min_max_ratio = None
     if pw_mpv is not None:
-        # solidity (端点 NaN 已掩码)
+        # Endpoint and junction masks are represented as zero, not NaN.
+        area = np.asarray(pw_mpv.get('area', []), dtype=float)
+        valid_section = _section_valid_mask(pw_mpv, len(area))
         sol = np.asarray(pw_mpv.get('solidity', []), dtype=float)
-        sol_min = _nan_min(sol)
+        if len(sol) == len(area):
+            sol_valid = valid_section & np.isfinite(sol) & (sol > 0)
+        else:
+            sol_valid = np.zeros(len(area), dtype=bool)
+        sol_min = _nan_min(sol[sol_valid])
         if sol_min is not None:
             if sol_min > _PVT_SOLIDITY_NORMAL:
                 pvt_grade = 0
@@ -751,7 +825,7 @@ def _clinical_summary_features(seg_dict, stat_features, profile_data,
             else:
                 pvt_grade = 2
         # MPV 最小/最大面积比 (focal thrombus 时显著偏低)
-        a_arr = np.asarray(pw_mpv.get('area', []), dtype=float)
+        a_arr = area[valid_section]
         a_min, a_max = _nan_min(a_arr), _nan_max(a_arr)
         if a_min is not None and a_max is not None and a_max > 1e-6:
             min_max_ratio = a_min / a_max
@@ -790,7 +864,7 @@ def compute_system_features(seg_dict, stat_features, profile_data,
     参数:
         seg_dict: dict, centerline_profiles.json 的 'segments' 子项
         stat_features: dict, extract_features 的 flat dict (含 mpv_length, ...)
-        profile_data: dict 或 None, centerline_pointwise_profiles.json
+        profile_data: dict 或 None, pointwise_profiles.json
         nodes: dict, 中心线节点 (id -> {x,y,z})
         branch_points: iterable of int, 分叉点 id
 
@@ -869,9 +943,9 @@ SYSTEM_FEATURE_LABELS_CN = {
     'angle_mpv_lpv': 'MPV-LPV夹角',
     'angle_mpv_rpv': 'MPV-RPV夹角',
     'angle_lpv_rpv': 'LPV-RPV夹角',
-    'angle_mpv_bifurc_total': 'MPV分叉总角',
+    'angle_mpv_bifurc_total': 'LPV-RPV分叉开角',
     'mpv_bifurc_planarity_deg': 'MPV分叉非平面度',
-    'angle_mpv_tips': 'TIPS入射角',
+    'angle_mpv_tips': 'TIPS与局部门静脉母血管夹角',
     'sv_smv_diameter_asymmetry': 'SV-SMV直径不对称',
     'sv_mpv_diameter_ratio': 'SV/MPV直径比',
     'smv_mpv_diameter_ratio': 'SMV/MPV直径比',

@@ -223,7 +223,6 @@ def test_pvp_dataset_loads_without_label(tmp_path):
                 "r_insc_to_r_eq_ratio": [1.0] * len(values),
                 "dA_ds_norm": [0.0] * len(values),
                 "circularity": [0.9] * len(values),
-                "n_components": [1.0] * len(values),
             }
         },
         "statistical": {},
