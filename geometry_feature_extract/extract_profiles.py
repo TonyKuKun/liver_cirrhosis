@@ -1562,82 +1562,233 @@ def _terminal_valid_median(values, valid, boundary, side, n_points=5):
     return float(np.median(np.asarray(values, dtype=float)[nearby]))
 
 
-def _detect_terminal_area_jump(area, arc, valid, side, ratio_threshold,
-                               reference_points=5):
-    """Find an area transition that is actually anchored at a terminal end.
-
-    The previous implementation only compared the median of the complete
-    endpoint prefix/suffix with the next interior samples.  A gradual taper
-    could therefore make a remote low-area section look like an endpoint
-    junction and mask most of the vessel.  First require the physical endpoint
-    itself to be enlarged relative to the vessel's valid median area.  Only
-    then scan the complete path with the existing area-ratio policy.  This
-    preserves long or gradual true junction transitions without allowing a
-    low area near the opposite end to create a false terminal event.
-    """
-    total = float(arc[-1]) if len(arc) else 0.0
-    if total <= 0:
-        return None
-
+def _scan_local_area_transitions(area, valid, ratio_threshold,
+                                 reference_points=5):
+    """Scan both directions for local area steps at two adjacent scales."""
+    values = np.asarray(area, dtype=float)
     valid_indices = np.where(np.asarray(valid, dtype=bool))[0]
-    if len(valid_indices) == 0:
-        return None
-    endpoint_index = int(valid_indices[0] if side == 'start'
-                         else valid_indices[-1])
-    endpoint_value = float(area[endpoint_index])
-    interior_reference = float(np.median(area[valid_indices]))
-    if (interior_reference <= 0
-            or endpoint_value / interior_reference < ratio_threshold):
-        return None
-
+    window = max(1, int(reference_points))
+    window_sizes = sorted({window, 2 * window})
     candidates = []
-    if side == 'start':
-        boundary_indices = np.arange(len(arc), dtype=int)
-        for boundary in boundary_indices:
-            edge = valid & (arc <= arc[boundary])
-            reference = _adjacent_valid_median(
-                area, valid, boundary, 'start', reference_points)
-            terminal = _terminal_valid_median(
-                area, valid, boundary, 'start', reference_points)
-            if (np.sum(edge) < 1 or reference is None or reference <= 0
-                    or terminal is None):
+
+    for split in range(len(valid_indices) - 1):
+        measurements = []
+        for scale in window_sizes:
+            left_indices = valid_indices[
+                max(0, split - scale + 1):split + 1]
+            right_indices = valid_indices[split + 1:split + 1 + scale]
+            if len(left_indices) == 0 or len(right_indices) == 0:
                 continue
-            edge_values = area[edge]
-            edge_median = float(np.median(edge_values))
-            overall_ratio = edge_median / reference
-            local_ratio = terminal / reference
-            if overall_ratio >= ratio_threshold:
-                candidates.append(
-                    (int(boundary), overall_ratio, local_ratio))
-    else:
-        boundary_indices = np.arange(len(arc), dtype=int)
-        for boundary in boundary_indices:
-            edge = valid & (arc >= arc[boundary])
-            reference = _adjacent_valid_median(
-                area, valid, boundary, 'end', reference_points)
-            terminal = _terminal_valid_median(
-                area, valid, boundary, 'end', reference_points)
-            if (np.sum(edge) < 1 or reference is None or reference <= 0
-                    or terminal is None):
+            left_level = float(np.median(values[left_indices]))
+            right_level = float(np.median(values[right_indices]))
+            if left_level <= 0 or right_level <= 0:
                 continue
-            edge_values = area[edge]
-            edge_median = float(np.median(edge_values))
-            overall_ratio = edge_median / reference
-            local_ratio = terminal / reference
-            if overall_ratio >= ratio_threshold:
-                candidates.append(
-                    (int(boundary), overall_ratio, local_ratio))
+
+            if left_level >= right_level:
+                direction = 'down'
+                ratio = left_level / right_level
+            else:
+                direction = 'up'
+                ratio = right_level / left_level
+            measurements.append({
+                'split_order': int(split),
+                'left_index': int(left_indices[-1]),
+                'right_index': int(right_indices[0]),
+                'left_level': left_level,
+                'right_level': right_level,
+                'direction': direction,
+                'ratio': float(ratio),
+                'window_points': int(scale),
+            })
+        if not measurements:
+            continue
+        evidence = max(measurements, key=lambda item: item['ratio'])
+        if evidence['ratio'] < ratio_threshold:
+            continue
+        base = next(
+            item for item in measurements
+            if item['window_points'] == window)
+        evidence = dict(evidence)
+        evidence['localization_ratio'] = (
+            float(base['ratio'])
+            if base['direction'] == evidence['direction'] else 1.0)
+        candidates.append(evidence)
 
     if not candidates:
+        return []
+
+    # A single physical step is usually detected at several neighbouring
+    # splits because both medians use multiple samples. Collapse each run to
+    # its strongest representative before classifying rises and falls.
+    groups = [[candidates[0]]]
+    for candidate in candidates[1:]:
+        previous = groups[-1][-1]
+        if (candidate['direction'] == previous['direction']
+                and candidate['split_order'] == previous['split_order'] + 1):
+            groups[-1].append(candidate)
+        else:
+            groups.append([candidate])
+
+    transitions = []
+    for group in groups:
+        direction = group[0]['direction']
+        evidence_ratio = max(item['ratio'] for item in group)
+        if direction == 'down':
+            selected = max(
+                group,
+                key=lambda item: (
+                    item['localization_ratio'], item['left_index']))
+        else:
+            selected = max(
+                group,
+                key=lambda item: (
+                    item['localization_ratio'], -item['right_index']))
+        selected = dict(selected)
+        selected['evidence_ratio'] = float(evidence_ratio)
+        transitions.append(selected)
+    return transitions
+
+
+def _paired_area_transition_indices(
+        transitions, ratio_threshold, max_span_points=None):
+    """Pair local bumps and valleys whose area returns to its prior level."""
+    max_span = (
+        None if max_span_points is None
+        else max(1, int(max_span_points)))
+    pair_candidates = []
+    for index in range(len(transitions) - 1):
+        first = transitions[index]
+        second = transitions[index + 1]
+        if first['direction'] == second['direction']:
+            continue
+        span_points = int(
+            second['right_index'] - first['left_index'])
+        if max_span is not None and span_points > max_span:
+            continue
+        before = float(first['left_level'])
+        after = float(second['right_level'])
+        if before <= 0 or after <= 0:
+            continue
+        recovery_ratio = max(before, after) / min(before, after)
+        if recovery_ratio >= ratio_threshold:
+            continue
+        pair_candidates.append((
+            span_points,
+            float(recovery_ratio), index, index + 1))
+
+    # Prefer the shortest closed excursion. This leaves a true terminal step
+    # unpaired when a side-branch bump or thrombus valley occurs farther in.
+    paired = set()
+    pairs = []
+    for _, recovery_ratio, first_index, second_index in sorted(pair_candidates):
+        if first_index in paired or second_index in paired:
+            continue
+        paired.update((first_index, second_index))
+        pairs.append((first_index, second_index, recovery_ratio))
+    return paired, pairs
+
+
+def _select_terminal_transition(
+        transitions, eligible_indices, ratio_threshold, side, direction,
+        local_span_points):
+    """Choose the endpoint-side group in a same-direction transition chain."""
+    ordered = sorted(eligible_indices)
+    if side == 'end':
+        ordered.reverse()
+    strong_position = next((
+        position for position, index in enumerate(ordered)
+        if transitions[index]['direction'] == direction
+        and transitions[index]['evidence_ratio'] >= ratio_threshold
+    ), None)
+    if strong_position is None:
         return None
-    # Multi-step confluences can produce several valid candidates. Select the
-    # strongest local area transition; for equal ratios prefer the boundary
-    # farthest from the junction before applying the fixed six-point padding.
-    if side == 'start':
-        selected = max(candidates, key=lambda item: (item[2], item[0]))
-    else:
-        selected = max(candidates, key=lambda item: (item[2], -item[0]))
-    return selected[0], selected[1]
+
+    chain_start = strong_position
+    while chain_start > 0:
+        previous = transitions[ordered[chain_start - 1]]
+        if previous['direction'] != direction:
+            break
+        chain_start -= 1
+
+    chain = ordered[chain_start:strong_position + 1]
+    selected_position = 0
+    while selected_position + 1 < len(chain):
+        current = transitions[chain[selected_position]]
+        following = transitions[chain[selected_position + 1]]
+        current_index = (
+            current['left_index'] if side == 'start'
+            else current['right_index'])
+        following_index = (
+            following['left_index'] if side == 'start'
+            else following['right_index'])
+        if abs(following_index - current_index) > local_span_points:
+            break
+        selected_position += 1
+
+    selected = dict(transitions[chain[selected_position]])
+    selected['terminal_evidence_ratio'] = float(max(
+        transitions[index]['evidence_ratio'] for index in chain))
+    return selected
+
+
+def _detect_terminal_area_jumps(
+        area, arc, valid, ratio_threshold, reference_points=5,
+        allow_terminal_start=True, allow_terminal_end=True):
+    """Find endpoint-connected expansion while ignoring closed bumps/valleys."""
+    total = float(arc[-1]) if len(arc) else 0.0
+    if total <= 0:
+        return {'start': None, 'end': None}, [], []
+
+    context_threshold = float(np.sqrt(ratio_threshold))
+    transitions = _scan_local_area_transitions(
+        area, valid, context_threshold, reference_points=reference_points)
+    if not transitions:
+        return {'start': None, 'end': None}, [], []
+
+    pairing_span_points = 8 * max(1, int(reference_points))
+    paired, pairs = _paired_area_transition_indices(
+        transitions, ratio_threshold,
+        max_span_points=pairing_span_points)
+    strong_indices = {
+        index for index, transition in enumerate(transitions)
+        if transition['evidence_ratio'] >= ratio_threshold
+    }
+    unpaired_indices = set(range(len(transitions))) - paired
+    terminal_indices = strong_indices - paired
+
+    # A vessel such as MPV may genuinely have enlarged junction sections at
+    # both ends. Area alone cannot distinguish those from one broad central
+    # low region, so anatomical eligibility of both endpoints takes priority.
+    if (allow_terminal_start and allow_terminal_end and len(transitions) >= 2
+            and transitions[0]['direction'] == 'down'
+            and transitions[0]['evidence_ratio'] >= ratio_threshold
+            and transitions[-1]['direction'] == 'up'
+            and transitions[-1]['evidence_ratio'] >= ratio_threshold):
+        terminal_indices.update((0, len(transitions) - 1))
+
+    detected = {'start': None, 'end': None}
+
+    if allow_terminal_start:
+        selected = _select_terminal_transition(
+            transitions, unpaired_indices, ratio_threshold,
+            side='start', direction='down',
+            local_span_points=pairing_span_points)
+        if selected is not None:
+            detected['start'] = (
+                int(selected['left_index']),
+                float(selected['terminal_evidence_ratio']))
+
+    if allow_terminal_end:
+        selected = _select_terminal_transition(
+            transitions, unpaired_indices, ratio_threshold,
+            side='end', direction='up',
+            local_span_points=pairing_span_points)
+        if selected is not None:
+            detected['end'] = (
+                int(selected['right_index']),
+                float(selected['terminal_evidence_ratio']))
+
+    return detected, transitions, pairs
 
 
 def _mask_endpoint_junction_sections(
@@ -1672,11 +1823,12 @@ def _mask_endpoint_junction_sections(
 
     terminal_mask = np.zeros(n, dtype=bool)
     events = []
-    start_event = None
-    if allow_terminal_start:
-        start_event = _detect_terminal_area_jump(
-            raw_area, arc, valid, 'start', ratio_threshold,
-            reference_points=terminal_reference_points)
+    detected, transitions, transition_pairs = _detect_terminal_area_jumps(
+        raw_area, arc, valid, ratio_threshold,
+        reference_points=terminal_reference_points,
+        allow_terminal_start=allow_terminal_start,
+        allow_terminal_end=allow_terminal_end)
+    start_event = detected['start']
     if start_event is not None:
         boundary, ratio = start_event
         padded_boundary = min(n - 1, boundary + terminal_padding_sections)
@@ -1704,11 +1856,7 @@ def _mask_endpoint_junction_sections(
             'protected_side_branch_arc_mm': protected_arc,
         })
 
-    end_event = None
-    if allow_terminal_end:
-        end_event = _detect_terminal_area_jump(
-            raw_area, arc, valid, 'end', ratio_threshold,
-            reference_points=terminal_reference_points)
+    end_event = detected['end']
     if end_event is not None:
         boundary, ratio = end_event
         padded_boundary = max(0, boundary - terminal_padding_sections)
@@ -1757,6 +1905,18 @@ def _mask_endpoint_junction_sections(
         'allow_terminal_end': bool(allow_terminal_end),
         'terminal_padding_sections': terminal_padding_sections,
         'terminal_reference_points': terminal_reference_points,
+        'transition_scan_method': 'bidirectional_local_area_ratio',
+        'transition_pairing_method': 'closed_bump_or_valley',
+        'transition_context_ratio_threshold': float(np.sqrt(ratio_threshold)),
+        'transition_pairing_max_span_points': int(
+            8 * terminal_reference_points),
+        'transition_window_scales_points': sorted({
+            terminal_reference_points, 2 * terminal_reference_points}),
+        'n_strong_local_transitions': int(sum(
+            transition['evidence_ratio'] >= ratio_threshold
+            for transition in transitions)),
+        'n_local_transitions': int(len(transitions)),
+        'n_paired_local_transitions': int(2 * len(transition_pairs)),
         'protected_side_branch_arcs_mm': protected_arcs,
         'side_branch_protection_mm': side_branch_protection_mm,
     }

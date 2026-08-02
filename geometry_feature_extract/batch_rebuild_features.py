@@ -71,7 +71,7 @@ def rebuild_dataset(root: Path, n_points: int = 200) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("root", type=Path)
+    parser.add_argument("--root", default=r'F:\PCG data\dataset\test4all_sample', type=Path)
     parser.add_argument("--n-points", type=int, default=200)
     args = parser.parse_args()
     result = rebuild_dataset(args.root, n_points=args.n_points)

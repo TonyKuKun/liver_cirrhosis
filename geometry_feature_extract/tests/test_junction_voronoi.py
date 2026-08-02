@@ -401,6 +401,250 @@ class VoronoiSectionTests(unittest.TestCase):
         self.assertEqual(result["area_jump_events"], [])
         self.assertEqual(result["n_endpoint_junction_zeroed"], 0)
 
+    def test_local_step_does_not_require_enlarged_endpoint_sample(self):
+        area = np.r_[
+            np.linspace(350.0, 620.0, 60),
+            np.full(140, 300.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_padding_sections=6,
+        )
+
+        self.assertEqual(len(result["area_jump_events"]), 1)
+        self.assertGreaterEqual(
+            result["area_jump_events"][0]["critical_index"], 58)
+
+    def test_wide_terminal_transition_is_detected_at_second_scale(self):
+        area = np.r_[
+            np.linspace(385.0, 242.0, 21),
+            np.full(179, 185.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_padding_sections=6,
+            terminal_reference_points=5,
+        )
+
+        self.assertEqual(len(result["area_jump_events"]), 1)
+        self.assertEqual(
+            result["area_jump_parameters"]["transition_window_scales_points"],
+            [5, 10],
+        )
+
+    def test_internal_side_branch_bump_does_not_mask_endpoint(self):
+        area = np.r_[
+            np.full(50, 100.0),
+            np.full(20, 300.0),
+            np.full(130, 100.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+        )
+
+        self.assertEqual(result["area_jump_events"], [])
+
+    def test_internal_thrombus_valley_does_not_mask_endpoint(self):
+        area = np.r_[
+            np.full(50, 200.0),
+            np.full(20, 50.0),
+            np.full(130, 200.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+        )
+
+        self.assertEqual(result["area_jump_events"], [])
+
+    def test_terminal_expansion_survives_internal_side_branch_pairing(self):
+        area = np.r_[
+            np.full(20, 300.0),
+            np.full(40, 100.0),
+            np.full(20, 300.0),
+            np.full(120, 100.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_padding_sections=6,
+        )
+
+        self.assertEqual(len(result["area_jump_events"]), 1)
+        self.assertLess(result["area_jump_events"][0]["critical_index"], 30)
+
+    def test_weaker_return_step_closes_internal_area_bump(self):
+        area = np.r_[
+            np.full(140, 170.0),
+            np.full(20, 250.0),
+            np.full(40, 145.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+        )
+
+        self.assertEqual(result["area_jump_events"], [])
+        self.assertEqual(
+            result["area_jump_parameters"]["n_strong_local_transitions"], 1)
+        self.assertEqual(
+            result["area_jump_parameters"]["n_paired_local_transitions"], 2)
+
+    def test_broad_terminal_expansion_is_not_paired_as_local_bump(self):
+        area = np.r_[
+            np.linspace(350.0, 625.0, 60),
+            np.full(140, 310.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_reference_points=5,
+        )
+
+        self.assertEqual(len(result["area_jump_events"]), 1)
+        self.assertGreater(
+            result["area_jump_events"][0]["critical_index"], 50)
+        self.assertEqual(
+            result["area_jump_parameters"][
+                "transition_pairing_max_span_points"],
+            40,
+        )
+
+    def test_broad_low_trunk_does_not_hide_start_junction(self):
+        area = np.r_[
+            np.linspace(420.0, 180.0, 21),
+            np.full(80, 190.0),
+            np.linspace(225.0, 300.0, 20),
+            np.full(79, 300.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=True,
+            terminal_reference_points=5,
+        )
+
+        event_types = {event["type"] for event in result["area_jump_events"]}
+        self.assertIn("endpoint_start_interval_zeroed", event_types)
+
+    def test_remote_stronger_drop_does_not_move_monotonic_boundary(self):
+        area = np.r_[
+            np.linspace(580.0, 140.0, 61),
+            np.linspace(140.0, 100.0, 10),
+            np.linspace(100.0, 23.0, 98),
+            np.linspace(23.0, 6.0, 31),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_reference_points=5,
+        )
+
+        event = result["area_jump_events"][0]
+        self.assertLess(event["critical_index"], 80)
+        self.assertGreaterEqual(event["area_ratio"], 1.6)
+
     def test_endpoint_area_ratio_accepts_two_interior_reference_sections(self):
         values = np.asarray([300.0, 300.0, 100.0, 100.0])
         valid = np.ones(len(values), dtype=bool)
