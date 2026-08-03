@@ -148,6 +148,14 @@ def _process_one_patient(stl_path, post_tips, params, steps):
                 section_step=params['sample_step'],
                 area_jump_ratio_threshold=params[
                     'area_jump_ratio_threshold'],
+                mpv_area_jump_ratio_threshold=params[
+                    'mpv_area_jump_ratio_threshold'],
+                smv_area_jump_ratio_threshold=params[
+                    'smv_area_jump_ratio_threshold'],
+                lpv_rpv_area_jump_ratio_threshold=params[
+                    'lpv_rpv_area_jump_ratio_threshold'],
+                lpv_rpv_minimum_endpoint_sections=params[
+                    'lpv_rpv_minimum_endpoint_sections'],
                 area_jump_reference_points=params[
                     'area_jump_reference_points'],
                 centerline_voronoi_exclusion_mm=params[
@@ -443,6 +451,14 @@ DEFAULT_PARAMS = {
                                      # 回弯通过 3D Voronoi 归属裁剪, 防自相交
     # Persistent cross-section expansion: confluence spillover / internal intrusion.
     'area_jump_ratio_threshold': 1.6,
+    # MPV and SMV use the more sensitive 1.4 trigger.
+    'mpv_area_jump_ratio_threshold': 1.4,
+    'smv_area_jump_ratio_threshold': 1.4,
+    # LPV/RPV are topology-confirmed portal bifurcation branches.  Their
+    # junction changes are often weaker, so use a targeted lower threshold and
+    # always exclude at least the first six resampled sections.
+    'lpv_rpv_area_jump_ratio_threshold': 1.4,
+    'lpv_rpv_minimum_endpoint_sections': 6,
     'area_jump_reference_points': 5,
 }
 

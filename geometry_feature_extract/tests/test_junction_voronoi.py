@@ -9,10 +9,26 @@ from extract_profiles import (
     _build_network_voronoi_centerlines,
     _clip_section_to_centerline_voronoi,
     _mask_endpoint_junction_sections,
+    _segment_area_jump_ratio_threshold,
 )
 
 
 class JunctionPlanTests(unittest.TestCase):
+    def test_mpv_and_smv_use_independent_area_ratio_thresholds(self):
+        args = {
+            "area_jump_ratio_threshold": 1.6,
+            "mpv_area_jump_ratio_threshold": 1.4,
+            "smv_area_jump_ratio_threshold": 1.4,
+            "lpv_rpv_area_jump_ratio_threshold": 1.4,
+        }
+
+        self.assertEqual(
+            _segment_area_jump_ratio_threshold("mpv", **args), 1.4)
+        self.assertEqual(
+            _segment_area_jump_ratio_threshold("smv", **args), 1.4)
+        self.assertEqual(
+            _segment_area_jump_ratio_threshold("sv", **args), 1.6)
+
     def test_shared_endpoint_marks_every_vessel_endpoint(self):
         segments = {
             "mpv": {"path": [1, 2]},
@@ -180,6 +196,55 @@ class VoronoiSectionTests(unittest.TestCase):
         self.assertTrue(np.all(np.asarray(result["area"])[masked] == 0))
         self.assertGreater(result["area"][event["masked_end_index"] + 1], 0)
 
+    def test_portal_branch_minimum_masks_six_sections_without_area_jump(self):
+        n = 200
+        area = np.full(n, 100.0)
+        profile = {
+            "position": np.linspace(0, 1, n).tolist(),
+            "arc_length_mm": np.arange(n, dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(n, 10.0).tolist(),
+            "eq_diameter": np.full(n, 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.4,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            minimum_terminal_sections=6,
+        )
+
+        masked = np.where(np.asarray(result["endpoint_junction_mask"]) > 0)[0]
+        np.testing.assert_array_equal(masked, np.arange(6))
+        self.assertEqual(
+            result["area_jump_events"][0]["type"],
+            "endpoint_start_minimum_zeroed",
+        )
+        self.assertEqual(
+            result["area_jump_parameters"]["minimum_terminal_sections"], 6)
+
+    def test_minimum_terminal_mask_respects_disabled_endpoint(self):
+        n = 20
+        area = np.full(n, 100.0)
+        profile = {
+            "position": np.linspace(0, 1, n).tolist(),
+            "arc_length_mm": np.arange(n, dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            allow_terminal_start=False,
+            allow_terminal_end=False,
+            minimum_terminal_sections=6,
+        )
+
+        self.assertEqual(result["n_endpoint_junction_zeroed"], 0)
+        self.assertEqual(result["area_jump_events"], [])
+
     def test_endpoint_area_ratio_uses_strongest_multistep_transition(self):
         n = 200
         area = np.r_[
@@ -208,6 +273,119 @@ class VoronoiSectionTests(unittest.TestCase):
         self.assertGreaterEqual(event["critical_index"], 41)
         self.assertEqual(event["masked_end_index"], event["critical_index"] + 6)
         self.assertEqual(result["area"][event["masked_end_index"] + 1], 80.0)
+
+    def test_distant_weak_drop_does_not_pull_boundary_toward_endpoint(self):
+        area = np.r_[
+            np.linspace(568.0, 547.0, 14),
+            np.linspace(433.0, 386.0, 90),
+            np.linspace(196.0, 265.0, 96),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.4,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_padding_sections=6,
+            minimum_terminal_sections=6,
+        )
+
+        event = result["area_jump_events"][0]
+        self.assertGreaterEqual(event["critical_index"], 100)
+        self.assertEqual(event["masked_end_index"], event["critical_index"] + 6)
+
+    def test_later_strong_drop_extends_same_terminal_chain(self):
+        area = np.r_[
+            np.full(32, 600.0),
+            np.full(16, 350.0),
+            np.full(152, 30.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_padding_sections=6,
+        )
+
+        event = result["area_jump_events"][0]
+        self.assertGreaterEqual(event["critical_index"], 47)
+        self.assertEqual(event["masked_end_index"], event["critical_index"] + 6)
+        self.assertGreaterEqual(event["area_ratio"], 10.0)
+
+    def test_terminal_chain_uses_at_most_two_strong_transitions(self):
+        area = np.r_[
+            np.full(20, 600.0),
+            np.full(16, 350.0),
+            np.full(16, 30.0),
+            np.full(148, 5.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_padding_sections=6,
+        )
+
+        event = result["area_jump_events"][0]
+        self.assertGreaterEqual(event["critical_index"], 35)
+        self.assertLess(event["critical_index"], 55)
+        self.assertEqual(
+            result["area_jump_parameters"]["max_strong_transitions"], 2)
+
+    def test_second_strong_transition_allows_one_broad_window_gap(self):
+        area = np.r_[
+            np.full(5, 600.0),
+            np.full(42, 420.0),
+            np.full(153, 60.0),
+        ]
+        profile = {
+            "position": np.linspace(0, 1, len(area)).tolist(),
+            "arc_length_mm": np.arange(len(area), dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(len(area), 10.0).tolist(),
+            "eq_diameter": np.full(len(area), 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.4,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_padding_sections=6,
+        )
+
+        event = result["area_jump_events"][0]
+        self.assertGreaterEqual(event["critical_index"], 46)
+        self.assertEqual(event["masked_end_index"], event["critical_index"] + 6)
 
     def test_endpoint_area_ratio_reaches_short_rpv_transition(self):
         n = 200
@@ -326,6 +504,37 @@ class VoronoiSectionTests(unittest.TestCase):
         self.assertGreater(result["area"][150], 0.0)
         self.assertTrue(np.all(np.asarray(result["area"])[155:] == 0.0))
 
+    def test_portal_endpoint_can_follow_strong_jump_past_side_branch(self):
+        n = 200
+        area = np.r_[np.full(80, 300.0), np.full(n - 80, 50.0)]
+        profile = {
+            "position": np.linspace(0, 1, n).tolist(),
+            "arc_length_mm": np.arange(n, dtype=float).tolist(),
+            "area": area.tolist(),
+            "raw_area": area.tolist(),
+            "perimeter": np.full(n, 10.0).tolist(),
+            "eq_diameter": np.full(n, 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.4,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_padding_sections=6,
+            protected_side_branch_arcs=[40.0],
+            side_branch_protection_mm=5.0,
+            protect_side_branch_topology=False,
+        )
+
+        event = result["area_jump_events"][0]
+        self.assertGreaterEqual(event["critical_index"], 79)
+        self.assertEqual(
+            event["masked_end_index"], event["critical_index"] + 6)
+        self.assertFalse(event["side_branch_topology_clamped"])
+        self.assertFalse(
+            result["area_jump_parameters"]["protect_side_branch_topology"])
+
     def test_endpoint_area_ratio_accepts_one_terminal_section(self):
         n = 200
         area = np.r_[300.0, np.full(n - 1, 100.0)]
@@ -350,7 +559,7 @@ class VoronoiSectionTests(unittest.TestCase):
         self.assertEqual(event["critical_index"], 0)
         self.assertEqual(event["masked_end_index"], 6)
 
-    def test_endpoint_area_ratio_uses_raw_not_voronoi_area(self):
+    def test_endpoint_area_ratio_uses_voronoi_area(self):
         n = 200
         owned_area = np.r_[np.full(10, 300.0), np.full(n - 10, 100.0)]
         raw_area = np.full(n, 100.0)
@@ -371,8 +580,36 @@ class VoronoiSectionTests(unittest.TestCase):
             terminal_padding_sections=6,
         )
 
+        event = result["area_jump_events"][0]
+        self.assertGreaterEqual(event["critical_index"], 9)
+        self.assertEqual(
+            event["masked_end_index"], event["critical_index"] + 6)
+        self.assertEqual(result["area_jump_parameters"]["area_channel"], "area")
+
+    def test_endpoint_area_ratio_ignores_raw_only_area_jump(self):
+        n = 200
+        owned_area = np.full(n, 100.0)
+        raw_area = np.r_[np.full(10, 300.0), np.full(n - 10, 100.0)]
+        profile = {
+            "position": np.linspace(0, 1, n).tolist(),
+            "arc_length_mm": np.arange(n, dtype=float).tolist(),
+            "area": owned_area.tolist(),
+            "raw_area": raw_area.tolist(),
+            "perimeter": np.full(n, 10.0).tolist(),
+            "eq_diameter": np.full(n, 10.0).tolist(),
+        }
+
+        result = _mask_endpoint_junction_sections(
+            profile,
+            ratio_threshold=1.6,
+            allow_terminal_start=True,
+            allow_terminal_end=False,
+            terminal_padding_sections=6,
+        )
+
         self.assertEqual(result["area_jump_events"], [])
-        self.assertEqual(result["area_jump_parameters"]["area_channel"], "raw_area")
+        self.assertEqual(result["n_endpoint_junction_zeroed"], 0)
+        self.assertEqual(result["area_jump_parameters"]["area_channel"], "area")
 
     def test_gradual_terminal_taper_does_not_mask_from_remote_drop(self):
         """A smooth caliber change is not an endpoint junction."""

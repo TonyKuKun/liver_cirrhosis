@@ -1690,7 +1690,7 @@ def _paired_area_transition_indices(
 
 def _select_terminal_transition(
         transitions, eligible_indices, ratio_threshold, side, direction,
-        local_span_points):
+        local_span_points, endpoint_level=None, max_strong_transitions=2):
     """Choose the endpoint-side group in a same-direction transition chain."""
     ordered = sorted(eligible_indices)
     if side == 'end':
@@ -1702,15 +1702,58 @@ def _select_terminal_transition(
     ), None)
     if strong_position is None:
         return None
+    max_strong_transitions = max(1, int(max_strong_transitions))
 
     chain_start = strong_position
     while chain_start > 0:
         previous = transitions[ordered[chain_start - 1]]
+        current = transitions[ordered[chain_start]]
         if previous['direction'] != direction:
             break
+        previous_index = (
+            previous['left_index'] if side == 'start'
+            else previous['right_index'])
+        current_index = (
+            current['left_index'] if side == 'start'
+            else current['right_index'])
+        if abs(current_index - previous_index) > local_span_points:
+            if endpoint_level is None:
+                break
+            prior_level = (
+                previous['left_level'] if side == 'start'
+                else previous['right_level'])
+            if prior_level <= 0 or endpoint_level <= 0:
+                break
+            endpoint_ratio = max(endpoint_level, prior_level) / min(
+                endpoint_level, prior_level)
+            if endpoint_ratio < ratio_threshold:
+                break
         chain_start -= 1
 
-    chain = ordered[chain_start:strong_position + 1]
+    chain_end = strong_position
+    n_strong_transitions = 1
+    while (chain_end + 1 < len(ordered)
+           and n_strong_transitions < max_strong_transitions):
+        current = transitions[ordered[chain_end]]
+        following = transitions[ordered[chain_end + 1]]
+        if (following['direction'] != direction
+                or following['evidence_ratio'] < ratio_threshold):
+            break
+        current_index = (
+            current['left_index'] if side == 'start'
+            else current['right_index'])
+        following_index = (
+            following['left_index'] if side == 'start'
+            else following['right_index'])
+        # A second real junction step can be separated from the first by one
+        # broad transition window.  Allow that wider forward span, while the
+        # paired bump/valley protection keeps its stricter original span.
+        if abs(following_index - current_index) > 2 * local_span_points:
+            break
+        chain_end += 1
+        n_strong_transitions += 1
+
+    chain = ordered[chain_start:chain_end + 1]
     selected_position = 0
     while selected_position + 1 < len(chain):
         current = transitions[chain[selected_position]]
@@ -1721,7 +1764,7 @@ def _select_terminal_transition(
         following_index = (
             following['left_index'] if side == 'start'
             else following['right_index'])
-        if abs(following_index - current_index) > local_span_points:
+        if abs(following_index - current_index) > 2 * local_span_points:
             break
         selected_position += 1
 
@@ -1733,10 +1776,14 @@ def _select_terminal_transition(
 
 def _detect_terminal_area_jumps(
         area, arc, valid, ratio_threshold, reference_points=5,
-        allow_terminal_start=True, allow_terminal_end=True):
+        allow_terminal_start=True, allow_terminal_end=True,
+        max_strong_transitions=2):
     """Find endpoint-connected expansion while ignoring closed bumps/valleys."""
     total = float(arc[-1]) if len(arc) else 0.0
     if total <= 0:
+        return {'start': None, 'end': None}, [], []
+    valid_indices = np.where(np.asarray(valid, dtype=bool))[0]
+    if len(valid_indices) == 0:
         return {'start': None, 'end': None}, [], []
 
     context_threshold = float(np.sqrt(ratio_threshold))
@@ -1769,20 +1816,26 @@ def _detect_terminal_area_jumps(
     detected = {'start': None, 'end': None}
 
     if allow_terminal_start:
+        endpoint_level = float(area[valid_indices[0]]) if len(valid_indices) else None
         selected = _select_terminal_transition(
             transitions, unpaired_indices, ratio_threshold,
             side='start', direction='down',
-            local_span_points=pairing_span_points)
+            local_span_points=pairing_span_points,
+            endpoint_level=endpoint_level,
+            max_strong_transitions=max_strong_transitions)
         if selected is not None:
             detected['start'] = (
                 int(selected['left_index']),
                 float(selected['terminal_evidence_ratio']))
 
     if allow_terminal_end:
+        endpoint_level = float(area[valid_indices[-1]]) if len(valid_indices) else None
         selected = _select_terminal_transition(
             transitions, unpaired_indices, ratio_threshold,
             side='end', direction='up',
-            local_span_points=pairing_span_points)
+            local_span_points=pairing_span_points,
+            endpoint_level=endpoint_level,
+            max_strong_transitions=max_strong_transitions)
         if selected is not None:
             detected['end'] = (
                 int(selected['right_index']),
@@ -1795,21 +1848,26 @@ def _mask_endpoint_junction_sections(
         profile, ratio_threshold=1.6,
         allow_terminal_start=True, allow_terminal_end=True,
         terminal_padding_sections=6, terminal_reference_points=5,
+        minimum_terminal_sections=0,
+        max_strong_transitions=2,
         protected_side_branch_arcs=None,
-        side_branch_protection_mm=5.0):
-    """Zero each junction endpoint using the unowned STL section area."""
+        side_branch_protection_mm=5.0,
+        protect_side_branch_topology=True):
+    """Zero each junction endpoint using the final Voronoi-owned area."""
     if profile is None:
         return profile
     n = len(profile.get('position', []))
-    raw_area = np.asarray(profile.get('raw_area', []), dtype=float)
+    voronoi_area = np.asarray(profile.get('area', []), dtype=float)
     arc = np.asarray(profile.get('arc_length_mm', []), dtype=float)
-    if (n < 5 or len(raw_area) != n or len(arc) != n
+    if (n < 5 or len(voronoi_area) != n or len(arc) != n
             or not np.all(np.diff(arc) > 0)):
         return profile
 
     ratio_threshold = max(float(ratio_threshold), 1.01)
     terminal_padding_sections = max(0, int(terminal_padding_sections))
     terminal_reference_points = max(1, int(terminal_reference_points))
+    minimum_terminal_sections = max(0, int(minimum_terminal_sections))
+    max_strong_transitions = max(1, int(max_strong_transitions))
     protected_arcs = sorted(
         float(value) for value in (protected_side_branch_arcs or [])
         if np.isfinite(value) and float(arc[0]) < float(value) < float(arc[-1]))
@@ -1819,22 +1877,24 @@ def _mask_endpoint_junction_sections(
     if len(existing_junction) != n:
         existing_junction = np.zeros(n, dtype=float)
     valid = (
-        np.isfinite(raw_area) & (raw_area > 0) & (existing_junction <= 0))
+        np.isfinite(voronoi_area) & (voronoi_area > 0)
+        & (existing_junction <= 0))
 
     terminal_mask = np.zeros(n, dtype=bool)
     events = []
     detected, transitions, transition_pairs = _detect_terminal_area_jumps(
-        raw_area, arc, valid, ratio_threshold,
+        voronoi_area, arc, valid, ratio_threshold,
         reference_points=terminal_reference_points,
         allow_terminal_start=allow_terminal_start,
-        allow_terminal_end=allow_terminal_end)
+        allow_terminal_end=allow_terminal_end,
+        max_strong_transitions=max_strong_transitions)
     start_event = detected['start']
     if start_event is not None:
         boundary, ratio = start_event
         padded_boundary = min(n - 1, boundary + terminal_padding_sections)
         original_padded_boundary = padded_boundary
         protected_arc = None
-        if protected_arcs:
+        if protected_arcs and protect_side_branch_topology:
             protected_arc = protected_arcs[0]
             maximum_mask_arc = protected_arc - side_branch_protection_mm
             topology_limit = int(np.searchsorted(
@@ -1862,7 +1922,7 @@ def _mask_endpoint_junction_sections(
         padded_boundary = max(0, boundary - terminal_padding_sections)
         original_padded_boundary = padded_boundary
         protected_arc = None
-        if protected_arcs:
+        if protected_arcs and protect_side_branch_topology:
             protected_arc = protected_arcs[-1]
             minimum_mask_arc = protected_arc + side_branch_protection_mm
             topology_limit = int(np.searchsorted(
@@ -1884,6 +1944,36 @@ def _mask_endpoint_junction_sections(
             'protected_side_branch_arc_mm': protected_arc,
         })
 
+    minimum_count = min(n, minimum_terminal_sections)
+    if allow_terminal_start and minimum_count > 0:
+        minimum_mask = np.zeros(n, dtype=bool)
+        minimum_mask[:minimum_count] = True
+        newly_masked = minimum_mask & ~terminal_mask
+        terminal_mask |= minimum_mask
+        if np.any(newly_masked):
+            events.append({
+                'type': 'endpoint_start_minimum_zeroed',
+                'masked_start_index': 0,
+                'masked_end_index': int(minimum_count - 1),
+                'arc_start_mm': float(arc[0]),
+                'arc_end_mm': float(arc[minimum_count - 1]),
+                'minimum_terminal_sections': int(minimum_count),
+            })
+    if allow_terminal_end and minimum_count > 0:
+        minimum_mask = np.zeros(n, dtype=bool)
+        minimum_mask[n - minimum_count:] = True
+        newly_masked = minimum_mask & ~terminal_mask
+        terminal_mask |= minimum_mask
+        if np.any(newly_masked):
+            events.append({
+                'type': 'endpoint_end_minimum_zeroed',
+                'masked_start_index': int(n - minimum_count),
+                'masked_end_index': int(n - 1),
+                'arc_start_mm': float(arc[n - minimum_count]),
+                'arc_end_mm': float(arc[-1]),
+                'minimum_terminal_sections': int(minimum_count),
+            })
+
     _mask_profile_sections(profile, terminal_mask)
     _refresh_dA_ds_norm(profile)
 
@@ -1899,12 +1989,16 @@ def _mask_endpoint_junction_sections(
     profile['n_area_jump_interpolated'] = 0
     profile['n_area_drop_candidates'] = 0
     profile['area_jump_parameters'] = {
-        'area_channel': 'raw_area',
+        'area_channel': 'area',
         'ratio_threshold': ratio_threshold,
         'allow_terminal_start': bool(allow_terminal_start),
         'allow_terminal_end': bool(allow_terminal_end),
         'terminal_padding_sections': terminal_padding_sections,
         'terminal_reference_points': terminal_reference_points,
+        'minimum_terminal_sections': minimum_terminal_sections,
+        'max_strong_transitions': max_strong_transitions,
+        'strong_transition_chain_max_span_points': int(
+            2 * 8 * terminal_reference_points),
         'transition_scan_method': 'bidirectional_local_area_ratio',
         'transition_pairing_method': 'closed_bump_or_valley',
         'transition_context_ratio_threshold': float(np.sqrt(ratio_threshold)),
@@ -1919,6 +2013,7 @@ def _mask_endpoint_junction_sections(
         'n_paired_local_transitions': int(2 * len(transition_pairs)),
         'protected_side_branch_arcs_mm': protected_arcs,
         'side_branch_protection_mm': side_branch_protection_mm,
+        'protect_side_branch_topology': bool(protect_side_branch_topology),
     }
     profile['area_jump_events'] = events
     profile['area_drop_events'] = []
@@ -1969,9 +2064,31 @@ def _trim_path_for_analysis(seg_path, nodes, range_info):
     )
 
 
+def _segment_area_jump_ratio_threshold(
+        seg_name, area_jump_ratio_threshold,
+        mpv_area_jump_ratio_threshold, smv_area_jump_ratio_threshold,
+        lpv_rpv_area_jump_ratio_threshold):
+    """Return the endpoint area-ratio threshold for one vessel segment."""
+    targeted = {
+        'mpv': mpv_area_jump_ratio_threshold,
+        'smv': smv_area_jump_ratio_threshold,
+        'lpv': lpv_rpv_area_jump_ratio_threshold,
+        'rpv': lpv_rpv_area_jump_ratio_threshold,
+    }
+    name = str(seg_name).lower()
+    if name not in targeted:
+        return float(area_jump_ratio_threshold)
+    return min(
+        float(area_jump_ratio_threshold), float(targeted[name]))
+
+
 def extract_profiles(stl_path, n_points=200, pitch=0.5,
                      curvature_window=7, section_step=3,
                      area_jump_ratio_threshold=1.6,
+                     mpv_area_jump_ratio_threshold=1.4,
+                     smv_area_jump_ratio_threshold=1.4,
+                     lpv_rpv_area_jump_ratio_threshold=1.4,
+                     lpv_rpv_minimum_endpoint_sections=6,
                      area_jump_reference_points=5,
                      max_section_samples_per_segment=None,
                      normal_search_policy=None,
@@ -2131,6 +2248,22 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
             end_junction = next(
                 (item for item in endpoint_junctions
                  if item.get('side') == 'end'), None)
+            is_portal_branch = seg_name.lower() in {'lpv', 'rpv'}
+            segment_ratio_threshold = _segment_area_jump_ratio_threshold(
+                seg_name, area_jump_ratio_threshold,
+                mpv_area_jump_ratio_threshold,
+                smv_area_jump_ratio_threshold,
+                lpv_rpv_area_jump_ratio_threshold)
+            minimum_endpoint_sections = (
+                int(lpv_rpv_minimum_endpoint_sections)
+                if is_portal_branch else 0)
+            # LPV/RPV begin at the portal bifurcation.  Keep the internal
+            # side-branch topology stop, but do not reserve an extra 5 mm gap
+            # before it; that gap can leave the actual bifurcation unmasked.
+            endpoint_side_branch_protection_mm = (
+                0.0 if is_portal_branch
+                else float(centerline_voronoi_exclusion_mm))
+            protect_side_branch_topology = not is_portal_branch
             resampled['side_branch_contamination_mask'] = [0.0] * n_points
             resampled['side_branch_contamination_events'] = []
             resampled['n_side_branch_contamination_masked'] = 0
@@ -2149,17 +2282,19 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
             ]
             resampled = _mask_endpoint_junction_sections(
                 resampled,
-                ratio_threshold=area_jump_ratio_threshold,
+                ratio_threshold=segment_ratio_threshold,
                 allow_terminal_start=(start_junction is not None and actual_start <= 0.0),
                 allow_terminal_end=(end_junction is not None and actual_end >= 1.0),
                 terminal_padding_sections=6,
                 terminal_reference_points=area_jump_reference_points,
+                minimum_terminal_sections=minimum_endpoint_sections,
                 protected_side_branch_arcs=[
                     item['arc_center_mm'] for item in side_branch_anchors
                     if item.get('arc_center_mm') is not None
                 ],
                 side_branch_protection_mm=(
-                    centerline_voronoi_exclusion_mm))
+                    endpoint_side_branch_protection_mm),
+                protect_side_branch_topology=protect_side_branch_topology)
             endpoint_mask = list(resampled.get(
                 'area_jump_terminal_mask', [0.0] * n_points))
             endpoint_count = int(resampled.get(
@@ -2178,8 +2313,13 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
                 'endpoint_junctions': endpoint_junctions,
                 'side_branch_anchors': side_branch_anchors,
                 'radius_factor': 1.25,
+                'area_jump_ratio_threshold': segment_ratio_threshold,
+                'minimum_endpoint_sections': minimum_endpoint_sections,
+                'endpoint_side_branch_protection_mm': (
+                    endpoint_side_branch_protection_mm),
+                'protect_side_branch_topology': protect_side_branch_topology,
                 'method': (
-                    'endpoint_raw_area_ratio_and_side_branch_network_voronoi'),
+                    'endpoint_voronoi_area_ratio_and_side_branch_network_voronoi'),
             }
 
             resampled['n_section_success_final'] = int(
@@ -2224,6 +2364,14 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
         'is_post_tips': seg_data.get('is_post_tips'),
         'n_points': n_points,
         'area_jump_ratio_threshold': float(area_jump_ratio_threshold),
+        'mpv_area_jump_ratio_threshold': float(
+            mpv_area_jump_ratio_threshold),
+        'smv_area_jump_ratio_threshold': float(
+            smv_area_jump_ratio_threshold),
+        'lpv_rpv_area_jump_ratio_threshold': float(
+            lpv_rpv_area_jump_ratio_threshold),
+        'lpv_rpv_minimum_endpoint_sections': int(
+            lpv_rpv_minimum_endpoint_sections),
         'area_jump_reference_points': int(area_jump_reference_points),
         'max_section_samples_per_segment': int(
             max_section_samples_per_segment),
@@ -2239,7 +2387,7 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
         'n_total_side_branch_network_voronoi': int(
             n_total_side_branch_voronoi),
         'clinical_junction_method': (
-            'endpoint_raw_area_ratio_and_side_branch_network_voronoi'),
+            'endpoint_voronoi_area_ratio_and_side_branch_network_voronoi'),
         'clinical_radius_factor': 1.25,
         'n_total_clinical_endpoint_junctions': int(
             n_total_clinical_endpoint_junctions),
