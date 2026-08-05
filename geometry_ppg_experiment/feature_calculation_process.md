@@ -2,11 +2,14 @@
 
 本文档用于核对 `extract_features.py` 中六个全局特征的计算流程是否符合公式要求。当前脚本读取每个病例目录中的：
 
-- `centerline_pointwise_profiles.json`：每段血管 100 个重采样点的逐点截面积、弧长、曲率、坐标等。
-- `centerline_profiles.json`：每段血管的中心线路径、端点、长度等。
-- `newCenterlist.txt` 或 `CenterlinePoints.txt`：中心线节点坐标。
+- `features/unified_features.json`：新生成的统一特征文件，优先使用。
+- `features/pointwise_profiles.json`：每段血管 100 个重采样点的逐点截面积、弧长、曲率、坐标等。
+- `features/segment_assignments.json`：每段血管的中心线路径、端点、长度等。
+- `features/newcenterline.txt` 或 `features/centerline.txt`：中心线节点坐标。
 - `sv_smv_angle.json`：SMV-SV 汇流角的已有拟合结果，优先用于特征 5。
 - `label/PVP.txt`：PVP 标签。
+
+如果上述新路径不存在，脚本会兼容旧版根目录文件名。
 
 输出六个特征：
 
@@ -614,10 +617,9 @@ LGV 有效时加入下方并联。上方使用 LPV、RPV、TIPS 中所有有效�
 
 - `features.csv`：每例六个原始特征。
 - `feature_extraction_report.json`：每例每个特征的中间项和状态。
-- `feature_pvp_correlations.csv`：六个特征与 PVP 的 Pearson/Spearman 相关性。
-- `features_zscore.csv`：附加六个 Z-score 标准化特征。
-- `feature_pvp_scatter.png`：特征与 PVP 散点图。
-- `feature_correlation_heatmap.png`：相关矩阵热图。
+- `correlation_tables.csv`：合并、TIPS、非 TIPS 三组相关性长表。
+- `correlation_tables.md`：合并、TIPS、非 TIPS 三张 Markdown 表格。
+- `correlation_metrics.json`：三张表的机器可读 JSON 结果。
 
 ---
 

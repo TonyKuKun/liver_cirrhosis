@@ -139,18 +139,25 @@ async function refreshPatients(patientId = null) {
   renderAll();
 }
 
-function selectPatient(patientId) {
+function selectPatient(patientId, { revealInList = false } = {}) {
   if (!patientId) return;
   state.currentPatient = state.patients.find((patient) => patient.id === patientId) || null;
   renderPatientList();
+  if (revealInList) revealPatientInList(patientId);
   renderAll();
+}
+
+function revealPatientInList(patientId) {
+  const card = Array.from($("patientList").querySelectorAll("[data-patient]"))
+    .find((item) => item.dataset.patient === patientId);
+  card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 function selectNextPatient() {
   if (state.patients.length < 2) return;
   const currentIndex = state.patients.findIndex((patient) => patient.id === state.currentPatient?.id);
   const nextIndex = (currentIndex + 1 + state.patients.length) % state.patients.length;
-  selectPatient(state.patients[nextIndex].id);
+  selectPatient(state.patients[nextIndex].id, { revealInList: true });
 }
 
 function updateNextPatientButton() {

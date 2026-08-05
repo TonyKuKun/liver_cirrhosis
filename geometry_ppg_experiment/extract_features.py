@@ -164,15 +164,26 @@ def points_array(values: Any) -> np.ndarray:
     return arr[np.isfinite(arr).all(axis=1)]
 
 
-def read_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
+def read_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.is_file():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def first_existing_path(*paths: Path) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
 def load_centerline_nodes(patient_dir: Path) -> dict[int, np.ndarray]:
-    for name in ("newCenterlist.txt", "CenterlinePoints.txt"):
-        path = patient_dir / name
+    for path in (
+        patient_dir / "features" / "newcenterline.txt",
+        patient_dir / "features" / "centerline.txt",
+        patient_dir / "newCenterlist.txt",
+        patient_dir / "CenterlinePoints.txt",
+    ):
         if not path.exists():
             continue
         nodes: dict[int, np.ndarray] = {}
@@ -967,8 +978,18 @@ def compute_theta_smv_sv(sources: dict[str, Any]) -> tuple[float, dict[str, Any]
     sv_attach = attachment_detail(sources, "sv", "mpv")
     theta = np.nan
     source = "computed_from_centerline_vectors"
+    unified = sources.get("unified") or {}
+    unified_angle = unified.get("sv_smv_angle")
+    if isinstance(unified_angle, dict):
+        theta = safe_float(unified_angle.get("angle_degrees"))
+        source = "unified_features.sv_smv_angle.angle_degrees"
+    else:
+        theta = safe_float(unified_angle)
+        if np.isfinite(theta):
+            source = "unified_features.sv_smv_angle"
+
     angle_path = (sources.get("patient_dir") or Path()) / "sv_smv_angle.json"
-    if angle_path.exists():
+    if not np.isfinite(theta) and angle_path.exists():
         theta = safe_float(read_json(angle_path).get("angle_degrees"))
         source = "sv_smv_angle.json"
 
@@ -1169,11 +1190,15 @@ def extract_patient(patient_dir: Path) -> tuple[dict[str, Any] | None, dict[str,
         report["status"] = "skipped_bad_name"
         return None, report
     label_path = patient_dir / "label" / "PVP.txt"
-    unified_path = patient_dir / "unified_features.json"
+    features_dir = patient_dir / "features"
+    unified_path = first_existing_path(
+        features_dir / "unified_features.json",
+        patient_dir / "unified_features.json",
+    )
     if not label_path.exists():
         report["status"] = "skipped_missing_label"
         return None, report
-    if not unified_path.exists():
+    if unified_path is None:
         report["status"] = "skipped_missing_unified_features"
         return None, report
 
@@ -1183,9 +1208,27 @@ def extract_patient(patient_dir: Path) -> tuple[dict[str, Any] | None, dict[str,
         return None, report
 
     unified = read_json(unified_path)
-    centerline_profiles = read_json(patient_dir / "centerline_profiles.json")
-    pointwise_profiles = read_json(patient_dir / "centerline_pointwise_profiles.json")
-    portal_vein_features = read_json(patient_dir / "portal_vein_features.json")
+    centerline_profiles = read_json(
+        first_existing_path(
+            features_dir / "segment_assignments.json",
+            patient_dir / "centerline_profiles.json",
+        )
+        or Path()
+    )
+    pointwise_profiles = read_json(
+        first_existing_path(
+            features_dir / "pointwise_profiles.json",
+            patient_dir / "centerline_pointwise_profiles.json",
+        )
+        or Path()
+    )
+    portal_vein_features = read_json(
+        first_existing_path(
+            patient_dir / "portal_vein_features.json",
+            features_dir / "unified_features0.json",
+        )
+        or Path()
+    )
     sources = {
         "unified": unified,
         "centerline_profiles": centerline_profiles,
@@ -1194,6 +1237,7 @@ def extract_patient(patient_dir: Path) -> tuple[dict[str, Any] | None, dict[str,
         "nodes": load_centerline_nodes(patient_dir),
         "patient_dir": patient_dir,
     }
+    report["unified_features_path"] = str(unified_path)
     has_name_tips_marker = "#" in patient_dir.name
     has_tips_tube = segment_present(sources, "tips")
     report["has_name_tips_marker"] = has_name_tips_marker

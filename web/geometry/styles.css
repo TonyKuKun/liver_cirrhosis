@@ -182,6 +182,10 @@ button:hover:not(:disabled) {
   margin-bottom: 10px;
 }
 
+.run-row-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .step-list {
   display: grid;
   gap: 6px;
@@ -738,10 +742,6 @@ html.embed .embed-flow-panel .step-list {
 
 html.embed .embed-flow-panel .run-row {
   margin-bottom: 8px;
-}
-
-html.embed .embed-flow-actions {
-  margin-top: 8px;
 }
 
 html.embed .embed-params {

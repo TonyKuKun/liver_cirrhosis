@@ -375,31 +375,36 @@ def run_correlation_analysis(root_folder, target="PVP",
                               run_statistical=True,
                               run_profile=True,
                               drop_features_above_missing=0.5,
-                              min_branch_coverage=0.3):
+                              min_branch_coverage=0.3,
+                              skip_folder_markers=('@',)):
     """
     跨患者相关性分析。需要每个 patient 文件夹下:
       label/<TARGET>.txt                  (PVP 或 PCG 数值)
       features/unified_features.json      (统计 + 清洗后逐点特征)
-      features/pointwise_profiles.json    (逐点特征兼容回退)
+
+    输出统一保存到 output_root（默认 root/correlationship）下的
+    scalar/ 和 pointwise/ 子目录。
     """
     target = target.upper()
     print(f"\n{'='*60}")
     print(f"跨患者相关性分析: target={target}")
     print(f"{'='*60}")
 
+    result_root = (output_root if output_root
+                   else os.path.join(root_folder, 'correlationship'))
+
     # ---- Step A: 统计特征 vs target ----
     if run_statistical:
         print(f"\n--- Step A: 统计特征 vs {target} ---")
         try:
             from correlation_analysis import collect_and_analyze
-            stat_dir = (output_root if output_root
-                        else os.path.join(root_folder,
-                                          f"correlation_{target.lower()}"))
+            stat_dir = os.path.join(result_root, 'scalar')
             collect_and_analyze(
                 root_folder,
                 output_dir=stat_dir,
                 target=target,
-                drop_features_above_missing=drop_features_above_missing)
+                drop_features_above_missing=drop_features_above_missing,
+                skip_folder_markers=skip_folder_markers)
         except Exception as e:
             print(f"  Step A 失败: {e}")
             traceback.print_exc()
@@ -411,9 +416,10 @@ def run_correlation_analysis(root_folder, target="PVP",
             from profile_correlation import run_profile_analysis
             run_profile_analysis(
                 root_folder,
-                output_dir=None,  # None = 自动放到 root/profile_correlation_<target>/
+                output_dir=os.path.join(result_root, 'pointwise'),
                 target=target,
-                min_branch_coverage=min_branch_coverage)
+                min_branch_coverage=min_branch_coverage,
+                skip_folder_markers=skip_folder_markers)
         except Exception as e:
             print(f"  Step B 失败: {e}")
             traceback.print_exc()
@@ -528,7 +534,8 @@ if __name__ == '__main__':
             run_statistical=run_statistical_correlation,
             run_profile=run_profile_correlation,
             drop_features_above_missing=0.5,
-            min_branch_coverage=0.3)
+            min_branch_coverage=0.3,
+            skip_folder_markers=('@',))
 
     print(f"\n{'='*60}")
     print(f"全部完成! 总耗时: {time.time() - t_total:.1f}s")

@@ -9,7 +9,7 @@
       document.documentElement.classList.add("embed");
     }
   </script>
-  <link rel="stylesheet" href="styles.css?v=8" />
+  <link rel="stylesheet" href="styles.css?v=9" />
   <script src="/assets/plotly.min.js"></script>
 </head>
 <body>
@@ -45,19 +45,12 @@
 
       <section class="panel">
         <div class="panel-title">流程</div>
-        <div class="run-row">
+        <div class="run-row run-row-actions">
           <button id="runAllBtn" class="primary-btn" type="button">自动全流程</button>
           <button id="refreshBtn" type="button">刷新</button>
+          <button id="paramsBtn" type="button">参数</button>
         </div>
         <div id="stepButtons" class="step-list"></div>
-        <div class="run-row">
-          <button id="paramsBtn" type="button">参数</button>
-          <button id="downloadBtn" type="button">下载结果</button>
-        </div>
-        <label class="toggle-line">
-          <input id="exportPng" type="checkbox" />
-          <span>导出 PNG</span>
-        </label>
         <label class="field">
           <span>TIPS 类型</span>
           <select id="postTipsMode">
@@ -151,15 +144,12 @@
       <section class="inspector">
         <div class="embed-flow-panel panel">
           <div class="panel-title">流程</div>
-          <div class="run-row">
+          <div class="run-row run-row-actions">
             <button id="embedRunAllBtn" class="primary-btn" type="button">自动全流程</button>
             <button id="embedRefreshBtn" type="button">刷新</button>
+            <button id="embedParamsBtn" type="button">参数</button>
           </div>
           <div id="embedStepButtons" class="step-list"></div>
-          <div class="run-row embed-flow-actions">
-            <button id="embedParamsBtn" type="button">参数</button>
-            <button id="embedDownloadBtn" type="button">下载结果</button>
-          </div>
           <div id="embedParamsPanel" class="embed-params hidden">
             <div id="embedParamGrid" class="param-grid"></div>
           </div>
@@ -181,6 +171,6 @@
     </main>
   </div>
 
-  <script src="app.js?v=23"></script>
+  <script src="app.js?v=26"></script>
 </body>
 </html>

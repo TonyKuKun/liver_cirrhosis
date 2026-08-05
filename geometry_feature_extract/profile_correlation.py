@@ -2,7 +2,7 @@
 中心线剖面特征与临床指标逐点相关性分析（v4 - cluster permutation）
 ============================================================
 新版变化:
-  - 优先读取 unified_features.json 内清洗、重采样后的 pointwise
+  - 只读取 features/unified_features.json 内清洗、重采样后的 pointwise
   - 每个分支/特征固定完整病例队列，避免位置间样本集合变化
   - 连续区间置换检验 + 跨区间 BH-FDR，替代逐点原始 p 值
   - 支持的分支: MPV / SV / SMV / LPV / RPV / TIPS / LGV / PGV
@@ -33,7 +33,6 @@ warnings.filterwarnings('ignore')
 
 from features_layout import (
     FEATURES_DIRNAME,
-    POINTWISE_TEMP_NAME,
     UNIFIED_FEATURES_NAME,
 )
 
@@ -44,6 +43,7 @@ from features_layout import (
 
 # 全部可能出现的分支 (按解剖顺序)
 ALL_BRANCH_NAMES = ['mpv', 'sv', 'smv', 'lpv', 'rpv', 'tips', 'lgv', 'pgv']
+COLLATERAL_BRANCHES = {'lgv', 'pgv'}
 
 BRANCH_LABELS = {
     'mpv':  'MPV (门静脉主干)',
@@ -84,9 +84,6 @@ TARGET_INFO = {
     'PCG': {'cn': '门静脉压力梯度', 'unit': 'mmHg'},
 }
 
-PROFILE_FILENAME = POINTWISE_TEMP_NAME
-
-
 # ============================================================
 # 数据收集
 # ============================================================
@@ -108,13 +105,6 @@ def _read_label(folder_path, target):
     return None
 
 
-def _candidate_feature_paths(folder_path, filename):
-    return (
-        os.path.join(folder_path, FEATURES_DIRNAME, filename),
-        os.path.join(folder_path, filename),
-    )
-
-
 def _infer_subject_id(sample_name):
     value = str(sample_name).strip()
     if re.match(r'^(?:19|20)\d{6}', value):
@@ -124,44 +114,41 @@ def _infer_subject_id(sample_name):
 
 
 def _load_patient_profiles(folder_path):
-    """Prefer cleaned profiles embedded in unified_features.json."""
-    for path in _candidate_feature_paths(folder_path, UNIFIED_FEATURES_NAME):
-        if not os.path.exists(path):
-            continue
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                unified = json.load(f)
-            pointwise = unified.get('pointwise')
-            if isinstance(pointwise, dict) and pointwise:
-                profiles = dict(pointwise)
-                meta = unified.get('pointwise_meta')
-                if isinstance(meta, dict):
-                    profiles['_meta'] = meta
-                return profiles, path, 'unified'
-        except Exception as exc:
-            print(f"  跳过损坏的统一特征 {path}: {exc}")
-
-    for path in _candidate_feature_paths(folder_path, PROFILE_FILENAME):
-        if not os.path.exists(path):
-            continue
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                profiles = json.load(f)
-            if isinstance(profiles, dict) and profiles:
-                return profiles, path, 'pointwise'
-        except Exception as exc:
-            print(f"  跳过损坏的逐点特征 {path}: {exc}")
+    """Load cleaned profiles from the canonical unified feature file."""
+    path = os.path.join(folder_path, FEATURES_DIRNAME, UNIFIED_FEATURES_NAME)
+    if not os.path.exists(path):
+        return None, None, None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            unified = json.load(f)
+        pointwise = unified.get('pointwise')
+        if isinstance(pointwise, dict) and pointwise:
+            profiles = dict(pointwise)
+            meta = unified.get('pointwise_meta')
+            if isinstance(meta, dict):
+                profiles['_meta'] = meta
+            return profiles, path, 'unified'
+    except Exception as exc:
+        print(f"  跳过损坏的统一特征 {path}: {exc}")
     return None, None, None
 
 
+def _profile_for_analysis(item, branch):
+    if branch in COLLATERAL_BRANCHES and item.get('is_post_tips', False):
+        return None
+    return item['profiles'].get(branch)
+
+
 def collect_profiles(root_folder, target="PVP",
-                     min_branch_coverage=0.3):
+                     min_branch_coverage=0.3,
+                     skip_folder_markers=('@',)):
     """
     收集所有患者的剖面 + target 值。
 
     参数:
         min_branch_coverage: 一条分支需在至少这个比例的样本中存在
                              才参与分析 (例如 LGV 太罕见会被剔除)
+        skip_folder_markers: 文件夹名包含任一标记时跳过；默认跳过 ``@``。
 
     返回:
         data: list of dict
@@ -177,8 +164,13 @@ def collect_profiles(root_folder, target="PVP",
 
     data = []
     n_points = None
+    skipped_marked = []
+    skip_folder_markers = tuple(skip_folder_markers or ())
 
     for folder in subfolders:
+        if any(marker in folder for marker in skip_folder_markers):
+            skipped_marked.append(folder)
+            continue
         folder_path = os.path.join(root_folder, folder)
         label_val = _read_label(folder_path, target)
         if label_val is None:
@@ -215,9 +207,12 @@ def collect_profiles(root_folder, target="PVP",
     n_total = len(data)
     branch_coverage = {}
     for branch in ALL_BRANCH_NAMES:
-        n_present = sum(1 for d in data
-                        if d['profiles'].get(branch) is not None)
-        branch_coverage[branch] = n_present / n_total
+        eligible = ([d for d in data if not d.get('is_post_tips', False)]
+                    if branch in COLLATERAL_BRANCHES else data)
+        n_present = sum(
+            1 for d in eligible if _profile_for_analysis(d, branch) is not None)
+        branch_coverage[branch] = (
+            n_present / len(eligible) if eligible else 0.0)
 
     active_branches = [b for b in ALL_BRANCH_NAMES
                        if branch_coverage[b] >= min_branch_coverage]
@@ -225,12 +220,12 @@ def collect_profiles(root_folder, target="PVP",
                if 0 < branch_coverage[b] < min_branch_coverage]
 
     print(f"  收集到 {n_total} 个样本, 每条剖面 {n_points} 个点")
-    source_counts = {
-        source: sum(d['profile_source'] == source for d in data)
-        for source in ('unified', 'pointwise')
-    }
-    print(f"  剖面来源: unified={source_counts['unified']}, "
-          f"standalone={source_counts['pointwise']}")
+    if skipped_marked:
+        print(f"  按文件夹标记跳过 ({len(skipped_marked)}): "
+              f"{skipped_marked[:8]}"
+              f"{'...' if len(skipped_marked) > 8 else ''}")
+    unified_count = sum(d['profile_source'] == 'unified' for d in data)
+    print(f"  剖面来源: unified={unified_count}")
     print(f"  活跃分支 (覆盖率 ≥ {100*min_branch_coverage:.0f}%): "
           f"{[b.upper() for b in active_branches]}")
     if dropped:
@@ -313,7 +308,7 @@ def _complete_profile_matrix(data, branch, feat, n_points):
     """Use a fixed patient cohort across positions for valid permutations."""
     rows, targets, subject_ids, strata = [], [], [], []
     for item in data:
-        profile = item['profiles'].get(branch)
+        profile = _profile_for_analysis(item, branch)
         if not isinstance(profile, dict) or feat not in profile:
             continue
         try:
@@ -710,7 +705,7 @@ def plot_profile_heatmaps(data, active_branches, output_dir, target="PVP"):
             ax = axes[fi, bi]
             rows, valid_targets = [], []
             for d in sorted_data:
-                prof = d['profiles'].get(branch)
+                prof = _profile_for_analysis(d, branch)
                 if prof and feat in prof:
                     rows.append(prof[feat])
                     valid_targets.append(d['target_value'])
@@ -797,7 +792,7 @@ def plot_group_comparison(data, active_branches, output_dir, target="PVP"):
             ]:
                 values = []
                 for d in grp:
-                    prof = d['profiles'].get(branch)
+                    prof = _profile_for_analysis(d, branch)
                     if prof and feat in prof:
                         values.append(prof[feat])
                 if not values:
@@ -840,7 +835,8 @@ def plot_group_comparison(data, active_branches, output_dir, target="PVP"):
 # ============================================================
 
 def generate_profile_report(regions_df, data, active_branches,
-                             output_dir, target="PVP"):
+                            output_dir, target="PVP",
+                            skip_folder_markers=()):
     target = target.upper()
     target_cn = TARGET_INFO.get(target, {}).get('cn', target)
     unit = TARGET_INFO.get(target, {}).get('unit', '')
@@ -859,10 +855,8 @@ def generate_profile_report(regions_df, data, active_branches,
             edge_mm = meta.get('edge_margin_mm')
             break
 
-    source_counts = {
-        source: sum(d.get('profile_source') == source for d in data)
-        for source in ('unified', 'pointwise')
-    }
+    unified_count = sum(
+        d.get('profile_source') == 'unified' for d in data)
     significant_regions = (
         regions_df[regions_df['significant']]
         if len(regions_df) else regions_df)
@@ -873,11 +867,11 @@ def generate_profile_report(regions_df, data, active_branches,
         "=" * 70, "",
         f"样本数: {len(data)}",
         f"推断患者簇数: {n_subjects} (置换时保留簇内记录结构)",
+        f"文件夹过滤: 排除名称包含 {tuple(skip_folder_markers or ())} 的对象",
         f"{target} 范围: {min(target_vals):.1f} - {max(target_vals):.1f} {unit}",
         f"{target} 均值: {np.mean(target_vals):.1f} ± {np.std(target_vals):.1f} {unit}",
         f"分析的分支: {[b.upper() for b in active_branches]}",
-        f"剖面来源: unified={source_counts['unified']}, "
-        f"standalone={source_counts['pointwise']}",
+        f"剖面来源: unified={unified_count}",
     ]
     if edge_pct is not None:
         lines.append(f"端点掩码: 比例 {edge_pct*100:.1f}%, 距离 {edge_mm:.1f} mm")
@@ -918,6 +912,7 @@ def generate_profile_report(regions_df, data, active_branches,
         "  ・逐点 Spearman 仅描述相关曲线，不用原始逐点 p 值判显著",
         "  ・连续同方向超阈值位置组成区间，1000 次患者簇置换控制曲线内 FWER",
         "  ・同一患者标签作为整组，仅在记录数和 TIPS 状态序列相同的患者簇间交换",
+        "  ・LGV/PGV 只使用术前记录计算覆盖率和相关性，术后侧支数据一律忽略",
         "  ・所有候选区间的 cluster p 再做 BH-FDR，最终以 q<0.05 判显著",
         "  ・高/低组图仅展示中位数和四分位距，不进行二分后的重复检验",
         "  ・分析单位仍是一次扫描；同一患者术前/术后记录需结合研究设计解读",
@@ -945,17 +940,19 @@ def _setup_matplotlib():
 
 def run_profile_analysis(root_folder, output_dir=None, target="PVP",
                          min_branch_coverage=0.3, min_samples=10,
-                         n_permutations=1000, random_state=20260805):
+                         n_permutations=1000, random_state=20260805,
+                         skip_folder_markers=('@',)):
     """完整流程: 收集 → 逐点相关 → 可视化 → 报告。"""
     target = target.upper()
     if output_dir is None:
-        output_dir = os.path.join(root_folder,
-                                   f"profile_correlation_{target.lower()}")
+        output_dir = os.path.join(
+            root_folder, 'correlationship', 'pointwise')
     os.makedirs(output_dir, exist_ok=True)
     _setup_matplotlib()
 
     data, n_points, active_branches = collect_profiles(
-        root_folder, target, min_branch_coverage)
+        root_folder, target, min_branch_coverage,
+        skip_folder_markers=skip_folder_markers)
 
     if len(data) < min_samples:
         print(f"样本数 ({len(data)}) 不足, 至少需要 {min_samples} 个")
@@ -985,8 +982,9 @@ def run_profile_analysis(root_folder, output_dir=None, target="PVP",
     plot_pointwise_correlation(pw_results, active_branches, output_dir, target)
     plot_profile_heatmaps(data, active_branches, output_dir, target)
     plot_group_comparison(data, active_branches, output_dir, target)
-    generate_profile_report(regions_df, data, active_branches,
-                            output_dir, target)
+    generate_profile_report(
+        regions_df, data, active_branches, output_dir, target,
+        skip_folder_markers=skip_folder_markers)
 
     print(f"\n{'='*60}")
     print(f"剖面分析完成! 结果: {output_dir}")
@@ -1000,6 +998,6 @@ def run_profile_analysis(root_folder, output_dir=None, target="PVP",
 if __name__ == '__main__':
     TARGET = "PVP"
     ROOT_FOLDER = r"F:\PCG data\dataset\zhengzhou_vkan_qian47"
-    OUTPUT_DIR = None  # None = 自动: root/profile_correlation_pvp/
+    OUTPUT_DIR = None  # None = 自动: root/correlationship/pointwise/
 
     run_profile_analysis(ROOT_FOLDER, OUTPUT_DIR, TARGET)

@@ -137,7 +137,6 @@ PIPELINE_STEPS = [
     "centerline",
     "smooth",
     "segment",
-    "profiles",
     "features",
     "export",
 ]
@@ -146,8 +145,7 @@ STEP_LABELS = {
     "centerline": "Centerline extraction",
     "smooth": "Centerline smoothing",
     "segment": "Anatomical segmentation",
-    "profiles": "Pointwise cross-sections",
-    "features": "Feature extraction",
+    "features": "Pointwise and unified feature extraction",
     "export": "Visualization export",
 }
 
@@ -175,8 +173,7 @@ STEP_OUTPUTS = {
     "centerline": [RAW_CENTERLINE_NAME],
     "smooth": [SMOOTH_CENTERLINE_NAME],
     "segment": [SEGMENT_ASSIGNMENTS_NAME],
-    "profiles": [],
-    "features": [UNIFIED_FEATURES_NAME],
+    "features": [POINTWISE_TEMP_NAME, UNIFIED_FEATURES_NAME],
     "export": [],
 }
 
@@ -2615,11 +2612,13 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
             print(result.stderr.rstrip())
         if result.returncode != 0:
             raise RuntimeError(f"segment_vessels failed with exit code {result.returncode}")
-    elif step == "profiles":
+    elif step == "features":
         try:
             from geometry_feature_extract.extract_profiles import extract_profiles
+            from geometry_feature_extract.extract_features import extract_all_features
         except ImportError:
             from extract_profiles import extract_profiles
+            from extract_features import extract_all_features
 
         extract_profiles(
             str(stl_path),
@@ -2628,12 +2627,6 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
             curvature_window=params["curvature_window"],
             section_step=params["sample_step"],
         )
-    elif step == "features":
-        try:
-            from geometry_feature_extract.extract_features import extract_all_features
-        except ImportError:
-            from extract_features import extract_all_features
-
         extract_all_features(
             str(stl_path),
             n_fit_points=params["n_fit_points"],
@@ -2643,6 +2636,12 @@ def _run_pipeline_step(step: str, stl_path: Path, params: dict, post_tips_mode: 
             pitch=params["pitch"],
         )
         remove_generated_outputs(stl_path.parent, keep_public=True)
+        missing = [
+            name for name in STEP_OUTPUTS["features"]
+            if not feature_path(stl_path.parent, name).exists()
+        ]
+        if missing:
+            raise RuntimeError(f"Feature extraction did not produce: {', '.join(missing)}")
     elif step == "export":
         try:
             from geometry_feature_extract.export_visualization import export_patient_visualization

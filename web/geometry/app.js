@@ -34,9 +34,7 @@ const STEPS = [
   ["centerline", "中心线提取"],
   ["smooth", "中心线平滑"],
   ["segment", "解剖分段"],
-  ["profiles", "截面特征"],
-  ["features", "统计特征"],
-  ["export", "导出可视化"],
+  ["features", "特征提取"],
 ];
 
 const LAYERS = {
@@ -196,6 +194,7 @@ function applyQueryBootstrap() {
 }
 
 async function createIntegratedSession(parentSession, patientId) {
+  const keepFlowState = state.session?.parent_session_id === parentSession;
   clearJob();
   setBusy(true);
   try {
@@ -206,7 +205,7 @@ async function createIntegratedSession(parentSession, patientId) {
     const payload = await readResponse(res);
     state.session = payload.session;
     populatePatients();
-    await refreshData();
+    await refreshData({ updateFlow: !keepFlowState });
   } catch (err) {
     showError(err);
   } finally {
@@ -219,11 +218,9 @@ function bindEvents() {
   $("nextPatientBtn").addEventListener("click", nextPatient);
   $("runAllBtn").addEventListener("click", () => runSteps(STEPS.map(([key]) => key), true));
   $("refreshBtn").addEventListener("click", refreshData);
-  $("downloadBtn").addEventListener("click", downloadResults);
   $("paramsBtn").addEventListener("click", () => $("paramsPanel").classList.toggle("hidden"));
   $("embedRunAllBtn")?.addEventListener("click", () => runSteps(STEPS.map(([key]) => key), true));
   $("embedRefreshBtn")?.addEventListener("click", refreshData);
-  $("embedDownloadBtn")?.addEventListener("click", downloadResults);
   $("embedParamsBtn")?.addEventListener("click", () => $("embedParamsPanel")?.classList.toggle("hidden"));
   $("patientSelect").addEventListener("change", () => {
     resetStepModesToRecompute();
@@ -446,7 +443,6 @@ async function runSteps(steps, allPatients) {
       step_modes: state.stepModes,
       patient_id: patientId,
       post_tips_mode: $("postTipsMode").value,
-      export_png: $("exportPng").checked,
     });
     const payload = await readResponse(res);
     state.job = payload.job;
@@ -500,7 +496,8 @@ function renderJob() {
   });
 }
 
-async function refreshData() {
+async function refreshData(options = {}) {
+  const updateFlow = options.updateFlow !== false;
   if (!state.session) return;
   const selected = $("patientSelect").value;
   const patient = selected === "all" ? state.session.patients[0]?.id : selected;
@@ -519,7 +516,7 @@ async function refreshData() {
     reconcileCenterlineSelection();
     syncManualAssignmentsFromData();
     syncAnalysisRangesFromData();
-    renderStepAvailability();
+    if (updateFlow) renderStepAvailability();
     renderInspector();
     renderCenterlineEditControls();
     renderManualSegmentationControls();
@@ -1063,9 +1060,8 @@ async function saveAnalysisRanges() {
       ...state.data.analysis_regions,
       ranges: savedRanges,
     };
-    state.stepModes.profiles = "reuse";
     state.stepModes.features = "reuse";
-    document.querySelectorAll('[data-step-mode="profiles"], [data-step-mode="features"]').forEach((select) => {
+    document.querySelectorAll('[data-step-mode="features"]').forEach((select) => {
       select.value = "reuse";
     });
     const masked = Object.values(result.masked_points || {}).reduce(
@@ -1125,7 +1121,7 @@ function renderScene() {
   addGlobalAngleTrace(traces, data.features?.sv_smv_angle);
   addFeaturePointTraces(traces, data.pointwise?.feature_points || {});
   addSectionTraces(traces, data.pointwise?.sampled_sections || {}, "sampledSections", "等效圆采样", 2, 0.38);
-  addSectionTraces(traces, data.pointwise?.surface_sections || {}, "surfaceSections", "校验通过的表面截面", 4, 0.96);
+  addSectionTraces(traces, data.pointwise?.surface_sections || {}, "surfaceSections", "表面截面", 4, 0.96);
   addNamedSectionTraces(traces, data.pointwise?.max_sections || {}, "representativeSections", "最大截面", 6);
   addNamedSectionTraces(traces, data.pointwise?.mean_sections || {}, "representativeSections", "平均截面", 4);
   addSurfaceNamedSectionTraces(traces, data.pointwise?.surface_max_sections || {}, "representativeSections", "最大表面截面", 7);
@@ -1634,15 +1630,6 @@ function fmt(value, digits = 3) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "NA";
   return n.toFixed(digits);
-}
-
-async function downloadResults() {
-  if (!state.session) {
-    showError(new Error("请先载入输入"));
-    return;
-  }
-  const patient = $("patientSelect").value || "all";
-  window.location.href = geometryApi(`/session/${encodeURIComponent(state.session.id)}/download?patient=${encodeURIComponent(patient)}`);
 }
 
 function clearJob() {

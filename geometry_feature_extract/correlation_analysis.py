@@ -9,9 +9,8 @@
 文件夹结构:
     root_folder/
       patient_001/
-        vessel.stl
-        centerline_profiles.json     ← segment_vessels 输出
-        portal_vein_features.json    ← extract_features 输出
+        features/
+          unified_features.json
         label/
           PVP.txt
           PCG.txt
@@ -64,6 +63,27 @@ GLOBAL_FEATURES = [
 
 # 系统/联合特征 (literature-driven, 见 system_features.py)
 SYSTEM_FEATURES = list(SYSTEM_FEATURE_NAMES)
+
+# TIPS 术后记录不参与侧支分析。侧支仅指自然形成的 LGV/PGV，绝不包含
+# 人工分流道 TIPS。
+COLLATERAL_FEATURES = {
+    *(f"{seg}_{feat}" for seg in ('lgv', 'pgv') for feat in PER_SEG_FEATURES),
+    'has_lgv', 'has_pgv', 'has_compensation_vessel',
+    'lgv_mpv_diameter_ratio', 'pgv_mpv_diameter_ratio',
+    'collateral_length_mpv_ratio', 'collateral_burden_score',
+    'n_collaterals_detected', 'max_collateral_diameter_mm',
+}
+
+# 术前专门检验的侧支指标。排除与 has_lgv/has_pgv 完全冗余的
+# has_compensation_vessel，保留 n_collaterals 仅供探索性核对。
+PRETIPS_COLLATERAL_FEATURES = [
+    'max_collateral_diameter_mm',
+    'collateral_burden_score',
+    'has_lgv', 'has_pgv',
+    'n_collaterals_detected',
+    'collateral_length_mpv_ratio',
+    'lgv_mpv_diameter_ratio', 'pgv_mpv_diameter_ratio',
+]
 
 
 def _build_feature_names():
@@ -212,6 +232,10 @@ def _sig(p):
     return ''
 
 
+def _sig_text(value):
+    return '' if pd.isna(value) else str(value)
+
+
 def _fdr_bh(p_values):
     """Benjamini-Hochberg adjusted p-values, preserving NaN positions."""
     values = np.asarray(p_values, dtype=float)
@@ -239,7 +263,7 @@ def _fdr_bh(p_values):
 # ============================================================
 
 def _flatten_unified_to_features(unified):
-    """从 unified_features.json 还原成 flat dict (与 portal_vein_features.json 兼容)."""
+    """从 unified_features.json 还原成相关性分析使用的 flat dict。"""
     out = {}
     # statistical: nested → flat
     statistical = unified.get('statistical') or {}
@@ -287,18 +311,6 @@ def _read_label_value(folder_path, target):
     except Exception:
         pass
     return None
-
-
-def _candidate_feature_paths(folder_path, filename):
-    """Canonical ``features/`` path first, then the pre-layout root path."""
-    return (
-        os.path.join(folder_path, FEATURES_DIRNAME, filename),
-        os.path.join(folder_path, filename),
-    )
-
-
-def _first_existing_path(paths):
-    return next((path for path in paths if os.path.exists(path)), None)
 
 
 def _infer_subject_id(sample_name):
@@ -350,13 +362,15 @@ def _cluster_jackknife_inference(x, y, subject_ids, estimate, statistic):
 
 
 def collect_features(root_folder, target="PVP", output_txt=None,
-                     drop_features_above_missing=0.5):
+                     drop_features_above_missing=0.5,
+                     skip_folder_markers=('@',)):
     """
-    遍历子文件夹, 读取 portal_vein_features.json + label, 汇总为 TSV。
+    遍历子文件夹, 读取 features/unified_features.json + label, 汇总为 TSV。
 
     参数:
         drop_features_above_missing: 缺失率超过此比例的特征不参与分析
                                      (例如 LGV 在大多数患者里都没有, 应剔除)
+        skip_folder_markers: 文件夹名包含任一标记时跳过；默认跳过 ``@``。
 
     返回:
         output_txt: TSV 文件路径
@@ -375,38 +389,27 @@ def collect_features(root_folder, target="PVP", output_txt=None,
         if os.path.isdir(os.path.join(root_folder, d)))
 
     rows = []  # 每行: (sample_name, {feat: value or None}, target_val)
-    no_json, no_label = [], []
+    no_json, no_label, skipped_marked = [], [], []
+    skip_folder_markers = tuple(skip_folder_markers or ())
 
     for folder in subfolders:
+        if any(marker in folder for marker in skip_folder_markers):
+            skipped_marked.append(folder)
+            continue
         folder_path = os.path.join(root_folder, folder)
-        # 新版统一文件位于 patient/features；根目录路径仅供旧结果兼容。
-        unified_path = _first_existing_path(
-            _candidate_feature_paths(folder_path, UNIFIED_FEATURES_NAME))
-        legacy_path = _first_existing_path(
-            _candidate_feature_paths(folder_path, "portal_vein_features.json"))
-
-        if unified_path is not None:
-            try:
-                with open(unified_path, 'r', encoding='utf-8') as f:
-                    unified = json.load(f)
-                features = _flatten_unified_to_features(unified)
-            except Exception as e:
-                print(f"  ERROR {folder}: unified JSON 失败 ({e}), 尝试 legacy")
-                features = None
-        else:
-            features = None
-
-        if features is None:
-            if legacy_path is None:
-                no_json.append(folder)
-                continue
-            try:
-                with open(legacy_path, 'r', encoding='utf-8') as f:
-                    features = json.load(f)
-            except Exception as e:
-                print(f"  ERROR {folder}: legacy JSON 失败 ({e})")
-                no_json.append(folder)
-                continue
+        unified_path = os.path.join(
+            folder_path, FEATURES_DIRNAME, UNIFIED_FEATURES_NAME)
+        if not os.path.exists(unified_path):
+            no_json.append(folder)
+            continue
+        try:
+            with open(unified_path, 'r', encoding='utf-8') as f:
+                unified = json.load(f)
+            features = _flatten_unified_to_features(unified)
+        except Exception as e:
+            print(f"  ERROR {folder}: unified JSON 失败 ({e})")
+            no_json.append(folder)
+            continue
 
         label_val = _read_label_value(folder_path, target)
         if label_val is None:
@@ -421,6 +424,11 @@ def collect_features(root_folder, target="PVP", output_txt=None,
             except (TypeError, ValueError, OverflowError):
                 value = np.nan
             feat_dict[fn] = value if np.isfinite(value) else None
+
+        if feat_dict.get('has_tips') == 1.0:
+            for fn in COLLATERAL_FEATURES:
+                if fn in feat_dict:
+                    feat_dict[fn] = None
 
         rows.append((folder, feat_dict, label_val))
         print(f"  OK {folder}: {target}={label_val:.1f}")
@@ -442,6 +450,10 @@ def collect_features(root_folder, target="PVP", output_txt=None,
                if miss_rate[fn] > drop_features_above_missing]
 
     print(f"\n汇总: {n_samples} 个样本")
+    if skipped_marked:
+        print(f"  按文件夹标记跳过 ({len(skipped_marked)}): "
+              f"{skipped_marked[:8]}"
+              f"{'...' if len(skipped_marked) > 8 else ''}")
     if no_json:
         print(f"  无 JSON ({len(no_json)}): "
               f"{no_json[:5]}{'...' if len(no_json)>5 else ''}")
@@ -496,6 +508,34 @@ def load_data(filepath, target="PVP"):
     print(f"  {target} 范围: {y.min():.1f} - {y.max():.1f} {unit}")
 
     return df, feature_cols
+
+
+def _deduplicate_feature_columns(df, features):
+    """Remove non-constant columns that contain exactly the same observations."""
+    retained = []
+    retained_values = {}
+    aliases = {}
+    for feature in features:
+        values = pd.to_numeric(df[feature], errors='coerce').to_numpy(
+            dtype=float)
+        finite_values = values[np.isfinite(values)]
+        is_variable = (
+            finite_values.size >= 2
+            and np.ptp(finite_values) > 1e-12
+        )
+        duplicate_of = None
+        if is_variable:
+            for retained_feature, retained_array in retained_values.items():
+                if np.array_equal(values, retained_array, equal_nan=True):
+                    duplicate_of = retained_feature
+                    break
+        if duplicate_of is None:
+            retained.append(feature)
+            if is_variable:
+                retained_values[feature] = values
+        else:
+            aliases[feature] = duplicate_of
+    return retained, aliases
 
 
 # ============================================================
@@ -582,6 +622,24 @@ def compute_correlations(df, active_features, target="PVP", min_samples=10):
               f"N={row['n_samples']}, subjects={row['n_subjects']}")
 
     return corr_df
+
+
+def compute_pretips_collateral_correlations(df, target="PVP",
+                                             min_samples=10):
+    """Focused collateral analysis restricted to pre-TIPS observations."""
+    if 'has_tips' not in df.columns:
+        return df.iloc[0:0].copy(), pd.DataFrame()
+    pre_tips = df[df['has_tips'] == 0].copy()
+    features = [
+        feature for feature in PRETIPS_COLLATERAL_FEATURES
+        if feature in pre_tips.columns
+    ]
+    if len(pre_tips) < min_samples or not features:
+        return pre_tips, pd.DataFrame()
+    result = compute_correlations(
+        pre_tips, features, target=target, min_samples=min_samples)
+    result.insert(0, 'analysis_subset', 'pre_tips_only')
+    return pre_tips, result
 
 
 # ============================================================
@@ -921,7 +979,9 @@ def plot_group_analysis(corr_df, output_dir, target="PVP"):
 # 文字报告
 # ============================================================
 
-def generate_report(df, corr_df, active_features, output_dir, target="PVP"):
+def generate_report(df, corr_df, active_features, output_dir, target="PVP",
+                    skip_folder_markers=(), pretips_collateral_df=None,
+                    duplicate_feature_aliases=None):
     target = target.upper()
     target_cn = TARGET_LABELS.get(target, {}).get('cn', target)
     unit = TARGET_LABELS.get(target, {}).get('unit', '')
@@ -942,7 +1002,8 @@ def generate_report(df, corr_df, active_features, output_dir, target="PVP"):
         "=" * 70, "",
         f"样本数量: {len(df)}",
         f"推断患者簇数量: {n_subjects} (按日期前缀和术后标记归并)",
-        f"特征数量: {len(active_features)} (active)",
+        f"文件夹过滤: 排除名称包含 {tuple(skip_folder_markers or ())} 的对象",
+        f"特征数量: {len(active_features)} (去除侧支及完全重复列后)",
         f"{target}范围: {y.min():.1f} - {y.max():.1f} {unit}",
         f"{target}均值: {y.mean():.1f} ± {y.std():.1f} {unit}",
         f"{target}中位数: {y.median():.1f} {unit}", "",
@@ -950,6 +1011,16 @@ def generate_report(df, corr_df, active_features, output_dir, target="PVP"):
         f"显著相关特征 (Spearman, Benjamini-Hochberg FDR): "
         f"q<0.05: {len(sig5)}, q<0.01: {len(sig1)}", "",
     ]
+
+    duplicate_feature_aliases = duplicate_feature_aliases or {}
+    if duplicate_feature_aliases:
+        lines[8:8] = [
+            f"完全重复特征别名: {len(duplicate_feature_aliases)} 个已从统计检验中移除",
+            *(
+                f"  {alias} -> {retained}"
+                for alias, retained in duplicate_feature_aliases.items()
+            ),
+        ]
 
     if len(sig5) > 0:
         lines.append("显著特征详情 (FDR q < 0.05, 按|ρ|降序):")
@@ -966,6 +1037,30 @@ def generate_report(df, corr_df, active_features, output_dir, target="PVP"):
                 f"{r['group']:>8s}  {int(r['n_samples']):>4d}")
     else:
         lines.append("  FDR 校正后未发现显著相关特征")
+
+    lines += ["", "-" * 70, "仅术前侧支相关性:"]
+    if pretips_collateral_df is not None and len(pretips_collateral_df):
+        pretips_valid = pretips_collateral_df.dropna(
+            subset=['spearman_r']).copy()
+        pretips_sig = pretips_valid[pretips_valid['spearman_q'] < 0.05]
+        n_scans = (int(pretips_valid['n_samples'].max())
+                   if len(pretips_valid) else 0)
+        n_clusters = (int(pretips_valid['n_subjects'].max())
+                      if len(pretips_valid) else 0)
+        lines.append(
+            f"  术前扫描 N={n_scans}, 患者簇={n_clusters}; "
+            f"侧支指标内 BH-FDR q<0.05: {len(pretips_sig)}")
+        lines.append(f"  {'特征':>18s}  {'Spearman ρ':>12s}  "
+                     f"{'cluster p':>10s}  {'FDR q':>10s}  "
+                     f"{'N':>4s}")
+        for _, row in pretips_valid.iterrows():
+            lines.append(
+                f"  {row['label']:>18s}  {row['spearman_r']:>+12.4f}  "
+                f"{row['spearman_p']:>10.4f}  "
+                f"{row['spearman_q']:>10.4f}  "
+                f"{int(row['n_samples']):>4d}")
+    else:
+        lines.append("  无足够的术前侧支数据。")
 
     lines += ["", "-" * 70, "分组平均相关性:"]
     for g, feats in FEATURE_GROUPS.items():
@@ -989,10 +1084,11 @@ def generate_report(df, corr_df, active_features, output_dir, target="PVP"):
                          f"{'':>4s}  {'N/A':>10s}  "
                          f"{int(r['n_samples']):>4d}")
         else:
+            fdr_sig = _sig_text(r['spearman_fdr_sig'])
             lines.append(
                 f"  {i+1:>3d}  {r['label']:>18s}  "
                 f"{r['spearman_r']:>+12.4f}  {r['spearman_p']:>10.4f}  "
-                f"{r['spearman_q']:>10.4f}  {r['spearman_fdr_sig']:>4s}  "
+                f"{r['spearman_q']:>10.4f}  {fdr_sig:>4s}  "
                 f"{r['pearson_r']:>+10.4f}  {int(r['n_samples']):>4d}")
 
     # ----- 自动相关性解读 (Top-K 解读 + 候选特征建议) -----
@@ -1007,7 +1103,7 @@ def generate_report(df, corr_df, active_features, output_dir, target="PVP"):
         "    该分析控制重复测量依赖，但未把 TIPS 状态作为混杂变量消除",
         f"    目标变量: {target} ({target_cn})",
         f"    标签来源: patient/label/{target}.txt",
-        f"    特征来源: patient/features/unified_features.json (兼容旧路径)",
+        f"    特征来源: patient/features/unified_features.json",
         "=" * 70,
     ]
 
@@ -1080,11 +1176,13 @@ def _auto_interpret_correlations(corr_df, df, target="PVP",
         out.append("  系统/联合特征 Top 5:")
         for _, r in sys_top.iterrows():
             out.append(f"    {r['label']:>22s}  ρ={r['spearman_r']:+.3f}  "
-                       f"q={r['spearman_q']:.4f}{r['spearman_fdr_sig']}")
+                       f"q={r['spearman_q']:.4f}"
+                       f"{_sig_text(r['spearman_fdr_sig'])}")
         out.append("  单段特征 Top 5:")
         for _, r in seg_top.iterrows():
             out.append(f"    {r['label']:>22s}  ρ={r['spearman_r']:+.3f}  "
-                       f"q={r['spearman_q']:.4f}{r['spearman_fdr_sig']}")
+                       f"q={r['spearman_q']:.4f}"
+                       f"{_sig_text(r['spearman_fdr_sig'])}")
         max_sys = sys_top['abs_rho'].max() if len(sys_top) else 0
         max_seg = seg_top['abs_rho'].max() if len(seg_top) else 0
         out.append(f"  最强 |ρ|: 系统={max_sys:.3f}, 单段={max_seg:.3f}; "
@@ -1134,7 +1232,8 @@ def _auto_interpret_correlations(corr_df, df, target="PVP",
 # 主流程
 # ============================================================
 
-def run_analysis(filepath, output_dir=None, target="PVP"):
+def run_analysis(filepath, output_dir=None, target="PVP",
+                 skip_folder_markers=()):
     """完整分析: 加载 → 相关性 → 可视化 → 报告"""
     target = target.upper()
     if output_dir is None:
@@ -1143,11 +1242,42 @@ def run_analysis(filepath, output_dir=None, target="PVP"):
     _setup_matplotlib()
 
     df, active_features = load_data(filepath, target)
-    corr_df = compute_correlations(df, active_features, target)
+    analysis_features = [
+        feature for feature in active_features
+        if feature not in COLLATERAL_FEATURES
+    ]
+    analysis_features, duplicate_feature_aliases = (
+        _deduplicate_feature_columns(df, analysis_features))
+    if duplicate_feature_aliases:
+        print("  移除完全重复特征别名: " + ", ".join(
+            f"{alias}->{retained}"
+            for alias, retained in duplicate_feature_aliases.items()))
+    corr_df = compute_correlations(df, analysis_features, target)
+    _, pretips_collateral_df = compute_pretips_collateral_correlations(
+        df, target=target)
 
     csv_path = os.path.join(output_dir, 'correlation_results.csv')
     corr_df.to_csv(csv_path, index=False, encoding='utf-8-sig')
     print(f"\n相关性 CSV: {csv_path}")
+
+    pretips_path = os.path.join(
+        output_dir, 'pretips_collateral_correlations.csv')
+    pretips_collateral_df.to_csv(
+        pretips_path, index=False, encoding='utf-8-sig')
+    print(f"术前侧支相关性 CSV: {pretips_path}")
+
+    duplicate_path = os.path.join(
+        output_dir, 'duplicate_feature_aliases.csv')
+    pd.DataFrame([
+        {
+            'excluded_feature': alias,
+            'retained_feature': retained,
+            'reason': 'exactly_equal_across_samples',
+        }
+        for alias, retained in duplicate_feature_aliases.items()
+    ], columns=['excluded_feature', 'retained_feature', 'reason']).to_csv(
+        duplicate_path, index=False, encoding='utf-8-sig')
+    print(f"重复特征审计 CSV: {duplicate_path}")
 
     # 候选特征 CSV (|ρ|≥0.25 + BH-FDR q<0.05 + 覆盖≥70%)
     valid = corr_df.dropna(subset=['spearman_r']).copy()
@@ -1161,11 +1291,15 @@ def run_analysis(filepath, output_dir=None, target="PVP"):
     keep.to_csv(rec_path, index=False, encoding='utf-8-sig')
     print(f"候选特征 CSV: {rec_path}  ({len(keep)} 个)")
 
-    plot_heatmap(df, active_features, output_dir, target)
+    plot_heatmap(df, analysis_features, output_dir, target)
     plot_scatter_matrix(df, corr_df, output_dir, target)
     plot_top_features(corr_df, output_dir, target)
     plot_group_analysis(corr_df, output_dir, target)
-    generate_report(df, corr_df, active_features, output_dir, target)
+    generate_report(
+        df, corr_df, analysis_features, output_dir, target,
+        skip_folder_markers=skip_folder_markers,
+        pretips_collateral_df=pretips_collateral_df,
+        duplicate_feature_aliases=duplicate_feature_aliases)
 
     print(f"\n{'='*60}")
     print(f"分析完成! 结果: {output_dir}")
@@ -1174,21 +1308,26 @@ def run_analysis(filepath, output_dir=None, target="PVP"):
 
 
 def collect_and_analyze(root_folder, output_dir=None, target="PVP",
-                         drop_features_above_missing=0.5):
+                        drop_features_above_missing=0.5,
+                        skip_folder_markers=('@',)):
     """一键: 收集 → 汇总 → 分析"""
     target = target.upper()
     if output_dir is None:
-        output_dir = os.path.join(root_folder, f"correlation_{target.lower()}")
+        output_dir = os.path.join(
+            root_folder, 'correlationship', 'scalar')
     os.makedirs(output_dir, exist_ok=True)
 
     txt_path = os.path.join(output_dir, f"all_features_{target.lower()}.txt")
     result, active = collect_features(
         root_folder, target, txt_path,
-        drop_features_above_missing=drop_features_above_missing)
+        drop_features_above_missing=drop_features_above_missing,
+        skip_folder_markers=skip_folder_markers)
     if result is None:
         print("收集失败")
         return
-    run_analysis(txt_path, output_dir, target)
+    run_analysis(
+        txt_path, output_dir, target,
+        skip_folder_markers=skip_folder_markers)
 
 
 # ============================================================

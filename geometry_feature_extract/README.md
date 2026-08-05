@@ -314,11 +314,11 @@ patient_001/
 ```
 
 **分析流程**：
-1. 从所有患者收集特征 → 特征矩阵 (N_samples × 72_features)
+1. 从 `features/unified_features.json` 收集特征矩阵
 2. 丢弃缺失率 > 50% 的特征
-3. 标准化处理
-4. Spearman秩相关分析 vs 临床指标（PVP或PCG）
-5. p值校正（FDR）
+3. 去除逐样本完全相同的重复特征列
+4. Spearman 秩相关分析，并按患者簇计算 p 值和 95% CI
+5. Benjamini-Hochberg FDR 校正
 6. 可视化：
    - 相关性条形图 + p值标记
    - 热力图（样本×特征）
@@ -327,14 +327,18 @@ patient_001/
 
 **输出**：
 ```
-correlation_pvp/
-  ├── correlation_results.csv        [所有特征相关性]
-  ├── recommended_features.csv       [推荐入选训练特征 (新)]
-  ├── correlation_heatmap.png        [热力图]
-  ├── scatter_plots.png              [散点图网格]
-  ├── top_features_bar.png           [Top 排名条形图]
-  ├── feature_importance.png         [分组分析 + Top-10 表格]
-  └── analysis_report.txt            [文字报告 + 自动相关性解读]
+correlationship/
+  └── scalar/
+      ├── all_features_pvp.txt         [本次分析特征矩阵]
+      ├── correlation_results.csv      [非侧支特征相关性]
+      ├── pretips_collateral_correlations.csv [仅术前侧支结果]
+      ├── duplicate_feature_aliases.csv [重复特征审计]
+      ├── recommended_features.csv     [推荐入选训练特征]
+      ├── correlation_heatmap.png      [热力图]
+      ├── scatter_plots.png            [散点图网格]
+      ├── top_features_bar.png         [Top 排名条形图]
+      ├── feature_importance.png       [分组分析]
+      └── analysis_report.txt          [文字报告]
 ```
 
 **自动相关性解读 (新)**: `analysis_report.txt` 末尾会附带:
@@ -349,7 +353,7 @@ correlation_pvp/
 **前提条件**：
 ```
 patient_001/
-  ├── pointwise_profiles.json             ← Step 5 输出
+  ├── features/unified_features.json      ← 清洗后的 pointwise 位于其中
   └── label/
       └── PVP.txt or PCG.txt
 ```
@@ -357,8 +361,8 @@ patient_001/
 **分析流程**：
 1. 收集所有患者的逐点剖面特征 → (N_points × 6_features)
 2. 按分支（MPV/SV/SMV等）分别分析
-3. 对每个位置单独过滤NaN后做Spearman相关
-4. 识别显著相关的位置（p<0.05）
+3. 每个分支/特征固定完整病例队列，计算逐点 Spearman 曲线
+4. 患者簇置换控制曲线内 FWER，再对连续区间做 FDR 校正
 5. 可视化：
    - 逐点相关性曲线（显著区域高亮）
    - 剖面热力图（样本按target值排序）
@@ -367,12 +371,14 @@ patient_001/
 
 **输出**：
 ```
-profile_correlation_pvp/
-  ├── pointwise_correlation.png      [逐点相关曲线]
-  ├── profile_heatmap.png            [热力图]
-  ├── group_comparison.png           [高低组对比]
-  ├── peak_correlations.csv          [峰值汇总]
-  └── profile_report.txt             [文字报告]
+correlationship/
+  └── pointwise/
+      ├── pointwise_correlation.png  [逐点相关曲线]
+      ├── profile_heatmap.png        [热力图]
+      ├── group_comparison.png       [高低组对比]
+      ├── peak_correlations.csv      [峰值汇总]
+      ├── correlation_regions.csv   [连续区间及校正结果]
+      └── profile_report.txt         [文字报告]
 ```
 
 **特征键**：`area`, `eq_diameter`, `circularity`, `curvature`, `perimeter`, `inscribed_radius`
