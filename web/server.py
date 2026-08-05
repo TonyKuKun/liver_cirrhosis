@@ -7,6 +7,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import json
 import mimetypes
@@ -109,7 +110,7 @@ LOCK = threading.Lock()
 GEOMETRY_STL_CACHE: dict[str, tuple[tuple, Path]] = {}
 GEOMETRY_STL_CACHE_LOCK = threading.Lock()
 GEOMETRY_VIEW_CACHE_NAME = ".portaflow_geometry_view.json.gz"
-GEOMETRY_VIEW_CACHE_VERSION = 6
+GEOMETRY_VIEW_CACHE_VERSION = 9
 GEOMETRY_VIEW_CACHE_LOCK = threading.Lock()
 
 
@@ -924,6 +925,12 @@ def _geometry_view_cache_path(stl_path: Path) -> Path:
     return stl_path.parent / GEOMETRY_VIEW_CACHE_NAME
 
 
+def _invalidate_geometry_view_cache(stl_path: Path) -> None:
+    cache_path = _geometry_view_cache_path(stl_path)
+    with GEOMETRY_VIEW_CACHE_LOCK, contextlib.suppress(OSError):
+        cache_path.unlink()
+
+
 def _load_geometry_view_cache(stl_path: Path, signature: str) -> dict | None:
     cache_path = _geometry_view_cache_path(stl_path)
     if not cache_path.is_file():
@@ -1205,8 +1212,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._geometry_edit("delete")
             elif parsed.path == "/api/geometry/centerline/manual-segments":
                 self._geometry_edit("manual")
-            elif parsed.path == "/api/geometry/analysis/suggest-ranges":
-                self._geometry_edit("suggest")
             elif parsed.path == "/api/geometry/analysis/save-ranges":
                 self._geometry_edit("save-ranges")
             elif parsed.path == "/api/run-stage":
@@ -1372,10 +1377,9 @@ class Handler(BaseHTTPRequestHandler):
             result = geometry_web.delete_centerline_terminal_branches(stl, payload.get("branch_ids") or [])
         elif operation == "manual":
             result = geometry_web.save_manual_segment_assignments(stl, payload.get("assignments") or [])
-        elif operation == "suggest":
-            result = geometry_web.suggest_analysis_ranges(stl)
         else:
             result = geometry_web.save_analysis_ranges(stl, payload.get("ranges") or [])
+            _invalidate_geometry_view_cache(stl)
         self._json({"ok": True, "result": result})
 
     def _geometry_job(self, path: str):
@@ -1410,7 +1414,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(query)
         session_id = (qs.get("session_id") or [""])[0]
         patient = (qs.get("patient") or [""])[0]
-        iframe_url = "/geometry/?embed=1&autoload=1&ui=7"
+        iframe_url = "/geometry/?embed=1&autoload=1&ui=9"
         if session_id:
             iframe_url += "&session_id=" + quote(session_id)
         if patient:

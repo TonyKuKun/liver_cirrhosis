@@ -101,7 +101,7 @@
           <div class="toolbar-mode-tabs" aria-label="中心线编辑功能">
             <button id="centerlineEditBtn" type="button">编辑原始线</button>
             <button id="manualSegmentBtn" type="button">人工分段</button>
-            <button id="analysisRangeBtn" type="button">有效分析区</button>
+            <button id="effectiveAnalysisBtn" type="button">有效分析区</button>
           </div>
         </div>
         <div id="centerlineEditControls" class="edit-group toolbar-detail-row hidden">
@@ -129,7 +129,6 @@
           <select id="analysisVesselSelect" disabled>
             <option value="">无血管</option>
           </select>
-          <button id="analysisSuggestBtn" type="button" disabled>自动建议</button>
           <label class="analysis-slider">起点
             <input id="analysisStart" type="range" min="0" max="100" value="0" disabled />
             <span id="analysisStartValue">0%</span>
@@ -182,6 +181,6 @@
     </main>
   </div>
 
-  <script src="app.js?v=13"></script>
+  <script src="app.js?v=23"></script>
 </body>
 </html>

@@ -58,12 +58,31 @@ from geometry_feature_extract.features_layout import (
 )
 
 
-STATIC_ROOT = WEB_ROOT / "geometry_legacy"
+STATIC_ROOT = WEB_ROOT / "geometry"
 RUNS_ROOT = WEB_ROOT / "geometry_runs"
 DEFAULT_CONFIG_PATH = WEB_ROOT / "geometry_backend_config.json"
-WEB_FRONTEND_VERSION = "analysis-ranges-surface-sections-20260527-v1"
+WEB_FRONTEND_VERSION = "analysis-ranges-pointwise-only-20260804-v3"
 MANUAL_SEGMENT_FILE = SEGMENT_ASSIGNMENTS_NAME
-ANALYSIS_RANGE_FILE = "analysis_ranges"
+POINTWISE_ANALYSIS_ZERO_KEYS = {
+    "area",
+    "perimeter",
+    "eq_diameter",
+    "raw_area",
+    "raw_perimeter",
+    "raw_eq_diameter",
+    "anchor_radius",
+    "owned_radius",
+    "hydraulic_diameter",
+    "circularity",
+    "solidity",
+    "r_insc_to_r_eq_ratio",
+    "curvature",
+    "torsion",
+    "dA_ds_norm",
+    "inscribed_radius",
+    "section_normal_offset_deg",
+    "implausibly_small_section",
+}
 
 RUNS_ROOT.mkdir(exist_ok=True)
 
@@ -762,12 +781,93 @@ def save_manual_segment_assignments(
     }
 
 
-def _load_analysis_ranges(parent: Path) -> dict:
-    data = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
-    if not isinstance(data, dict):
-        return {}
-    ranges = data.get("analysis_ranges") or {}
-    return ranges if isinstance(ranges, dict) else {}
+def _pointwise_profile_count(profile: dict | None) -> int:
+    if not isinstance(profile, dict):
+        return 0
+    for key in ("area", "eq_diameter", "perimeter", "section_valid", "position"):
+        values = profile.get(key)
+        if isinstance(values, list) and values:
+            return len(values)
+    lengths = [len(value) for value in profile.values() if isinstance(value, list)]
+    return max(set(lengths), key=lengths.count) if lengths else 0
+
+
+def _positive_pointwise_value(value) -> bool:
+    number = _safe_float(value)
+    return number is not None and math.isfinite(number) and number > 0
+
+
+def _pointwise_valid_mask(profile: dict | None) -> list[bool]:
+    """Return the validity of every serialized pointwise sample."""
+    count = _pointwise_profile_count(profile)
+    if count <= 0 or not isinstance(profile, dict):
+        return []
+    core_keys = [
+        key for key in ("area", "eq_diameter", "perimeter")
+        if isinstance(profile.get(key), list) and len(profile[key]) == count
+    ]
+    section_valid = profile.get("section_valid")
+    has_section_valid = (
+        isinstance(section_valid, list) and len(section_valid) == count
+    )
+    valid = []
+    for index in range(count):
+        sample_valid = all(
+            _positive_pointwise_value(profile[key][index])
+            for key in core_keys
+        ) if core_keys else True
+        if has_section_valid:
+            sample_valid = (
+                sample_valid
+                and _positive_pointwise_value(section_valid[index])
+            )
+        valid.append(sample_valid)
+    return valid
+
+
+def _pointwise_range_from_profile(profile: dict | None) -> dict:
+    """Map leading/trailing invalid samples to exact sample-count fractions."""
+    count = _pointwise_profile_count(profile)
+    if count <= 0:
+        return {
+            "start_fraction": 0.0,
+            "end_fraction": 1.0,
+            "source": "full",
+            "n_points": 0,
+            "leading_invalid_points": 0,
+            "trailing_invalid_points": 0,
+        }
+
+    valid = _pointwise_valid_mask(profile)
+
+    valid_indices = [index for index, is_valid in enumerate(valid) if is_valid]
+    if not valid_indices:
+        start_index = 0
+        end_index = count
+        source = "full_no_valid_profile_samples"
+    else:
+        start_index = valid_indices[0]
+        end_index = valid_indices[-1] + 1
+        source = "pointwise_endpoint_mask"
+    return {
+        "start_fraction": float(start_index / count),
+        "end_fraction": float(end_index / count),
+        "source": source,
+        "n_points": int(count),
+        "leading_invalid_points": int(start_index),
+        "trailing_invalid_points": int(count - end_index),
+    }
+
+
+def _pointwise_analysis_ranges(pointwise: dict | None) -> dict:
+    ranges = {}
+    for vessel, profile in (pointwise or {}).items():
+        if str(vessel).startswith("_") or not isinstance(profile, dict):
+            continue
+        if _pointwise_profile_count(profile) <= 0:
+            continue
+        ranges[str(vessel).lower()] = _pointwise_range_from_profile(profile)
+    return ranges
 
 
 def _normalize_range(value, default: float) -> float:
@@ -775,39 +875,122 @@ def _normalize_range(value, default: float) -> float:
     return float(min(1.0, max(0.0, number)))
 
 
+def _mask_pointwise_profile(profile: dict, start: float, end: float) -> dict:
+    count = _pointwise_profile_count(profile)
+    if count <= 0:
+        return dict(profile)
+    start_index = min(count, max(0, int(math.floor(start * count + 0.5))))
+    end_index = min(count, max(0, int(math.floor(end * count + 0.5))))
+    keep = [start_index <= index < end_index for index in range(count)]
+    originally_valid = _pointwise_valid_mask(profile)
+    masked = dict(profile)
+    for key in POINTWISE_ANALYSIS_ZERO_KEYS:
+        values = profile.get(key)
+        if isinstance(values, list) and len(values) == count:
+            masked[key] = [value if keep[index] else 0.0 for index, value in enumerate(values)]
+
+    masked["section_valid"] = [
+        1.0 if keep[index] and originally_valid[index] else 0.0
+        for index in range(count)
+    ]
+    masked["analysis_range_mask"] = [
+        1.0 if retained else 0.0 for retained in keep
+    ]
+    masked["n_analysis_range_excluded"] = int(sum(not retained for retained in keep))
+    return masked
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False, allow_nan=True)
+        os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+
+
 def save_analysis_ranges(stl_path: Path, ranges_payload: list[dict]) -> dict:
     parent = stl_path.parent
-    seg_path = _feature_file(parent, SEGMENT_ASSIGNMENTS_NAME)
-    seg_data = _read_json_file(seg_path)
-    if not seg_data:
-        raise ValueError("No anatomical segmentation is available.")
+    pointwise_path = _feature_file(parent, POINTWISE_TEMP_NAME)
+    pointwise = _read_json_file(pointwise_path)
+    if not isinstance(pointwise, dict):
+        raise ValueError("pointwise_profiles.json is required before saving an analysis range.")
     available = {
-        name for name, info in (seg_data.get("segments") or {}).items()
-        if info and info.get("path")
+        str(name).lower() for name, profile in pointwise.items()
+        if not str(name).startswith("_")
+        and isinstance(profile, dict)
+        and _pointwise_profile_count(profile) > 0
     }
+    detected_ranges = _pointwise_analysis_ranges(pointwise)
     saved = {}
     for item in ranges_payload:
         vessel = str(item.get("vessel") or "").lower()
         if vessel not in available:
             continue
-        start = _normalize_range(item.get("start_fraction"), 0.0)
-        end = _normalize_range(item.get("end_fraction"), 1.0)
+        detected = detected_ranges.get(vessel) or {}
+        start = max(
+            _normalize_range(item.get("start_fraction"), 0.0),
+            _normalize_range(detected.get("start_fraction"), 0.0),
+        )
+        end = min(
+            _normalize_range(item.get("end_fraction"), 1.0),
+            _normalize_range(detected.get("end_fraction"), 1.0),
+        )
         if end - start < 0.02:
             raise ValueError(f"{SEGMENT_LABELS.get(vessel, vessel)} valid analysis range is too short.")
         saved[vessel] = {
             "start_fraction": start,
             "end_fraction": end,
-            "source": "manual",
+            "source": "pointwise_mask",
         }
     if not saved:
         raise ValueError("No valid vessel analysis ranges were supplied.")
 
-    seg_data["analysis_ranges"] = saved
-    seg_path = feature_path(parent, SEGMENT_ASSIGNMENTS_NAME, create=True)
-    with seg_path.open("w", encoding="utf-8") as handle:
-        json.dump(seg_data, handle, indent=2, ensure_ascii=False)
-    removed_outputs = remove_generated_outputs(parent, keep_public=True)
-    return {"ranges": saved, "removed_outputs": removed_outputs}
+    updated_pointwise = dict(pointwise)
+    masked_counts = {}
+    for vessel, range_info in saved.items():
+        profile = pointwise.get(vessel)
+        if not isinstance(profile, dict):
+            continue
+        masked = _mask_pointwise_profile(
+            profile,
+            range_info["start_fraction"],
+            range_info["end_fraction"],
+        )
+        updated_pointwise[vessel] = masked
+        masked_counts[vessel] = masked.get("n_analysis_range_excluded", 0)
+    original_unified = _read_json_file(_feature_file(parent, UNIFIED_FEATURES_NAME))
+    pointwise_path = feature_path(parent, POINTWISE_TEMP_NAME, create=True)
+    unified_path = feature_path(parent, UNIFIED_FEATURES_NAME, create=True)
+    try:
+        _write_json_atomic(pointwise_path, updated_pointwise)
+        app_root = str(APP_ROOT)
+        if app_root not in sys.path:
+            sys.path.insert(0, app_root)
+        from extract_features import extract_all_features
+        rebuilt_features = extract_all_features(str(stl_path), write_legacy=False)
+        if not rebuilt_features or not unified_path.exists():
+            raise RuntimeError("unified_features.json was not rebuilt.")
+    except Exception:
+        _write_json_atomic(pointwise_path, pointwise)
+        if isinstance(original_unified, dict):
+            _write_json_atomic(unified_path, original_unified)
+        else:
+            with contextlib.suppress(OSError):
+                unified_path.unlink()
+        raise
+
+    return {
+        "ranges": _pointwise_analysis_ranges(updated_pointwise),
+        "masked_points": masked_counts,
+        "pointwise_profiles_file": str(pointwise_path),
+        "unified_features_file": str(unified_path),
+        "unified_recomputed": True,
+        "removed_outputs": [],
+    }
 
 
 def _rebuild_centerline_tree(nodes: dict, adj: dict[int, set[int]]) -> list[list[float | int]]:
@@ -1764,10 +1947,10 @@ def _build_pointwise_layers(
         ):
             centerline_arc_length = None
 
-        fx, fy, fz = [], [], []
+        fx, fy, fz, feature_positions = [], [], [], []
         curvature_values, sizes, hover = [], [], []
-        ring_x, ring_y, ring_z = [], [], []
-        surface_x, surface_y, surface_z = [], [], []
+        ring_x, ring_y, ring_z, ring_positions = [], [], [], []
+        surface_x, surface_y, surface_z, surface_positions = [], [], [], []
         area = _finite_array(profile.get("area"))
         diameter = _finite_array(profile.get("eq_diameter"))
         curvature = _finite_array(profile.get("curvature"))
@@ -1775,6 +1958,7 @@ def _build_pointwise_layers(
         inscribed = _finite_array(profile.get("inscribed_radius"))
 
         for i, frac in enumerate(positions):
+            global_fraction = float(min(1.0, max(0.0, frac)))
             point, tangent = _profile_point_and_tangent(coords, positions, i)
             if point is None or not _section_is_valid(profile, i):
                 continue
@@ -1787,6 +1971,7 @@ def _build_pointwise_layers(
                 fx.append(float(point[0]))
                 fy.append(float(point[1]))
                 fz.append(float(point[2]))
+                feature_positions.append(global_fraction)
                 curvature_values.append(curv if curv is not None else 0.0)
                 sizes.append(max(4.0, min(15.0, 3.0 + (dia or 0.0) * 0.45)))
                 hover.append(
@@ -1810,6 +1995,8 @@ def _build_pointwise_layers(
                         ring_x.extend(circle[:, 0].tolist() + [None])
                         ring_y.extend(circle[:, 1].tolist() + [None])
                         ring_z.extend(circle[:, 2].tolist() + [None])
+                        ring_positions.extend(
+                            [global_fraction] * len(circle) + [None])
                 contour = _pointwise_surface_section_arrays(
                     surface_mesh, point, normal, dia,
                     profile=profile,
@@ -1820,6 +2007,8 @@ def _build_pointwise_layers(
                     surface_x.extend(contour[:, 0].tolist() + [None])
                     surface_y.extend(contour[:, 1].tolist() + [None])
                     surface_z.extend(contour[:, 2].tolist() + [None])
+                    surface_positions.extend(
+                        [global_fraction] * len(contour) + [None])
 
         features[seg_name] = {
             "label": SEGMENT_LABELS.get(seg_name, seg_name.upper()),
@@ -1827,6 +2016,7 @@ def _build_pointwise_layers(
             "x": fx,
             "y": fy,
             "z": fz,
+            "position": feature_positions,
             "curvature": curvature_values,
             "size": sizes,
             "hover": hover,
@@ -1838,6 +2028,7 @@ def _build_pointwise_layers(
                 "x": ring_x,
                 "y": ring_y,
                 "z": ring_z,
+                "position": ring_positions,
             }
         if surface_x:
             surface_sections[seg_name] = {
@@ -1846,6 +2037,7 @@ def _build_pointwise_layers(
                 "x": surface_x,
                 "y": surface_y,
                 "z": surface_z,
+                "position": surface_positions,
             }
 
         max_idx = _best_index(area, mode="max")
@@ -1912,6 +2104,7 @@ def _section_at_index(coords: np.ndarray, profile: dict, idx: int | None):
         "y": circle[:, 1].tolist(),
         "z": circle[:, 2].tolist(),
         "index": int(idx),
+        "position": float(min(1.0, max(0.0, positions[idx]))),
         "diameter": dia,
         "area": area,
     }
@@ -1950,192 +2143,9 @@ def _surface_section_at_index(coords: np.ndarray, profile: dict, idx: int | None
         "y": contour[:, 1].tolist(),
         "z": contour[:, 2].tolist(),
         "index": int(idx),
+        "position": float(min(1.0, max(0.0, positions[idx]))),
         "diameter": diameter,
         "area": _valid_numeric_at(profile, "area", idx),
-    }
-
-
-def _profile_value_at_fraction(profile: dict | None, key: str, fraction: float):
-    if not profile or profile.get("analysis_range"):
-        return None
-    positions = _profile_positions(profile)
-    values = profile.get(key)
-    if len(positions) == 0 or not values:
-        return None
-    idx = int(np.argmin(np.abs(positions - fraction)))
-    return _safe_float(values[idx]) if idx < len(values) else None
-
-
-def _local_relative_deviation(values: np.ndarray, index: int, window: int = 2):
-    lo = max(0, index - window)
-    hi = min(len(values), index + window + 1)
-    local = values[lo:hi]
-    local = local[np.isfinite(local) & (local > 0)]
-    if not len(local) or not math.isfinite(values[index]):
-        return None
-    median = float(np.median(local))
-    return abs(float(values[index]) - median) / max(median, 1e-9)
-
-
-def _suggest_boundary_fraction(
-    fractions: np.ndarray,
-    arcs: np.ndarray,
-    eq_diameters: np.ndarray,
-    stable: list[bool],
-    at_start: bool,
-):
-    total = float(arcs[-1]) if len(arcs) else 0.0
-    order = list(range(len(fractions))) if at_start else list(range(len(fractions) - 1, -1, -1))
-    edge_values = [
-        eq_diameters[idx] for idx in order[:max(5, len(order) // 5)]
-        if math.isfinite(eq_diameters[idx]) and eq_diameters[idx] > 0
-    ]
-    diameter = float(np.median(edge_values)) if edge_values else max(total * 0.1, 2.0)
-    minimum_margin_mm = max(2.0, 0.75 * diameter)
-    run = 3
-    selected = None
-    for position, idx in enumerate(order):
-        distance = float(arcs[idx]) if at_start else total - float(arcs[idx])
-        next_indices = order[position:position + run]
-        if distance >= minimum_margin_mm and len(next_indices) == run and all(stable[i] for i in next_indices):
-            selected = idx
-            break
-    if selected is None:
-        selected = min(
-            order,
-            key=lambda idx: abs((float(arcs[idx]) if at_start else total - float(arcs[idx])) - minimum_margin_mm),
-        )
-        confidence = "low"
-    else:
-        confidence = "high"
-    return {
-        "fraction": float(fractions[selected]),
-        "excluded_length_mm": float(arcs[selected]) if at_start else total - float(arcs[selected]),
-        "minimum_margin_mm": minimum_margin_mm,
-        "confidence": confidence,
-    }
-
-
-def suggest_analysis_ranges(stl_path: Path) -> dict:
-    parent = stl_path.parent
-    smooth_nodes = _read_centerline_file(_feature_file(parent, SMOOTH_CENTERLINE_NAME))
-    raw_nodes = _read_centerline_file(_feature_file(parent, RAW_CENTERLINE_NAME))
-    nodes = smooth_nodes or raw_nodes
-    seg_data = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
-    unified = _read_json_file(_feature_file(parent, UNIFIED_FEATURES_NAME))
-    pointwise = unified.get("pointwise") if isinstance(unified, dict) else {}
-    if not nodes or not seg_data:
-        raise ValueError("Run or import centerline smoothing and anatomical segmentation first.")
-    mesh = _load_surface_section_mesh(stl_path)
-    if mesh is None:
-        raise ValueError("Could not load vessel.stl for true surface-section analysis.")
-    branchpoints = {
-        int(item["id"]) for item in (seg_data.get("branch_points") or [])
-        if isinstance(item, dict) and "id" in item
-    }
-    suggestions = {}
-    boundary_sections = {}
-    thresholds = {
-        "circularity_min": 0.45,
-        "solidity_min": 0.80,
-        "owned_to_surface_area_min": 0.65,
-        "inscribed_to_eq_min": 0.40,
-        "relative_diameter_deviation_max": 0.35,
-        "area_change_rate_max_per_mm": 0.50,
-        "stable_run_points": 3,
-        "minimum_margin_local_diameter_factor": 0.75,
-    }
-
-    for vessel, info in (seg_data.get("segments") or {}).items():
-        if not info or not info.get("path"):
-            continue
-        coords = _coords_for_path(info["path"], nodes)
-        if coords is None or len(coords) < 2:
-            continue
-        sample_count = 51
-        fractions = np.linspace(0.0, 1.0, sample_count)
-        seg_lengths = np.linalg.norm(np.diff(coords, axis=0), axis=1)
-        total_length = float(np.sum(seg_lengths))
-        arcs = fractions * total_length
-        profile = pointwise.get(vessel) if isinstance(pointwise, dict) else None
-        measurements = []
-        for fraction in fractions:
-            point, tangent = _point_and_tangent_at_fraction(coords, fraction)
-            owned_diameter = _profile_value_at_fraction(profile, "eq_diameter", fraction)
-            surface = _surface_section_metrics(mesh, point, tangent, owned_diameter) if point is not None else None
-            measurements.append(surface)
-        areas = np.asarray([
-            item["area"] if item else float("nan") for item in measurements], dtype=float)
-        diameters = np.asarray([
-            item["eq_diameter"] if item else float("nan") for item in measurements], dtype=float)
-        area_rate = np.full(sample_count, np.nan, dtype=float)
-        valid_area = np.isfinite(areas) & (areas > 0)
-        if np.sum(valid_area) >= 3 and total_length > 1e-9:
-            interpolated = np.interp(arcs, arcs[valid_area], areas[valid_area])
-            area_rate = np.abs(np.gradient(interpolated, arcs)) / np.maximum(interpolated, 1e-9)
-
-        stable = []
-        for idx, surface in enumerate(measurements):
-            if surface is None:
-                stable.append(False)
-                continue
-            owned_area = _profile_value_at_fraction(profile, "area", float(fractions[idx]))
-            ratio = _profile_value_at_fraction(profile, "r_insc_to_r_eq_ratio", float(fractions[idx]))
-            diameter_deviation = _local_relative_deviation(diameters, idx)
-            checks = [
-                surface["n_near_components"] <= 1,
-                surface["circularity"] >= thresholds["circularity_min"],
-                surface["solidity"] is not None and surface["solidity"] >= thresholds["solidity_min"],
-                diameter_deviation is not None and diameter_deviation <= thresholds["relative_diameter_deviation_max"],
-                math.isfinite(area_rate[idx]) and area_rate[idx] <= thresholds["area_change_rate_max_per_mm"],
-            ]
-            if owned_area is not None and surface["area"] > 1e-9:
-                checks.append(owned_area / surface["area"] >= thresholds["owned_to_surface_area_min"])
-            if ratio is not None:
-                checks.append(ratio >= thresholds["inscribed_to_eq_min"])
-            stable.append(all(checks))
-
-        start_bp = int(info["path"][0]) in branchpoints
-        end_bp = int(info["path"][-1]) in branchpoints
-        start = {"fraction": 0.0, "excluded_length_mm": 0.0, "confidence": "not_applicable"}
-        end = {"fraction": 1.0, "excluded_length_mm": 0.0, "confidence": "not_applicable"}
-        if start_bp:
-            start = _suggest_boundary_fraction(fractions, arcs, diameters, stable, at_start=True)
-        if end_bp:
-            end = _suggest_boundary_fraction(fractions, arcs, diameters, stable, at_start=False)
-        if end["fraction"] - start["fraction"] < 0.08:
-            start["fraction"], end["fraction"] = 0.0, 1.0
-            start["confidence"] = end["confidence"] = "low"
-
-        suggestions[vessel] = {
-            "start_fraction": float(start["fraction"]),
-            "end_fraction": float(end["fraction"]),
-            "start_excluded_mm": float(start["excluded_length_mm"]),
-            "end_excluded_mm": float(end["excluded_length_mm"]),
-            "start_is_junction": bool(start_bp),
-            "end_is_junction": bool(end_bp),
-            "start_confidence": start["confidence"],
-            "end_confidence": end["confidence"],
-            "total_length_mm": total_length,
-            "source": "automatic_surface_section",
-        }
-        boundary_sections[vessel] = {}
-        for name, fraction in (("start", start["fraction"]), ("end", end["fraction"])):
-            if (name == "start" and fraction <= 0) or (name == "end" and fraction >= 1):
-                continue
-            point, tangent = _point_and_tangent_at_fraction(coords, fraction)
-            contour = _surface_section_arrays(mesh, point, tangent) if point is not None else None
-            if contour is not None:
-                boundary_sections[vessel][name] = {
-                    "x": contour[:, 0].tolist(),
-                    "y": contour[:, 1].tolist(),
-                    "z": contour[:, 2].tolist(),
-                    "fraction": float(fraction),
-                }
-    return {
-        "ranges": suggestions,
-        "boundary_sections": boundary_sections,
-        "thresholds": thresholds,
     }
 
 
@@ -2301,10 +2311,10 @@ def build_visualization_data(
     smooth_nodes = _read_centerline_file(_feature_file(parent, SMOOTH_CENTERLINE_NAME))
     nodes = smooth_nodes or raw_nodes
     seg_data = _read_json_file(_feature_file(parent, SEGMENT_ASSIGNMENTS_NAME))
-    unified = _read_json_file(_feature_file(parent, UNIFIED_FEATURES_NAME))
     pointwise = _read_json_file(_feature_file(parent, POINTWISE_TEMP_NAME))
     if not isinstance(pointwise, dict):
-        pointwise = unified.get("pointwise") if isinstance(unified, dict) else None
+        pointwise = {}
+    pointwise_analysis_ranges = _pointwise_analysis_ranges(pointwise)
 
     surface_mesh = _load_surface_section_mesh(stl_path) if include_surface_sections else None
     pointwise_layers = _build_pointwise_layers(
@@ -2347,8 +2357,9 @@ def build_visualization_data(
             "saved": _feature_file(parent, SEGMENT_ASSIGNMENTS_NAME).exists(),
         },
         "analysis_regions": {
-            "ranges": _load_analysis_ranges(parent),
-            "saved": bool(_load_analysis_ranges(parent)),
+            "ranges": pointwise_analysis_ranges,
+            "available_vessels": sorted(pointwise_analysis_ranges),
+            "source": POINTWISE_TEMP_NAME if pointwise_analysis_ranges else None,
         },
         "segments": _build_segments(seg_data, nodes),
         "branch_points": branch_points,
@@ -2671,9 +2682,15 @@ def _zip_patient_outputs(patients: list[dict]) -> bytes:
 class WorkbenchHandler(BaseHTTPRequestHandler):
     server_version = "PPGWorkbench/1.0"
 
+    @staticmethod
+    def _api_path(path: str) -> str:
+        prefix = "/api/geometry"
+        return "/api" + path[len(prefix):] if path.startswith(prefix) else path
+
     def do_GET(self):
         parsed = urlparse(self.path)
-        path = unquote(parsed.path)
+        raw_path = unquote(parsed.path)
+        path = self._api_path(raw_path)
         try:
             if path == "/api/health":
                 self._send_json({
@@ -2693,24 +2710,23 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             elif path == "/assets/plotly.min.js":
                 self._serve_plotly()
             else:
-                self._serve_static(path)
+                self._serve_static(raw_path)
         except Exception as exc:
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=500)
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        path = self._api_path(unquote(parsed.path))
         try:
-            if parsed.path == "/api/session":
+            if path == "/api/session":
                 self._handle_create_session()
-            elif parsed.path == "/api/run":
+            elif path == "/api/run":
                 self._handle_run()
-            elif parsed.path == "/api/centerline/delete-branches":
+            elif path == "/api/centerline/delete-branches":
                 self._handle_delete_centerline_branches()
-            elif parsed.path == "/api/centerline/manual-segments":
+            elif path == "/api/centerline/manual-segments":
                 self._handle_manual_segments()
-            elif parsed.path == "/api/analysis/suggest-ranges":
-                self._handle_suggest_analysis_ranges()
-            elif parsed.path == "/api/analysis/save-ranges":
+            elif path == "/api/analysis/save-ranges":
                 self._handle_save_analysis_ranges()
             else:
                 self._send_json({"error": "Not found"}, status=404)
@@ -2874,20 +2890,6 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if not isinstance(assignments, list):
             raise ValueError("Manual segment assignments must be a list.")
         result = save_manual_segment_assignments(Path(patient["stl_path"]), assignments)
-        self._send_json({"ok": True, "result": result})
-
-    def _handle_suggest_analysis_ranges(self):
-        payload = self._read_json_body()
-        session_id = str(payload.get("session_id") or "")
-        patient_id = payload.get("patient_id")
-        with STATE_LOCK:
-            session = SESSIONS.get(session_id)
-        if not session:
-            raise ValueError("Unknown session.")
-        patient = _resolve_patient(session, patient_id)
-        if not patient:
-            raise ValueError("Patient not found.")
-        result = suggest_analysis_ranges(Path(patient["stl_path"]))
         self._send_json({"ok": True, "result": result})
 
     def _handle_save_analysis_ranges(self):

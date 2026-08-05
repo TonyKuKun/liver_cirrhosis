@@ -724,15 +724,6 @@ POINTWISE_CORE_VALID_KEYS = [
     'perimeter',
 ]
 
-POINTWISE_ZERO_WHEN_INVALID_KEYS = {
-    'area', 'perimeter', 'eq_diameter',
-    'raw_area', 'raw_perimeter', 'raw_eq_diameter',
-    'anchor_radius', 'owned_radius', 'hydraulic_diameter',
-    'circularity', 'solidity',
-    'r_insc_to_r_eq_ratio', 'dA_ds_norm', 'inscribed_radius',
-    'implausibly_small_section',
-}
-
 SYSTEM_FEATURE_GROUPS = {
     'A_angles': [
         'angle_sv_smv', 'angle_mpv_lpv', 'angle_mpv_rpv',
@@ -1062,7 +1053,6 @@ _POINTWISE_NEAREST_RESAMPLE_KEYS = {
 
 _POINTWISE_DROPPED_KEYS = {'n_components'}
 
-
 def _nearest_resample_indices(source_x, target_x):
     """Return nearest-neighbour indices on a sorted one-dimensional axis."""
     right = np.searchsorted(source_x, target_x, side='left')
@@ -1075,13 +1065,40 @@ def _nearest_resample_indices(source_x, target_x):
     return np.where(choose_left, left, right)
 
 
-def _clean_pointwise_profile_for_unified(profile, target_n_points=None):
-    """Remove invalid sections and resample the retained vessel to its full size.
+def _pointwise_source_valid_mask(profile, source_n_points):
+    """Identify rows that may participate in unified-profile resampling."""
+    valid = np.ones(int(source_n_points), dtype=bool)
+    core_keys = []
+    for key in POINTWISE_CORE_VALID_KEYS:
+        values = profile.get(key)
+        if not (_list_like(values) and len(values) == source_n_points):
+            continue
+        core_keys.append(key)
+        try:
+            numeric = np.asarray(values, dtype=float)
+            valid &= np.isfinite(numeric) & (numeric > 0)
+        except (TypeError, ValueError):
+            valid[:] = False
 
-    The extraction output keeps endpoint masks and failures at their original
-    indices. Unified model input instead uses only valid sections, distributes
-    the original number of samples uniformly over that retained arc, and
-    interpolates the missing count inside the retained vessel interval.
+    section_valid = profile.get('section_valid')
+    if (_list_like(section_valid)
+            and len(section_valid) == source_n_points):
+        try:
+            numeric = np.asarray(section_valid, dtype=float)
+            valid &= np.isfinite(numeric) & (numeric > 0)
+        except (TypeError, ValueError):
+            valid[:] = False
+
+    return valid, core_keys
+
+
+def _clean_pointwise_profile_for_unified(profile, target_n_points=None):
+    """Delete invalid rows, then resample only the retained vessel sections.
+
+    Extraction output keeps endpoint masks and failures for auditability.
+    Unified model input must never carry those zero/invalid rows: they are
+    removed before any channel is sampled, then the remaining rows are
+    interpolated together on their physical arc-length coordinates.
     """
     if not isinstance(profile, dict):
         return None
@@ -1112,56 +1129,11 @@ def _clean_pointwise_profile_for_unified(profile, target_n_points=None):
         except (TypeError, ValueError):
             pass
 
-    core_keys = [
-        k for k in POINTWISE_CORE_VALID_KEYS
-        if (_list_like(profile.get(k))
-            and len(profile.get(k)) == source_n_points)
-    ]
-    section_valid = []
-    for i in range(source_n_points):
-        valid = True
-        for key in core_keys:
-            value = profile[key][i]
-            if _is_missing_json_value(value):
-                valid = False
-                break
-            try:
-                if float(value) <= 0:
-                    valid = False
-                    break
-            except Exception:
-                valid = False
-                break
-        section_valid.append(1.0 if valid else 0.0)
-
-    valid_mask = np.asarray(section_valid, dtype=bool)
+    valid_mask, core_keys = _pointwise_source_valid_mask(
+        profile, source_n_points)
     valid_indices = np.flatnonzero(valid_mask)
     if len(valid_indices) < 2:
-        cleaned = {}
-        for key, value in profile.items():
-            if key in _POINTWISE_DROPPED_KEYS:
-                continue
-            if _list_like(value) and len(value) == source_n_points:
-                serialised = [_clean_scalar_for_json(item) for item in value]
-                if key in POINTWISE_ZERO_WHEN_INVALID_KEYS:
-                    serialised = [
-                        item if valid_mask[i] else 0.0
-                        for i, item in enumerate(serialised)
-                    ]
-                cleaned[key] = serialised
-            else:
-                cleaned[key] = _clean_scalar_for_json(value)
-        cleaned['section_valid'] = section_valid
-        cleaned['_point_filter'] = {
-            'method': 'preserve_zero_mask_insufficient_valid_sections',
-            'original_n_points': int(target_n_points),
-            'source_serialized_n_points': int(source_n_points),
-            'source_valid_n_points': int(len(valid_indices)),
-            'output_n_points': int(source_n_points),
-            'interpolated_n_points': 0,
-            'positive_core_keys': core_keys,
-        }
-        return cleaned
+        return None
 
     try:
         original_arc = np.asarray(profile.get('arc_length_mm', []), dtype=float)
@@ -1270,13 +1242,22 @@ def _clean_pointwise_profile_for_unified(profile, target_n_points=None):
             float(effective_length / chord) if chord > 1e-9 else 1.0)
 
     source_valid_count = int(np.sum(valid_mask))
+    first_valid = int(np.flatnonzero(valid_mask)[0])
+    last_valid = int(np.flatnonzero(valid_mask)[-1])
+    internal_invalid_count = int(np.sum(
+        ~valid_mask[first_valid:last_valid + 1]))
+    source_invalid_count = int(source_n_points - source_valid_count)
     missing_count = max(0, target_n_points - source_valid_count)
     cleaned['_point_filter'] = {
-        'method': 'valid_arc_length_linear_resample',
+        'method': 'drop_invalid_rows_then_arc_length_resample',
         'original_n_points': int(target_n_points),
         'source_serialized_n_points': int(source_n_points),
         'source_valid_n_points': source_valid_count,
-        'dropped_invalid_n_points': int(missing_count),
+        'dropped_invalid_n_points': source_invalid_count,
+        'dropped_internal_invalid_n_points': internal_invalid_count,
+        'dropped_leading_invalid_n_points': first_valid,
+        'dropped_trailing_invalid_n_points': int(
+            source_n_points - 1 - last_valid),
         'output_n_points': int(target_n_points),
         'interpolated_n_points': int(missing_count),
         'output_masked_n_points': 0,
@@ -1838,7 +1819,7 @@ def build_unified_features(flat_features, pointwise_data, seg_data,
                 if cleaned_profile is not None:
                     pointwise_block[k] = cleaned_profile
     pointwise_meta['unified_resample_policy'] = (
-        'remove_invalid_sections_then_linear_resample_inside_retained_arc')
+        'drop_invalid_rows_then_arc_length_resample_inside_retained_arc')
     pointwise_meta['unified_target_n_points'] = int(pointwise_target_points)
 
     # ---- segments_meta: 每段的 path / 长度 / 起止节点 ----

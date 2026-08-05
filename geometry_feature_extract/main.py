@@ -379,8 +379,8 @@ def run_correlation_analysis(root_folder, target="PVP",
     """
     跨患者相关性分析。需要每个 patient 文件夹下:
       label/<TARGET>.txt                  (PVP 或 PCG 数值)
-      portal_vein_features.json           (统计特征, Step 4 输出)
-      pointwise_profiles.json  (剖面特征, Step 5 输出)
+      features/unified_features.json      (统计 + 清洗后逐点特征)
+      features/pointwise_profiles.json    (逐点特征兼容回退)
     """
     target = target.upper()
     print(f"\n{'='*60}")
@@ -451,8 +451,9 @@ DEFAULT_PARAMS = {
                                      # 回弯通过 3D Voronoi 归属裁剪, 防自相交
     # Persistent cross-section expansion: confluence spillover / internal intrusion.
     'area_jump_ratio_threshold': 1.6,
-    # MPV and SMV use the more sensitive 1.4 trigger.
-    'mpv_area_jump_ratio_threshold': 1.4,
+    # MPV uses 1.5 to avoid treating mild caliber variation as a junction.
+    # SMV retains the more sensitive 1.4 trigger.
+    'mpv_area_jump_ratio_threshold': 1.5,
     'smv_area_jump_ratio_threshold': 1.4,
     # LPV/RPV are topology-confirmed portal bifurcation branches.  Their
     # junction changes are often weaker, so use a targeted lower threshold and

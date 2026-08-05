@@ -597,13 +597,79 @@ def _section_one(mesh, point, normal, max_eq_diameter=None,
 
 _DEFAULT_NORMAL_SEARCH_POLICY = {
     'normal_tangent_smoothing_mm': 4.0,
+    'failure_fallback_enabled': True,
+    'failure_fallback_step_deg': 2.0,
+    'failure_fallback_max_deg': 6.0,
+    'failure_fallback_directions': 8,
 }
 
 def _normal_search_policy(policy=None):
     settings = dict(_DEFAULT_NORMAL_SEARCH_POLICY)
     if policy:
         settings.update(policy)
+    settings['normal_tangent_smoothing_mm'] = max(
+        0.0, float(settings['normal_tangent_smoothing_mm']))
+    settings['failure_fallback_enabled'] = bool(
+        settings['failure_fallback_enabled'])
+    settings['failure_fallback_step_deg'] = max(
+        0.1, float(settings['failure_fallback_step_deg']))
+    settings['failure_fallback_max_deg'] = max(
+        settings['failure_fallback_step_deg'],
+        float(settings['failure_fallback_max_deg']))
+    settings['failure_fallback_directions'] = max(
+        4, int(settings['failure_fallback_directions']))
     return settings
+
+
+def _normal_perturbation_shells(reference_normal, step_deg=2.0,
+                                max_deg=6.0, directions=8):
+    """Yield equal-angle normal candidates, from smallest offset outward."""
+    reference = np.asarray(reference_normal, dtype=float)
+    norm = float(np.linalg.norm(reference))
+    if reference.shape != (3,) or not np.isfinite(norm) or norm <= 1e-10:
+        return
+    reference = reference / norm
+    step_deg = max(0.1, float(step_deg))
+    max_deg = max(step_deg, float(max_deg))
+    directions = max(4, int(directions))
+    u, v = _make_orthonormal_basis(reference)
+
+    shell_count = int(np.ceil(max_deg / step_deg))
+    previous_angle = None
+    for shell_index in range(1, shell_count + 1):
+        angle_deg = min(max_deg, shell_index * step_deg)
+        if previous_angle is not None and abs(angle_deg - previous_angle) < 1e-9:
+            continue
+        previous_angle = angle_deg
+        angle_rad = np.deg2rad(angle_deg)
+        axial = np.cos(angle_rad) * reference
+        radial_scale = np.sin(angle_rad)
+        candidates = []
+        for direction_index in range(directions):
+            azimuth = 2.0 * np.pi * direction_index / directions
+            radial = np.cos(azimuth) * u + np.sin(azimuth) * v
+            candidate = axial + radial_scale * radial
+            candidate /= np.linalg.norm(candidate) + 1e-15
+            candidates.append(candidate)
+        yield float(angle_deg), candidates
+
+
+def _fallback_section_choice(successes, previous_area=None):
+    """Choose one successful candidate without sacrificing minimal offset."""
+    if not successes:
+        return None
+
+    previous_area = float(previous_area or 0.0)
+
+    def key(item):
+        result, _ = item
+        area = max(float(result[0]), 1e-12)
+        circularity = float(result[3]) if len(result) > 3 else 0.0
+        if previous_area > 0:
+            return (abs(np.log(area / previous_area)), -circularity, -area)
+        return (-circularity, -area)
+
+    return min(successes, key=key)
 
 
 def _compute_tangents(coords, smooth_window=5):
@@ -819,11 +885,16 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
 
     n_success = 0
     n_failed = 0
-    normal_search_counts = {'deterministic': len(indices)}
-    normal_search_candidates = len(indices)
+    previous_valid_area = None
+    normal_search_counts = {
+        'deterministic': len(indices),
+        'fallback_triggered': 0,
+        'fallback_recovered': 0,
+        'fallback_failed': 0,
+    }
+    normal_search_candidates = 0
     for idx in indices:
-        a, p, ar, circ, raw_a, raw_p, anchor_r, owned_r, sol = _section_one(
-            mesh, coords[idx], tangents[idx],
+        section_kwargs = dict(
             max_eq_diameter=None,
             min_eq_diameter=None,
             ownership_factor=None,
@@ -836,6 +907,37 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
             centerline_arc_length=arc_length,
             competing_centerlines=network_voronoi_centerlines,
             centerline_site_radius_mm=float(inscribed_radius[idx]))
+        result = _section_one(
+            mesh, coords[idx], tangents[idx], **section_kwargs)
+        normal_search_candidates += 1
+        selected_normal = tangents[idx]
+        selected_offset_deg = 0.0
+
+        if result[0] <= 0 and search_policy['failure_fallback_enabled']:
+            normal_search_counts['fallback_triggered'] += 1
+            for offset_deg, candidate_normals in _normal_perturbation_shells(
+                    tangents[idx],
+                    step_deg=search_policy['failure_fallback_step_deg'],
+                    max_deg=search_policy['failure_fallback_max_deg'],
+                    directions=search_policy['failure_fallback_directions']):
+                successes = []
+                for candidate_normal in candidate_normals:
+                    candidate_result = _section_one(
+                        mesh, coords[idx], candidate_normal, **section_kwargs)
+                    normal_search_candidates += 1
+                    if candidate_result[0] > 0:
+                        successes.append((candidate_result, candidate_normal))
+                selected = _fallback_section_choice(
+                    successes, previous_area=previous_valid_area)
+                if selected is not None:
+                    result, selected_normal = selected
+                    selected_offset_deg = offset_deg
+                    normal_search_counts['fallback_recovered'] += 1
+                    break
+            if result[0] <= 0:
+                normal_search_counts['fallback_failed'] += 1
+
+        a, p, ar, circ, raw_a, raw_p, anchor_r, owned_r, sol = result
         area[idx] = a
         perimeter[idx] = p
         raw_area[idx] = raw_a
@@ -843,10 +945,11 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
         anchor_radius[idx] = anchor_r
         owned_radius[idx] = owned_r
         solidity[idx] = sol
-        section_normal[idx] = tangents[idx]
-        section_normal_offset_deg[idx] = 0.0
+        section_normal[idx] = selected_normal
+        section_normal_offset_deg[idx] = selected_offset_deg
         if a > 0:
             n_success += 1
+            previous_valid_area = float(a)
         else:
             n_failed += 1
 
@@ -1239,37 +1342,6 @@ def _coords_from_segment_info(seg_info, nodes, path_ids):
         if arr.ndim == 2 and arr.shape[1] == 3 and len(arr) >= 2:
             return arr
     return path_to_coords(path_ids, nodes)
-
-
-def _trim_coords_for_analysis(coords, start_fraction, end_fraction):
-    coords = np.asarray(coords, dtype=float)
-    if len(coords) < 2:
-        return coords
-    start_fraction = float(np.clip(start_fraction, 0.0, 1.0))
-    end_fraction = float(np.clip(end_fraction, 0.0, 1.0))
-    if end_fraction <= start_fraction:
-        return coords
-    seg_lens = np.linalg.norm(np.diff(coords, axis=0), axis=1)
-    arc = np.concatenate(([0.0], np.cumsum(seg_lens)))
-    total = float(arc[-1])
-    if total <= 1e-9:
-        return coords
-
-    def point_at(distance):
-        idx = int(np.searchsorted(arc, distance, side='right') - 1)
-        idx = max(0, min(len(coords) - 2, idx))
-        local = ((distance - arc[idx]) / (arc[idx + 1] - arc[idx])
-                 if arc[idx + 1] > arc[idx] else 0.0)
-        return coords[idx] + local * (coords[idx + 1] - coords[idx])
-
-    start_d = start_fraction * total
-    end_d = end_fraction * total
-    trimmed = [point_at(start_d)]
-    for idx, point in enumerate(coords):
-        if start_d < arc[idx] < end_d:
-            trimmed.append(point)
-    trimmed.append(point_at(end_d))
-    return np.asarray(trimmed, dtype=float)
 
 
 def _arc_length_for_coords(coords):
@@ -2020,50 +2092,6 @@ def _mask_endpoint_junction_sections(
     return profile
 
 
-def _load_analysis_ranges(parentdir):
-    range_path = resolve_feature_path(parentdir, SEGMENT_ASSIGNMENTS_NAME)
-    if range_path is None:
-        return {}
-    try:
-        with open(range_path, 'r', encoding='utf-8') as handle:
-            data = json.load(handle)
-        ranges = data.get('analysis_ranges', {}) if isinstance(data, dict) else {}
-        return ranges if isinstance(ranges, dict) else {}
-    except Exception as exc:
-        print(f"  Warning: unable to read analysis ranges: {exc}")
-        return {}
-
-
-def _trim_path_for_analysis(seg_path, nodes, range_info):
-    original = [int(nid) for nid in seg_path]
-    if not isinstance(range_info, dict) or len(original) < 3:
-        return original, 0.0, 1.0
-    try:
-        start = min(1.0, max(0.0, float(range_info.get('start_fraction', 0.0))))
-        end = min(1.0, max(0.0, float(range_info.get('end_fraction', 1.0))))
-    except Exception:
-        return original, 0.0, 1.0
-    if end - start < 0.02:
-        return original, 0.0, 1.0
-    coords = path_to_coords(original, nodes)
-    if len(coords) != len(original):
-        return original, 0.0, 1.0
-    arc = np.concatenate(([0.0], np.cumsum(
-        np.linalg.norm(np.diff(coords, axis=0), axis=1))))
-    total = float(arc[-1])
-    if total <= 1e-9:
-        return original, 0.0, 1.0
-    start_idx = int(np.argmin(np.abs(arc - start * total)))
-    end_idx = int(np.argmin(np.abs(arc - end * total)))
-    if end_idx - start_idx < 1:
-        return original, 0.0, 1.0
-    return (
-        original[start_idx:end_idx + 1],
-        float(arc[start_idx] / total),
-        float(arc[end_idx] / total),
-    )
-
-
 def _segment_area_jump_ratio_threshold(
         seg_name, area_jump_ratio_threshold,
         mpv_area_jump_ratio_threshold, smv_area_jump_ratio_threshold,
@@ -2085,7 +2113,7 @@ def _segment_area_jump_ratio_threshold(
 def extract_profiles(stl_path, n_points=200, pitch=0.5,
                      curvature_window=7, section_step=3,
                      area_jump_ratio_threshold=1.6,
-                     mpv_area_jump_ratio_threshold=1.4,
+                     mpv_area_jump_ratio_threshold=1.5,
                      smv_area_jump_ratio_threshold=1.4,
                      lpv_rpv_area_jump_ratio_threshold=1.4,
                      lpv_rpv_minimum_endpoint_sections=6,
@@ -2150,8 +2178,6 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
 
     with open(seg_path, 'r', encoding='utf-8') as f:
         seg_data = json.load(f)
-    analysis_ranges = _load_analysis_ranges(parentdir)
-
     nodes, _, _ = load_tree(stl_path)
     mesh = trimesh.load(stl_path)
     if not isinstance(mesh, trimesh.Trimesh):
@@ -2192,14 +2218,8 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
 
         try:
             # Compute exactly one candidate search for every final profile point.
-            original_seg_path_ids = [int(nid) for nid in seg_info['path']]
-            range_info = analysis_ranges.get(seg_name)
-            seg_path_ids, actual_start, actual_end = _trim_path_for_analysis(
-                original_seg_path_ids, nodes, range_info)
+            seg_path_ids = [int(nid) for nid in seg_info['path']]
             branch_coords = coords_by_seg.get(seg_name)
-            if branch_coords is not None and range_info:
-                branch_coords = _trim_coords_for_analysis(
-                    branch_coords, actual_start, actual_end)
             branch_coords = _resample_coords_by_arc(branch_coords, n_points)
             plan = clinical_plan.get(seg_name, {})
             # A shared endpoint may contain valid assigned-vessel sections.
@@ -2208,11 +2228,9 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
             trim_start_mm = 0.0
             trim_end_mm = 0.0
             effective_total = float(_arc_length_for_coords(branch_coords)[-1]) if branch_coords is not None else 0.0
-            original_coords = coords_by_seg.get(seg_name)
-            original_total = float(_arc_length_for_coords(original_coords)[-1]) if original_coords is not None else 0.0
             side_branch_anchors = _shift_side_branch_anchors(
                 plan.get('side_branch_anchors', []),
-                actual_start * original_total, effective_total)
+                0.0, effective_total)
             network_voronoi_centerlines = _build_network_voronoi_centerlines(
                 side_branch_anchors, coords_by_seg, radii_by_seg, n_points,
                 junction_exclusion_mm=centerline_voronoi_exclusion_mm)
@@ -2283,8 +2301,8 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
             resampled = _mask_endpoint_junction_sections(
                 resampled,
                 ratio_threshold=segment_ratio_threshold,
-                allow_terminal_start=(start_junction is not None and actual_start <= 0.0),
-                allow_terminal_end=(end_junction is not None and actual_end >= 1.0),
+                allow_terminal_start=(start_junction is not None),
+                allow_terminal_end=(end_junction is not None),
                 terminal_padding_sections=6,
                 terminal_reference_points=area_jump_reference_points,
                 minimum_terminal_sections=minimum_endpoint_sections,
@@ -2341,17 +2359,6 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
             resampled['centerline_voronoi_exclusion_mm'] = float(
                 raw_profile.get('_centerline_voronoi_exclusion_mm',
                                 centerline_voronoi_exclusion_mm))
-            if range_info:
-                resampled['analysis_range'] = {
-                    'start_fraction': actual_start,
-                    'end_fraction': actual_end,
-                    'requested_start_fraction': float(
-                        range_info.get('start_fraction', actual_start)),
-                    'requested_end_fraction': float(
-                        range_info.get('end_fraction', actual_end)),
-                }
-                resampled['analysis_path'] = [int(nid) for nid in seg_path_ids]
-
             profiles[seg_name] = resampled
 
         except Exception as e:
@@ -2395,8 +2402,6 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
             str(k): float(v) for k, v in radii_by_seg.items()
             if v is not None
         },
-        'analysis_ranges_file': SEGMENT_ASSIGNMENTS_NAME if analysis_ranges else None,
-        'analysis_ranges_applied': sorted(analysis_ranges.keys()),
         'junction_smoothing': junction_smoothing,
         # 新增逐点通道清单 (便于训练侧统一索引)
         'pointwise_channels': [

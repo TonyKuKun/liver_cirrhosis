@@ -158,6 +158,37 @@ class PointwiseConsistencyTests(unittest.TestCase):
 
         np.testing.assert_allclose(unified['area'], [10.0, 20.0, 30.0])
         self.assertEqual(unified['section_valid'], [1.0, 1.0, 1.0])
+        self.assertEqual(
+            unified['_point_filter']['dropped_internal_invalid_n_points'], 1)
+
+    def test_unified_drops_explicitly_invalid_positive_section_before_sampling(self):
+        profile = {
+            'arc_length_mm': [0.0, 10.0, 20.0, 30.0, 40.0],
+            'area': [10.0, 20.0, 999.0, 40.0, 50.0],
+            'eq_diameter': [2.0, 3.0, 99.0, 5.0, 6.0],
+            'perimeter': [4.0, 5.0, 99.0, 7.0, 8.0],
+            'section_valid': [1.0, 1.0, 0.0, 1.0, 1.0],
+        }
+
+        unified = _clean_pointwise_profile_for_unified(profile)
+
+        np.testing.assert_allclose(
+            unified['area'], [10.0, 20.0, 30.0, 40.0, 50.0])
+        self.assertEqual(unified['section_valid'], [1.0] * 5)
+        self.assertNotIn(999.0, unified['area'])
+        self.assertEqual(unified['_point_filter']['source_valid_n_points'], 4)
+        self.assertEqual(
+            unified['_point_filter']['dropped_internal_invalid_n_points'], 1)
+
+    def test_unified_omits_profile_with_fewer_than_two_valid_sections(self):
+        profile = {
+            'arc_length_mm': [0.0, 10.0, 20.0],
+            'area': [0.0, 10.0, 0.0],
+            'eq_diameter': [0.0, 2.0, 0.0],
+            'perimeter': [0.0, 4.0, 0.0],
+        }
+
+        self.assertIsNone(_clean_pointwise_profile_for_unified(profile))
 
     def test_unified_restores_old_compacted_profile_to_original_count(self):
         profile = {

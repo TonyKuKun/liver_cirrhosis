@@ -129,9 +129,8 @@ const state = {
   analysisRange: {
     active: false,
     ranges: new Map(),
+    baselineRanges: new Map(),
     dirty: false,
-    suggestions: null,
-    boundarySections: {},
   },
   queryPatient: "",
 };
@@ -248,9 +247,8 @@ function bindEvents() {
   $("manualVesselSelect").addEventListener("change", updateManualAssignment);
   $("manualResetBtn").addEventListener("click", resetManualChanges);
   $("manualSaveBtn").addEventListener("click", saveManualSegmentation);
-  $("analysisRangeBtn").addEventListener("click", toggleAnalysisRange);
+  $("effectiveAnalysisBtn").addEventListener("click", toggleEffectiveAnalysis);
   $("analysisVesselSelect").addEventListener("change", renderAnalysisRangeControls);
-  $("analysisSuggestBtn").addEventListener("click", suggestAnalysisRanges);
   $("analysisStart").addEventListener("input", updateAnalysisRange);
   $("analysisEnd").addEventListener("input", updateAnalysisRange);
   $("analysisResetBtn").addEventListener("click", resetAnalysisChanges);
@@ -872,64 +870,80 @@ async function saveManualSegmentation() {
 function resetAnalysisRangeEditor() {
   state.analysisRange.active = false;
   state.analysisRange.ranges = new Map();
+  state.analysisRange.baselineRanges = new Map();
   state.analysisRange.dirty = false;
-  state.analysisRange.suggestions = null;
-  state.analysisRange.boundarySections = {};
 }
 
 function analysisVessels() {
-  return Object.entries(state.data?.segments || {}).map(([id, segment]) => ({
-    id,
-    label: segment.label || id.toUpperCase(),
-    color: segment.color,
-    length_mm: Number(segment.length_mm || 0),
-  }));
+  const available = new Set(state.data?.analysis_regions?.available_vessels || []);
+  return Object.entries(state.data?.segments || {})
+    .filter(([id]) => available.has(id))
+    .map(([id, segment]) => ({
+      id,
+      label: segment.label || id.toUpperCase(),
+      color: segment.color,
+      length_mm: Number(segment.length_mm || 0),
+    }));
+}
+
+function cloneAnalysisRanges(ranges) {
+  return new Map(
+    [...ranges.entries()].map(([vessel, range]) => [vessel, { ...range }]),
+  );
 }
 
 function syncAnalysisRangesFromData() {
   if (state.analysisRange.dirty) return;
-  const saved = state.data?.analysis_regions?.ranges || {};
+  const detected = state.data?.analysis_regions?.ranges || {};
   state.analysisRange.ranges = new Map(
     analysisVessels().map((vessel) => {
-      const range = saved[vessel.id] || {};
+      const range = detected[vessel.id] || {};
       return [vessel.id, {
         start_fraction: Number(range.start_fraction ?? 0),
         end_fraction: Number(range.end_fraction ?? 1),
-        source: range.source || "full",
+        n_points: Number(range.n_points || 0),
+        leading_invalid_points: Number(range.leading_invalid_points || 0),
+        trailing_invalid_points: Number(range.trailing_invalid_points || 0),
       }];
     }),
   );
+  state.analysisRange.baselineRanges = cloneAnalysisRanges(state.analysisRange.ranges);
 }
 
 function currentAnalysisRange(vesselId) {
   return state.analysisRange.ranges.get(vesselId) || {
     start_fraction: 0,
     end_fraction: 1,
-    source: "full",
+    n_points: 0,
   };
 }
 
-function toggleAnalysisRange() {
+function toggleEffectiveAnalysis() {
+  if (!state.session || !state.data) return;
   state.analysisRange.active = !state.analysisRange.active;
+  let needsSurfaceSections = false;
   if (state.analysisRange.active) {
     state.centerlineEdit.active = false;
     state.centerlineEdit.selected.clear();
     state.manualSegment.active = false;
-    state.layers.smoothCenterline = true;
-    const smoothToggle = document.querySelector('.layer-toggle[data-layer="smoothCenterline"]');
-    if (smoothToggle) smoothToggle.checked = true;
+    needsSurfaceSections = !state.layers.surfaceSections;
+    state.layers.surfaceSections = true;
+    const surfaceToggle = document.querySelector('.layer-toggle[data-layer="surfaceSections"]');
+    if (surfaceToggle) surfaceToggle.checked = true;
+  } else if (state.analysisRange.dirty) {
+    state.analysisRange.ranges = cloneAnalysisRanges(state.analysisRange.baselineRanges);
+    state.analysisRange.dirty = false;
   }
   renderCenterlineEditControls();
   renderManualSegmentationControls();
   renderAnalysisRangeControls();
   renderScene();
+  if (needsSurfaceSections) refreshData();
 }
 
 function resetAnalysisChanges() {
+  state.analysisRange.ranges = cloneAnalysisRanges(state.analysisRange.baselineRanges);
   state.analysisRange.dirty = false;
-  state.analysisRange.suggestions = null;
-  state.analysisRange.boundarySections = {};
-  syncAnalysisRangesFromData();
   renderAnalysisRangeControls();
   renderScene();
 }
@@ -964,24 +978,28 @@ function renderAnalysisRangeControls() {
   $("analysisEndValue").textContent = `${endPct}%`;
 
   const active = state.analysisRange.active;
-  $("analysisRangeBtn").classList.toggle("active", active);
-  $("analysisRangeBtn").disabled = !state.session || !vessels.length;
+  $("effectiveAnalysisBtn").classList.toggle("active", active);
+  $("effectiveAnalysisBtn").disabled = !state.session || !state.data;
   select.disabled = !active || !vessels.length;
-  $("analysisSuggestBtn").disabled = !active || !vessels.length;
   $("analysisStart").disabled = !active || !selected;
   $("analysisEnd").disabled = !active || !selected;
   $("analysisResetBtn").disabled = !active || !state.analysisRange.dirty;
   $("analysisSaveBtn").disabled = !active || !vessels.length || !state.analysisRange.dirty;
   if (!selected) {
-    $("analysisStatus").textContent = "未设置";
+    $("analysisStatus").textContent = state.data?.analysis_regions?.source
+      ? "无可分析血管"
+      : "缺少 pointwise_profiles.json";
     renderToolbarModePanels();
     return;
   }
   const length = selected.length_mm;
   const validLength = Math.max(0, (range.end_fraction - range.start_fraction) * length);
-  const suffix = state.data?.analysis_regions?.saved && !state.analysisRange.dirty ? " | 已保存" : "";
+  const sampleCount = Number(range.n_points || 0);
+  const sampleText = sampleCount > 0
+    ? ` | 采样点 ${Math.round(range.start_fraction * sampleCount)}-${Math.round(range.end_fraction * sampleCount)}/${sampleCount}`
+    : "";
   $("analysisStatus").textContent =
-    `${selected.label}: ${fmt(range.start_fraction * length, 1)}-${fmt(range.end_fraction * length, 1)} mm | 有效 ${fmt(validLength, 1)} mm${suffix}`;
+    `${selected.label}: ${fmt(range.start_fraction * length, 1)}-${fmt(range.end_fraction * length, 1)} mm | 有效 ${fmt(validLength, 1)} mm${sampleText}`;
   renderToolbarModePanels();
 }
 
@@ -999,44 +1017,13 @@ function updateAnalysisRange() {
     }
   }
   state.analysisRange.ranges.set(vessel, {
+    ...currentAnalysisRange(vessel),
     start_fraction: start,
     end_fraction: end,
-    source: "manual",
   });
   state.analysisRange.dirty = true;
   renderAnalysisRangeControls();
   renderScene();
-}
-
-async function suggestAnalysisRanges() {
-  if (!state.session || !state.analysisRange.active) return;
-  const patientId = currentPatientId();
-  if (!patientId) return;
-  setBusy(true);
-  try {
-    const res = await fetchJson(geometryApi("/analysis/suggest-ranges"), {
-      session_id: state.session.id,
-      patient_id: patientId,
-    });
-    const payload = await readResponse(res);
-    const result = payload.result || {};
-    state.analysisRange.ranges = new Map(
-      Object.entries(result.ranges || {}).map(([vessel, range]) => [vessel, range]),
-    );
-    state.analysisRange.suggestions = result;
-    state.analysisRange.boundarySections = result.boundary_sections || {};
-    state.analysisRange.dirty = true;
-    state.layers.surfaceSections = true;
-    const surfaceToggle = document.querySelector('.layer-toggle[data-layer="surfaceSections"]');
-    if (surfaceToggle) surfaceToggle.checked = true;
-    await refreshData();
-    logLine("Generated effective-range suggestions from true surface-section stability metrics.");
-  } catch (err) {
-    showError(err);
-  } finally {
-    setBusy(false);
-    renderAnalysisRangeControls();
-  }
 }
 
 async function saveAnalysisRanges() {
@@ -1047,6 +1034,19 @@ async function saveAnalysisRanges() {
     vessel: vessel.id,
     ...currentAnalysisRange(vessel.id),
   }));
+  const previousAnalysisRegions = state.data?.analysis_regions;
+  const previousBaselineRanges = cloneAnalysisRanges(state.analysisRange.baselineRanges);
+  const requestedRanges = Object.fromEntries(ranges.map(({ vessel, ...range }) => [vessel, range]));
+  state.analysisRange.active = false;
+  state.analysisRange.dirty = false;
+  state.analysisRange.baselineRanges = cloneAnalysisRanges(state.analysisRange.ranges);
+  state.data.analysis_regions = {
+    ...(previousAnalysisRegions || {}),
+    ranges: requestedRanges,
+    source: "pointwise_profiles.json",
+  };
+  renderAnalysisRangeControls();
+  renderScene();
   setBusy(true);
   try {
     const res = await fetchJson(geometryApi("/analysis/save-ranges"), {
@@ -1055,23 +1055,35 @@ async function saveAnalysisRanges() {
       ranges,
     });
     const payload = await readResponse(res);
-    const cleared = payload.result?.removed_outputs || [];
-    state.analysisRange.dirty = false;
-    state.analysisRange.suggestions = null;
-    state.analysisRange.boundarySections = {};
-    state.stepModes.profiles = "recompute";
-    state.stepModes.features = "recompute";
+    const result = payload.result || {};
+    const savedRanges = result.ranges || requestedRanges;
+    state.analysisRange.ranges = new Map(Object.entries(savedRanges));
+    state.analysisRange.baselineRanges = cloneAnalysisRanges(state.analysisRange.ranges);
+    state.data.analysis_regions = {
+      ...state.data.analysis_regions,
+      ranges: savedRanges,
+    };
+    state.stepModes.profiles = "reuse";
+    state.stepModes.features = "reuse";
     document.querySelectorAll('[data-step-mode="profiles"], [data-step-mode="features"]').forEach((select) => {
-      select.value = "recompute";
+      select.value = "reuse";
     });
-    logLine("Effective analysis ranges saved. Run Pointwise cross-sections and Feature extraction to update measurements.");
-    if (cleared.length) logLine(`Cleared derived outputs: ${cleared.join(", ")}`);
-    await refreshData();
+    const masked = Object.values(result.masked_points || {}).reduce(
+      (sum, count) => sum + Number(count || 0),
+      0,
+    );
+    logLine(`Effective analysis ranges saved. pointwise_profiles and unified_features updated (${masked} masked samples).`);
+    logLine("The highlighted sections were removed immediately; no pointwise reload was needed.");
   } catch (err) {
+    state.data.analysis_regions = previousAnalysisRegions;
+    state.analysisRange.baselineRanges = previousBaselineRanges;
+    state.analysisRange.active = true;
+    state.analysisRange.dirty = true;
     showError(err);
   } finally {
     setBusy(false);
     renderAnalysisRangeControls();
+    renderScene();
   }
 }
 
@@ -1106,15 +1118,10 @@ function renderScene() {
   }
 
   addCenterlineTrace(traces, data.centerlines?.raw, "原始中心线", "#6b7280", state.layers.rawCenterline || state.centerlineEdit.active);
-  addCenterlineTrace(traces, data.centerlines?.smooth, "平滑中心线", "#111827", state.layers.smoothCenterline && !state.manualSegment.active && !state.analysisRange.active);
+  addCenterlineTrace(traces, data.centerlines?.smooth, "平滑中心线", "#111827", state.layers.smoothCenterline && !state.manualSegment.active);
   addEditableCenterlineTraces(traces, data.centerline_edit?.branches || []);
   addManualSegmentTraces(traces, data.manual_segmentation?.atomic_segments || []);
-  if (state.analysisRange.active) {
-    addAnalysisRangeTraces(traces, data.segments || {});
-    addAnalysisBoundarySectionTraces(traces, state.analysisRange.boundarySections);
-  } else if (!state.manualSegment.active) {
-    addSegmentTraces(traces, data.segments || {});
-  }
+  if (!state.manualSegment.active) addSegmentTraces(traces, data.segments || {});
   addGlobalAngleTrace(traces, data.features?.sv_smv_angle);
   addFeaturePointTraces(traces, data.pointwise?.feature_points || {});
   addSectionTraces(traces, data.pointwise?.sampled_sections || {}, "sampledSections", "等效圆采样", 2, 0.38);
@@ -1281,100 +1288,6 @@ function addSegmentTraces(traces, segments) {
   });
 }
 
-function sliceSegmentByFraction(segment, start, end) {
-  const points = (segment.x || []).map((x, index) => [x, segment.y[index], segment.z[index]]);
-  if (points.length < 2 || end <= start) return null;
-  const arc = [0];
-  for (let index = 1; index < points.length; index += 1) {
-    const dx = points[index][0] - points[index - 1][0];
-    const dy = points[index][1] - points[index - 1][1];
-    const dz = points[index][2] - points[index - 1][2];
-    arc.push(arc[index - 1] + Math.sqrt(dx * dx + dy * dy + dz * dz));
-  }
-  const total = arc[arc.length - 1];
-  if (!(total > 0)) return null;
-  const at = (fraction) => {
-    const distance = Math.max(0, Math.min(1, fraction)) * total;
-    let index = 1;
-    while (index < arc.length && arc[index] < distance) index += 1;
-    index = Math.min(index, arc.length - 1);
-    const prior = index - 1;
-    const local = arc[index] > arc[prior] ? (distance - arc[prior]) / (arc[index] - arc[prior]) : 0;
-    return points[prior].map((value, axis) => value + local * (points[index][axis] - value));
-  };
-  const startDistance = start * total;
-  const endDistance = end * total;
-  const sliced = [at(start)];
-  points.forEach((point, index) => {
-    if (arc[index] > startDistance && arc[index] < endDistance) sliced.push(point);
-  });
-  sliced.push(at(end));
-  return {
-    x: sliced.map((point) => point[0]),
-    y: sliced.map((point) => point[1]),
-    z: sliced.map((point) => point[2]),
-  };
-}
-
-function addAnalysisRangeTraces(traces, segments) {
-  if (!state.layers.segments) return;
-  Object.entries(segments).forEach(([key, segment]) => {
-    const range = currentAnalysisRange(key);
-    const valid = sliceSegmentByFraction(segment, range.start_fraction, range.end_fraction);
-    if (range.start_fraction > 0) {
-      const excludedStart = sliceSegmentByFraction(segment, 0, range.start_fraction);
-      if (excludedStart) traces.push({
-        type: "scatter3d",
-        mode: "lines",
-        name: `${segment.label} 排除起端`,
-        ...excludedStart,
-        line: { color: "#7f8a96", width: 7, dash: "dot" },
-        opacity: 0.7,
-        hovertemplate: `<b>${segment.label}</b><br>Excluded junction transition<extra></extra>`,
-      });
-    }
-    if (range.end_fraction < 1) {
-      const excludedEnd = sliceSegmentByFraction(segment, range.end_fraction, 1);
-      if (excludedEnd) traces.push({
-        type: "scatter3d",
-        mode: "lines",
-        name: `${segment.label} 排除末端`,
-        ...excludedEnd,
-        line: { color: "#7f8a96", width: 7, dash: "dot" },
-        opacity: 0.7,
-        hovertemplate: `<b>${segment.label}</b><br>Excluded junction transition<extra></extra>`,
-      });
-    }
-    if (valid) traces.push({
-      type: "scatter3d",
-      mode: "lines",
-      name: `${segment.label} 有效分析区`,
-      ...valid,
-      line: { color: segment.color, width: 10 },
-      hovertemplate: `<b>${segment.label}</b><br>Effective analysis range<br>${Math.round(range.start_fraction * 100)}%-${Math.round(range.end_fraction * 100)}%<extra></extra>`,
-    });
-  });
-}
-
-function addAnalysisBoundarySectionTraces(traces, sections) {
-  Object.entries(sections || {}).forEach(([key, boundaries]) => {
-    const segment = state.data?.segments?.[key];
-    Object.entries(boundaries || {}).forEach(([side, contour]) => {
-      traces.push({
-        type: "scatter3d",
-        mode: "lines",
-        name: `${segment?.label || key.toUpperCase()} 建议${side === "start" ? "起点" : "终点"}`,
-        x: contour.x,
-        y: contour.y,
-        z: contour.z,
-        line: { color: segment?.color || "#177e89", width: 8, dash: "dash" },
-        opacity: 1,
-        hovertemplate: `Automatic suggested boundary: ${Math.round(contour.fraction * 100)}%<extra></extra>`,
-      });
-    });
-  });
-}
-
 function addGlobalAngleTrace(traces, angle) {
   if (!state.layers.globalAngle || !angle) return;
   const point = angle.confluence_point_physical;
@@ -1447,22 +1360,61 @@ function addGlobalAngleTrace(traces, angle) {
   });
 }
 
+function pointwiseFractionVisible(segmentKey, fraction) {
+  if (fraction === null || fraction === undefined) return true;
+  const value = Number(fraction);
+  if (!Number.isFinite(value)) return true;
+  const range = currentAnalysisRange(segmentKey);
+  return value >= range.start_fraction - 1e-9 && value <= range.end_fraction + 1e-9;
+}
+
+function visiblePointwiseIndices(segmentKey, positions, count) {
+  if (!Array.isArray(positions) || positions.length !== count) {
+    return Array.from({ length: count }, (_, index) => index);
+  }
+  return positions
+    .map((fraction, index) => (pointwiseFractionVisible(segmentKey, fraction) ? index : -1))
+    .filter((index) => index >= 0);
+}
+
+function filterSectionCoordinates(segmentKey, section, excluded = false) {
+  const positions = section.position;
+  if (!Array.isArray(positions) || positions.length !== section.x?.length) {
+    return excluded
+      ? { x: section.x.map(() => null), y: section.y.map(() => null), z: section.z.map(() => null) }
+      : { x: section.x, y: section.y, z: section.z };
+  }
+  const filterAxis = (values) => values.map((value, index) => (
+    pointwiseFractionVisible(segmentKey, positions[index]) !== excluded ? value : null
+  ));
+  return {
+    x: filterAxis(section.x),
+    y: filterAxis(section.y),
+    z: filterAxis(section.z),
+  };
+}
+
 function addFeaturePointTraces(traces, featurePoints) {
   if (!state.layers.featurePoints) return;
   let colorbarShown = false;
   Object.entries(featurePoints).forEach(([key, fp]) => {
     if (!fp.x?.length) return;
+    const indices = visiblePointwiseIndices(key, fp.position, fp.x.length);
+    if (!indices.length) return;
+    const pick = (values) => (
+      Array.isArray(values) ? indices.map((index) => values[index]) : values
+    );
     traces.push({
       type: "scatter3d",
       mode: "markers",
       name: `${fp.label} 曲率点`,
-      x: fp.x,
-      y: fp.y,
-      z: fp.z,
-      customdata: fp.hover,
+      x: pick(fp.x),
+      y: pick(fp.y),
+      z: pick(fp.z),
+      customdata: pick(fp.hover),
       marker: {
-        size: fp.size,
-        color: fp.curvature,
+        size: pick(fp.size),
+        color: pick(fp.curvature),
         colorscale: "Viridis",
         opacity: 0.86,
         colorbar: colorbarShown ? undefined : { title: "curvature", thickness: 12 },
@@ -1478,16 +1430,35 @@ function addFeaturePointTraces(traces, featurePoints) {
 function addSectionTraces(traces, sections, layerKey, label, width, opacity) {
   if (!state.layers[layerKey]) return;
   Object.entries(sections).forEach(([key, sec]) => {
+    const coordinates = filterSectionCoordinates(key, sec);
+    if (coordinates.x.some((value) => value !== null && Number.isFinite(Number(value)))) {
+      traces.push({
+        type: "scatter3d",
+        mode: "lines",
+        name: `${sec.label} ${label}`,
+        x: coordinates.x,
+        y: coordinates.y,
+        z: coordinates.z,
+        line: { color: sec.color, width },
+        opacity,
+        hoverinfo: "skip",
+      });
+    }
+    if (!state.analysisRange.active) return;
+    const excluded = filterSectionCoordinates(key, sec, true);
+    if (!excluded.x.some((value) => value !== null && Number.isFinite(Number(value)))) return;
     traces.push({
       type: "scatter3d",
       mode: "lines",
-      name: `${sec.label} ${label}`,
-      x: sec.x,
-      y: sec.y,
-      z: sec.z,
-      line: { color: sec.color, width },
-      opacity,
-      hoverinfo: "skip",
+      name: `${sec.label} 待删除截面`,
+      x: excluded.x,
+      y: excluded.y,
+      z: excluded.z,
+      legendgroup: `${key}-analysis-excluded`,
+      showlegend: layerKey === "surfaceSections" || !state.layers.surfaceSections,
+      line: { color: "#dfff00", width: Math.max(8, width + 4) },
+      opacity: 1,
+      hovertemplate: `<b>${sec.label}</b><br>待删除截面<extra></extra>`,
     });
   });
 }
@@ -1495,6 +1466,7 @@ function addSectionTraces(traces, sections, layerKey, label, width, opacity) {
 function addNamedSectionTraces(traces, sections, layerKey, label, width) {
   if (!state.layers[layerKey]) return;
   Object.entries(sections).forEach(([key, sec]) => {
+    if (!pointwiseFractionVisible(key, sec.position)) return;
     const color = state.data.segments?.[key]?.color || "#177e89";
     const segLabel = state.data.segments?.[key]?.label || key.toUpperCase();
     traces.push({
@@ -1513,6 +1485,7 @@ function addNamedSectionTraces(traces, sections, layerKey, label, width) {
 function addSurfaceNamedSectionTraces(traces, sections, layerKey, label, width) {
   if (!state.layers.surfaceSections || !state.layers[layerKey]) return;
   Object.entries(sections).forEach(([key, sec]) => {
+    if (!pointwiseFractionVisible(key, sec.position)) return;
     const color = state.data.segments?.[key]?.color || "#177e89";
     const segLabel = state.data.segments?.[key]?.label || key.toUpperCase();
     traces.push({
@@ -1688,8 +1661,22 @@ function logLine(text) {
 function setBusy(isBusy) {
   document.querySelectorAll("button").forEach((btn) => {
     if (btn.id === "paramsBtn" || btn.id === "embedParamsBtn") return;
-    btn.disabled = isBusy;
+    if (isBusy) {
+      btn.dataset.disabledBeforeBusy = btn.disabled ? "1" : "0";
+      btn.disabled = true;
+      return;
+    }
+    if (btn.dataset.disabledBeforeBusy !== undefined) {
+      btn.disabled = btn.dataset.disabledBeforeBusy === "1";
+      delete btn.dataset.disabledBeforeBusy;
+    }
   });
+  if (!isBusy) {
+    renderCenterlineEditControls();
+    renderManualSegmentationControls();
+    renderAnalysisRangeControls();
+    if (state.data) renderStepAvailability();
+  }
 }
 
 function showError(err) {

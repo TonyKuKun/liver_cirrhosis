@@ -19,6 +19,7 @@
 
 import os
 import json
+import re
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -27,10 +28,14 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from matplotlib.colors import LinearSegmentedColormap
 from scipy import stats
-from scipy.stats import spearmanr, pearsonr
+from scipy.stats import spearmanr, pearsonr, t as student_t
 import warnings
 warnings.filterwarnings('ignore')
 
+from features_layout import (
+    FEATURES_DIRNAME,
+    UNIFIED_FEATURES_NAME,
+)
 from system_features import SYSTEM_FEATURE_NAMES, SYSTEM_FEATURE_LABELS_CN
 
 
@@ -170,6 +175,14 @@ FEATURE_GROUPS = {
         'mpv_min_max_diameter_ratio',
         'tree_area_conservation_mean_dev',
         'has_lgv', 'has_pgv', 'has_compensation_vessel', 'has_tips'],
+    '系统-临床派生': [
+        'sv_max_to_mpv_max_diam_ratio', 'mpv_trunk_length_mm',
+        'max_tortuosity_index', 'mean_tortuosity_index',
+        'max_collateral_diameter_mm',
+        'area_conservation_bifurc_deviation',
+        'tips_stent_diameter_mm', 'tips_stent_length_mm',
+        'pvt_severity_grade', 'min_lumen_area_to_max_ratio_mpv',
+        'cavernous_transformation_flag'],
 }
 
 GROUP_COLORS = {
@@ -180,6 +193,7 @@ GROUP_COLORS = {
     '系统-长度/弯曲': '#f97316',
     '系统-阻力': '#7c3aed',
     '系统-拓扑': '#16a34a',
+    '系统-临床派生': '#475569',
 }
 
 
@@ -196,6 +210,28 @@ def _sig(p):
     elif p < 0.01: return '**'
     elif p < 0.05: return '*'
     return ''
+
+
+def _fdr_bh(p_values):
+    """Benjamini-Hochberg adjusted p-values, preserving NaN positions."""
+    values = np.asarray(p_values, dtype=float)
+    adjusted = np.full(values.shape, np.nan, dtype=float)
+    valid_idx = np.flatnonzero(np.isfinite(values))
+    if len(valid_idx) == 0:
+        return adjusted
+
+    valid = values[valid_idx]
+    order = np.argsort(valid)
+    ranked = valid[order]
+    n_tests = len(ranked)
+    q_ranked = ranked * n_tests / np.arange(1, n_tests + 1)
+    q_ranked = np.minimum.accumulate(q_ranked[::-1])[::-1]
+    q_ranked = np.clip(q_ranked, 0.0, 1.0)
+
+    q_valid = np.empty(n_tests, dtype=float)
+    q_valid[order] = q_ranked
+    adjusted[valid_idx] = q_valid
+    return adjusted
 
 
 # ============================================================
@@ -244,12 +280,73 @@ def _read_label_value(folder_path, target):
             text = f.read().strip()
             for token in text.replace(',', ' ').split():
                 try:
-                    return float(token)
+                    value = float(token)
+                    return value if np.isfinite(value) else None
                 except ValueError:
                     continue
     except Exception:
         pass
     return None
+
+
+def _candidate_feature_paths(folder_path, filename):
+    """Canonical ``features/`` path first, then the pre-layout root path."""
+    return (
+        os.path.join(folder_path, FEATURES_DIRNAME, filename),
+        os.path.join(folder_path, filename),
+    )
+
+
+def _first_existing_path(paths):
+    return next((path for path in paths if os.path.exists(path)), None)
+
+
+def _infer_subject_id(sample_name):
+    """Collapse dated pre/post folders while preserving non-date hospital IDs."""
+    value = str(sample_name).strip()
+    if re.match(r'^(?:19|20)\d{6}', value):
+        value = value[8:]
+    value = re.split(r'[#@$]', value, maxsplit=1)[0].strip()
+    return value or str(sample_name)
+
+
+def _cluster_jackknife_inference(x, y, subject_ids, estimate, statistic):
+    """Patient-cluster jackknife p-value and confidence interval."""
+    subject_ids = np.asarray(subject_ids, dtype=object)
+    unique_subjects = pd.unique(subject_ids)
+    n_subjects = len(unique_subjects)
+    if n_subjects == len(x) or n_subjects < 3:
+        return np.nan, np.nan, np.nan, n_subjects
+
+    leave_one_out = []
+    for subject_id in unique_subjects:
+        keep = subject_ids != subject_id
+        if np.sum(keep) < 3:
+            return np.nan, np.nan, np.nan, n_subjects
+        try:
+            value = float(statistic(x[keep], y[keep]))
+        except Exception:
+            return np.nan, np.nan, np.nan, n_subjects
+        if not np.isfinite(value):
+            return np.nan, np.nan, np.nan, n_subjects
+        leave_one_out.append(value)
+
+    leave_one_out = np.asarray(leave_one_out, dtype=float)
+    pseudo_values = (n_subjects * estimate
+                     - (n_subjects - 1) * leave_one_out)
+    standard_error = float(
+        np.std(pseudo_values, ddof=1) / np.sqrt(n_subjects))
+    if standard_error <= 1e-15:
+        p_value = 0.0 if abs(estimate) > 1e-15 else 1.0
+        return p_value, estimate, estimate, n_subjects
+
+    z_value = estimate / standard_error
+    p_value = float(2 * student_t.sf(
+        abs(z_value), df=n_subjects - 1))
+    critical = float(student_t.ppf(0.975, df=n_subjects - 1))
+    ci_low = max(-1.0, float(estimate - critical * standard_error))
+    ci_high = min(1.0, float(estimate + critical * standard_error))
+    return p_value, ci_low, ci_high, n_subjects
 
 
 def collect_features(root_folder, target="PVP", output_txt=None,
@@ -282,30 +379,32 @@ def collect_features(root_folder, target="PVP", output_txt=None,
 
     for folder in subfolders:
         folder_path = os.path.join(root_folder, folder)
-        # 优先读 unified_features.json (新), 否则回退 portal_vein_features.json
-        unified_path = os.path.join(folder_path, "unified_features.json")
-        legacy_path = os.path.join(folder_path, "portal_vein_features.json")
+        # 新版统一文件位于 patient/features；根目录路径仅供旧结果兼容。
+        unified_path = _first_existing_path(
+            _candidate_feature_paths(folder_path, UNIFIED_FEATURES_NAME))
+        legacy_path = _first_existing_path(
+            _candidate_feature_paths(folder_path, "portal_vein_features.json"))
 
-        if os.path.exists(unified_path):
+        if unified_path is not None:
             try:
                 with open(unified_path, 'r', encoding='utf-8') as f:
                     unified = json.load(f)
                 features = _flatten_unified_to_features(unified)
             except Exception as e:
-                print(f"  ✗ {folder}: unified JSON 失败 ({e}), 尝试 legacy")
+                print(f"  ERROR {folder}: unified JSON 失败 ({e}), 尝试 legacy")
                 features = None
         else:
             features = None
 
         if features is None:
-            if not os.path.exists(legacy_path):
+            if legacy_path is None:
                 no_json.append(folder)
                 continue
             try:
                 with open(legacy_path, 'r', encoding='utf-8') as f:
                     features = json.load(f)
             except Exception as e:
-                print(f"  ✗ {folder}: legacy JSON 失败 ({e})")
+                print(f"  ERROR {folder}: legacy JSON 失败 ({e})")
                 no_json.append(folder)
                 continue
 
@@ -317,12 +416,14 @@ def collect_features(root_folder, target="PVP", output_txt=None,
         feat_dict = {}
         for fn in FEATURE_NAMES:
             v = features.get(fn)
-            feat_dict[fn] = (float(v) if (v is not None and
-                                          not (isinstance(v, float) and np.isnan(v)))
-                             else None)
+            try:
+                value = float(v) if v is not None else np.nan
+            except (TypeError, ValueError, OverflowError):
+                value = np.nan
+            feat_dict[fn] = value if np.isfinite(value) else None
 
         rows.append((folder, feat_dict, label_val))
-        print(f"  ✓ {folder}: {target}={label_val:.1f}")
+        print(f"  OK {folder}: {target}={label_val:.1f}")
 
     if not rows:
         print("  无可用数据!")
@@ -401,55 +502,84 @@ def load_data(filepath, target="PVP"):
 # 相关性计算
 # ============================================================
 
-def compute_correlations(df, active_features, target="PVP"):
-    """计算每个特征与 target 的 Pearson 和 Spearman 相关。"""
+def compute_correlations(df, active_features, target="PVP", min_samples=10):
+    """相关性 + patient-cluster inference + BH-FDR."""
     target = target.upper()
     print(f"\n计算与 {target} 的相关性...")
 
     y = df[target].values
+    sample_col = df.columns[0]
+    subject_ids = np.asarray([
+        _infer_subject_id(value) for value in df[sample_col].astype(str)
+    ], dtype=object)
     results = []
 
     for feat in active_features:
         x = df[feat].values
-        mask = ~(np.isnan(x) | np.isnan(y))
+        mask = np.isfinite(x) & np.isfinite(y)
         x_c, y_c = x[mask], y[mask]
 
-        if len(x_c) < 3 or np.std(x_c) < 1e-10:
+        if (len(x_c) < min_samples or np.std(x_c) < 1e-10
+                or np.std(y_c) < 1e-10):
             results.append({
                 'feature': feat, 'label': FEATURE_LABELS_CN.get(feat, feat),
                 'group': _get_group(feat),
                 'pearson_r': np.nan, 'pearson_p': np.nan,
                 'spearman_r': np.nan, 'spearman_p': np.nan,
+                'pearson_p_naive': np.nan, 'spearman_p_naive': np.nan,
+                'pearson_ci_low': np.nan, 'pearson_ci_high': np.nan,
+                'spearman_ci_low': np.nan, 'spearman_ci_high': np.nan,
                 'abs_pearson': np.nan, 'abs_spearman': np.nan,
                 'n_samples': len(x_c),
+                'n_subjects': len(pd.unique(subject_ids[mask])),
             })
             continue
 
-        pr, pp = pearsonr(x_c, y_c)
-        sr, sp = spearmanr(x_c, y_c)
+        pr, pp_naive = pearsonr(x_c, y_c)
+        sr, sp_naive = spearmanr(x_c, y_c)
+        cluster_ids = subject_ids[mask]
+        pp, pr_low, pr_high, n_subjects = _cluster_jackknife_inference(
+            x_c, y_c, cluster_ids, pr,
+            lambda a, b: pearsonr(a, b)[0])
+        sp, sr_low, sr_high, _ = _cluster_jackknife_inference(
+            x_c, y_c, cluster_ids, sr,
+            lambda a, b: spearmanr(a, b)[0])
+        if not np.isfinite(pp):
+            pp, pr_low, pr_high = pp_naive, np.nan, np.nan
+        if not np.isfinite(sp):
+            sp, sr_low, sr_high = sp_naive, np.nan, np.nan
 
         results.append({
             'feature': feat, 'label': FEATURE_LABELS_CN.get(feat, feat),
             'group': _get_group(feat),
             'pearson_r': pr, 'pearson_p': pp,
             'spearman_r': sr, 'spearman_p': sp,
+            'pearson_p_naive': pp_naive, 'spearman_p_naive': sp_naive,
+            'pearson_ci_low': pr_low, 'pearson_ci_high': pr_high,
+            'spearman_ci_low': sr_low, 'spearman_ci_high': sr_high,
             'abs_pearson': abs(pr), 'abs_spearman': abs(sr),
             'n_samples': len(x_c),
+            'n_subjects': n_subjects,
         })
 
     corr_df = pd.DataFrame(results)
     corr_df = corr_df.sort_values('abs_spearman', ascending=False,
                                   na_position='last').reset_index(drop=True)
+    corr_df['pearson_q'] = _fdr_bh(corr_df['pearson_p'].to_numpy())
+    corr_df['spearman_q'] = _fdr_bh(corr_df['spearman_p'].to_numpy())
     corr_df['pearson_sig'] = corr_df['pearson_p'].apply(_sig)
     corr_df['spearman_sig'] = corr_df['spearman_p'].apply(_sig)
+    corr_df['pearson_fdr_sig'] = corr_df['pearson_q'].apply(_sig)
+    corr_df['spearman_fdr_sig'] = corr_df['spearman_q'].apply(_sig)
 
     print(f"\n  Top 10 (Spearman |ρ|):")
     for _, row in corr_df.head(10).iterrows():
         if pd.isna(row['spearman_r']):
             continue
         print(f"    {row['label']:>16s}: ρ={row['spearman_r']:+.3f} "
-              f"(p={row['spearman_p']:.4f}) {row['spearman_sig']}  "
-              f"N={row['n_samples']}")
+              f"(p={row['spearman_p']:.4f}, q={row['spearman_q']:.4f}) "
+              f"{row['spearman_fdr_sig']}  "
+              f"N={row['n_samples']}, subjects={row['n_subjects']}")
 
     return corr_df
 
@@ -479,7 +609,7 @@ def plot_heatmap(df, active_features, output_dir, target="PVP"):
         scores = []
         for f in active_features:
             x = df[f].values
-            m = ~(np.isnan(x) | np.isnan(y))
+            m = np.isfinite(x) & np.isfinite(y)
             if np.sum(m) >= 3 and np.std(x[m]) > 1e-10:
                 r, _ = spearmanr(x[m], y[m])
                 scores.append((f, abs(r) if not np.isnan(r) else 0))
@@ -571,7 +701,7 @@ def plot_scatter_matrix(df, corr_df, output_dir, target="PVP",
         ax = axes[r, c]
 
         x = df[feat].values
-        mask = ~(np.isnan(x) | np.isnan(y))
+        mask = np.isfinite(x) & np.isfinite(y)
         x_c, y_c = x[mask], y[mask]
 
         color = GROUP_COLORS.get(_get_group(feat), '#64748b')
@@ -584,9 +714,10 @@ def plot_scatter_matrix(df, corr_df, output_dir, target="PVP",
             ax.plot(x_line, slope * x_line + intercept,
                     color=color, linewidth=2, alpha=0.8, zorder=2)
 
-            text_color = '#dc2626' if row['spearman_p'] < 0.05 else '#64748b'
+            text_color = '#dc2626' if row['spearman_q'] < 0.05 else '#64748b'
             ax.text(0.05, 0.95,
-                    f"ρ={row['spearman_r']:.3f}{row['spearman_sig']}\n"
+                    f"ρ={row['spearman_r']:.3f}{row['spearman_fdr_sig']}\n"
+                    f"q={row['spearman_q']:.3g}\n"
                     f"N={int(row['n_samples'])}",
                     transform=ax.transAxes, fontsize=9, fontweight='bold',
                     color=text_color, va='top',
@@ -622,8 +753,8 @@ def plot_top_features(corr_df, output_dir, target="PVP", top_n=30):
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, max(10, top_n * 0.4)))
     for ax, r_col, p_col, title in [
-        (ax1, 'spearman_r', 'spearman_p', 'Spearman ρ'),
-        (ax2, 'pearson_r', 'pearson_p', 'Pearson r'),
+        (ax1, 'spearman_r', 'spearman_q', 'Spearman ρ'),
+        (ax2, 'pearson_r', 'pearson_q', 'Pearson r'),
     ]:
         sub = plot_corr.sort_values(r_col, ascending=True)
         labels = [FEATURE_LABELS_CN.get(f, f) for f in sub['feature']]
@@ -653,7 +784,7 @@ def plot_top_features(corr_df, output_dir, target="PVP", top_n=30):
     from matplotlib.patches import Patch
     legend = [Patch(facecolor=c, label=g) for g, c in GROUP_COLORS.items()]
     legend.append(Patch(facecolor='white', edgecolor='#dc2626',
-                        label='★ p<0.01  ☆ p<0.05'))
+                        label='★ q<0.01  ☆ q<0.05 (BH-FDR)'))
     fig.legend(handles=legend, loc='lower center',
                ncol=len(GROUP_COLORS) + 1, fontsize=10,
                frameon=True, fancybox=True, shadow=True,
@@ -703,14 +834,14 @@ def plot_group_analysis(corr_df, output_dir, target="PVP"):
     width = 0.25
     for offset, threshold, color, label in [
         (-width, 1.0, '#94a3b8', '总数'),
-        (0, 0.05, '#f59e0b', 'p<0.05'),
-        (width, 0.01, '#dc2626', 'p<0.01'),
+        (0, 0.05, '#f59e0b', 'q<0.05'),
+        (width, 0.01, '#dc2626', 'q<0.01'),
     ]:
         counts = []
         for g in groups:
             sub = valid_corr[valid_corr['feature'].isin(FEATURE_GROUPS[g])]
             counts.append(len(sub) if threshold >= 1.0
-                          else len(sub[sub['spearman_p'] < threshold]))
+                          else len(sub[sub['spearman_q'] < threshold]))
         ax2.bar(x + offset, counts, width, color=color, label=label,
                 alpha=0.5 if threshold >= 1.0 else 0.85)
     ax2.set_xticks(x)
@@ -747,16 +878,16 @@ def plot_group_analysis(corr_df, output_dir, target="PVP"):
         table_data.append([
             row['label'], row['group'],
             f"{row['spearman_r']:+.4f}",
-            f"{row['spearman_p']:.4f}{row['spearman_sig']}",
+            f"{row['spearman_q']:.4f}{row['spearman_fdr_sig']}",
             f"{row['pearson_r']:+.4f}",
-            f"{row['pearson_p']:.4f}{row['pearson_sig']}",
+            f"{row['pearson_q']:.4f}{row['pearson_fdr_sig']}",
             str(int(row['n_samples'])),
         ])
     if table_data:
         table = ax4.table(
             cellText=table_data,
-            colLabels=['特征', '分组', 'Spearman ρ', 'p-value',
-                       'Pearson r', 'p-value', 'N'],
+            colLabels=['特征', '分组', 'Spearman ρ', 'FDR q',
+                       'Pearson r', 'FDR q', 'N'],
             cellLoc='center', loc='center',
             colWidths=[0.20, 0.10, 0.12, 0.14, 0.12, 0.14, 0.06])
         table.auto_set_font_size(False)
@@ -766,7 +897,7 @@ def plot_group_analysis(corr_df, output_dir, target="PVP"):
             table[0, j].set_facecolor('#1e293b')
             table[0, j].set_text_props(color='white', fontweight='bold')
         for i in range(len(table_data)):
-            sp = top10.iloc[i]['spearman_p']
+            sp = top10.iloc[i]['spearman_q']
             if pd.isna(sp):
                 bg = 'white'
             elif sp < 0.01:
@@ -797,37 +928,44 @@ def generate_report(df, corr_df, active_features, output_dir, target="PVP"):
     print("\n生成报告...")
 
     y = df[target]
+    sample_col = df.columns[0]
+    n_subjects = len({
+        _infer_subject_id(value) for value in df[sample_col].astype(str)
+    })
     valid_corr = corr_df.dropna(subset=['spearman_r'])
-    sig5 = valid_corr[valid_corr['spearman_p'] < 0.05]
-    sig1 = valid_corr[valid_corr['spearman_p'] < 0.01]
+    sig5 = valid_corr[valid_corr['spearman_q'] < 0.05]
+    sig1 = valid_corr[valid_corr['spearman_q'] < 0.01]
 
     lines = [
         "=" * 70,
         f"门静脉特征与{target_cn}({target})相关性分析报告",
         "=" * 70, "",
         f"样本数量: {len(df)}",
+        f"推断患者簇数量: {n_subjects} (按日期前缀和术后标记归并)",
         f"特征数量: {len(active_features)} (active)",
         f"{target}范围: {y.min():.1f} - {y.max():.1f} {unit}",
         f"{target}均值: {y.mean():.1f} ± {y.std():.1f} {unit}",
         f"{target}中位数: {y.median():.1f} {unit}", "",
         "-" * 70,
-        f"显著相关特征 (Spearman): "
-        f"p<0.05: {len(sig5)}, p<0.01: {len(sig1)}", "",
+        f"显著相关特征 (Spearman, Benjamini-Hochberg FDR): "
+        f"q<0.05: {len(sig5)}, q<0.01: {len(sig1)}", "",
     ]
 
     if len(sig5) > 0:
-        lines.append("显著特征详情 (p < 0.05, 按|ρ|降序):")
+        lines.append("显著特征详情 (FDR q < 0.05, 按|ρ|降序):")
         lines.append(f"  {'特征':>18s}  {'Spearman ρ':>12s}  "
-                     f"{'p-value':>10s}  {'Pearson r':>10s}  "
+                     f"{'cluster p':>10s}  {'FDR q':>10s}  "
+                     f"{'cluster 95% CI':>20s}  "
                      f"{'分组':>8s}  {'N':>4s}")
         lines.append("  " + "-" * 70)
         for _, r in sig5.iterrows():
             lines.append(
                 f"  {r['label']:>18s}  {r['spearman_r']:>+12.4f}  "
-                f"{r['spearman_p']:>10.4f}  {r['pearson_r']:>+10.4f}  "
+                f"{r['spearman_p']:>10.4f}  {r['spearman_q']:>10.4f}  "
+                f"[{r['spearman_ci_low']:+.3f}, {r['spearman_ci_high']:+.3f}]  "
                 f"{r['group']:>8s}  {int(r['n_samples']):>4d}")
     else:
-        lines.append("  未发现显著相关特征 (可能样本量不足)")
+        lines.append("  FDR 校正后未发现显著相关特征")
 
     lines += ["", "-" * 70, "分组平均相关性:"]
     for g, feats in FEATURE_GROUPS.items():
@@ -841,21 +979,21 @@ def generate_report(df, corr_df, active_features, output_dir, target="PVP"):
 
     lines += ["", "-" * 70, "全部特征 (按|Spearman ρ|降序):"]
     lines.append(f"  {'#':>3s}  {'特征':>18s}  {'Spearman ρ':>12s}  "
-                 f"{'p-value':>10s}  {'sig':>4s}  {'Pearson r':>10s}  "
-                 f"{'p-value':>10s}  {'N':>4s}")
+                 f"{'cluster p':>10s}  {'FDR q':>10s}  {'sig':>4s}  "
+                 f"{'Pearson r':>10s}  {'N':>4s}")
     lines.append("  " + "-" * 84)
     for i, (_, r) in enumerate(corr_df.iterrows()):
         if pd.isna(r['spearman_r']):
             lines.append(f"  {i+1:>3d}  {r['label']:>18s}  "
-                         f"{'N/A':>12s}  {'N/A':>10s}  {'':>4s}  "
-                         f"{'N/A':>10s}  {'N/A':>10s}  "
+                         f"{'N/A':>12s}  {'N/A':>10s}  {'N/A':>10s}  "
+                         f"{'':>4s}  {'N/A':>10s}  "
                          f"{int(r['n_samples']):>4d}")
         else:
             lines.append(
                 f"  {i+1:>3d}  {r['label']:>18s}  "
                 f"{r['spearman_r']:>+12.4f}  {r['spearman_p']:>10.4f}  "
-                f"{r['spearman_sig']:>4s}  {r['pearson_r']:>+10.4f}  "
-                f"{r['pearson_p']:>10.4f}  {int(r['n_samples']):>4d}")
+                f"{r['spearman_q']:>10.4f}  {r['spearman_fdr_sig']:>4s}  "
+                f"{r['pearson_r']:>+10.4f}  {int(r['n_samples']):>4d}")
 
     # ----- 自动相关性解读 (Top-K 解读 + 候选特征建议) -----
     interp = _auto_interpret_correlations(corr_df, df, target=target)
@@ -864,10 +1002,12 @@ def generate_report(df, corr_df, active_features, output_dir, target="PVP"):
 
     lines += [
         "", "=" * 70,
-        "注: *** p<0.001, ** p<0.01, * p<0.05",
+        "注: 星号按 BH-FDR q 值: *** q<0.001, ** q<0.01, * q<0.05",
+        "    p 值和 95% CI 使用患者簇 jackknife；CSV 保留 naive p 供核对",
+        "    该分析控制重复测量依赖，但未把 TIPS 状态作为混杂变量消除",
         f"    目标变量: {target} ({target_cn})",
         f"    标签来源: patient/label/{target}.txt",
-        f"    特征来源: patient/unified_features.json (回退 portal_vein_features.json)",
+        f"    特征来源: patient/features/unified_features.json (兼容旧路径)",
         "=" * 70,
     ]
 
@@ -913,7 +1053,7 @@ def _auto_interpret_correlations(corr_df, df, target="PVP",
     out.append(f"  Top {top_k} 相关特征 (按 |Spearman ρ|):")
     out.append("  " + "-" * 90)
     out.append(f"  {'#':>3s}  {'特征':>22s}  {'分组':>14s}  "
-               f"{'ρ':>+8s}  {'p':>10s}  {'方向':>6s}  {'强度':>6s}")
+               f"{'ρ':>8s}  {'FDR q':>10s}  {'方向':>6s}  {'强度':>6s}")
     for i, row in valid.head(top_k).iterrows():
         sign = '↑' if row['spearman_r'] > 0 else '↓'
         if row['abs_rho'] >= strong_threshold:
@@ -923,13 +1063,13 @@ def _auto_interpret_correlations(corr_df, df, target="PVP",
         else:
             level = '弱'
         out.append(f"  {i+1:>3d}  {row['label']:>22s}  {row['group']:>14s}  "
-                   f"{row['spearman_r']:>+8.3f}  {row['spearman_p']:>10.4f}  "
+                   f"{row['spearman_r']:>+8.3f}  {row['spearman_q']:>10.4f}  "
                    f"{sign:>6s}  {level:>6s}")
     out.append("")
 
     # ---- 单段 vs 系统特征 ----
     sys_groups = ['系统-角度', '系统-Murray/比率', '系统-长度/弯曲',
-                  '系统-阻力', '系统-拓扑']
+                  '系统-阻力', '系统-拓扑', '系统-临床派生']
     seg_groups = ['长度', '曲折度', '曲率', '直径/面积', '圆度', '夹角']
     sys_mask = valid['group'].isin(sys_groups)
     seg_mask = valid['group'].isin(seg_groups)
@@ -940,11 +1080,11 @@ def _auto_interpret_correlations(corr_df, df, target="PVP",
         out.append("  系统/联合特征 Top 5:")
         for _, r in sys_top.iterrows():
             out.append(f"    {r['label']:>22s}  ρ={r['spearman_r']:+.3f}  "
-                       f"p={r['spearman_p']:.4f}{r['spearman_sig']}")
+                       f"q={r['spearman_q']:.4f}{r['spearman_fdr_sig']}")
         out.append("  单段特征 Top 5:")
         for _, r in seg_top.iterrows():
             out.append(f"    {r['label']:>22s}  ρ={r['spearman_r']:+.3f}  "
-                       f"p={r['spearman_p']:.4f}{r['spearman_sig']}")
+                       f"q={r['spearman_q']:.4f}{r['spearman_fdr_sig']}")
         max_sys = sys_top['abs_rho'].max() if len(sys_top) else 0
         max_seg = seg_top['abs_rho'].max() if len(seg_top) else 0
         out.append(f"  最强 |ρ|: 系统={max_sys:.3f}, 单段={max_seg:.3f}; "
@@ -952,18 +1092,18 @@ def _auto_interpret_correlations(corr_df, df, target="PVP",
         out.append("")
 
     # ---- 推荐用于建模的特征 ----
-    # 标准: |ρ| ≥ moderate_threshold, p < 0.05, 缺失率合理 (n_samples 接近 N)
+    # 标准: |ρ|、FDR q、覆盖率同时达标。
     n_samples_full = len(df)
     keep = valid[(valid['abs_rho'] >= moderate_threshold)
-                 & (valid['spearman_p'] < 0.05)
+                 & (valid['spearman_q'] < 0.05)
                  & (valid['n_samples'] >= 0.7 * n_samples_full)].copy()
-    out.append(f"  推荐入选训练特征 (|ρ|≥{moderate_threshold} ∧ p<0.05 ∧ "
+    out.append(f"  候选特征 (|ρ|≥{moderate_threshold} ∧ FDR q<0.05 ∧ "
                f"覆盖≥70%): {len(keep)} 个")
     if len(keep) > 0:
         for _, r in keep.head(20).iterrows():
             out.append(f"    [{r['group']:>10s}] {r['label']:>22s}  "
                        f"ρ={r['spearman_r']:+.3f} p={r['spearman_p']:.4f} "
-                       f"N={int(r['n_samples'])}")
+                       f"q={r['spearman_q']:.4f} N={int(r['n_samples'])}")
         if len(keep) > 20:
             out.append(f"    ... (共 {len(keep)} 个, 仅显示前 20)")
     else:
@@ -987,16 +1127,6 @@ def _auto_interpret_correlations(corr_df, df, target="PVP",
         out.append(f"  · 系统特征推荐重点关注: 汇合 Murray-3 偏离, "
                    f"入流阻力不对称, 侧支负担, MPV 锥度.")
 
-    # 保存推荐列表为 CSV (便于下游训练直接读取)
-    if len(keep) > 0:
-        try:
-            recommend_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                'recommended_features.csv')
-            # 实际写到 output_dir, 调用方更知道; 这里仅打印
-        except Exception:
-            pass
-
     return out
 
 
@@ -1019,17 +1149,17 @@ def run_analysis(filepath, output_dir=None, target="PVP"):
     corr_df.to_csv(csv_path, index=False, encoding='utf-8-sig')
     print(f"\n相关性 CSV: {csv_path}")
 
-    # 推荐特征 CSV (|ρ|≥0.25 + p<0.05 + 覆盖≥70%)
+    # 候选特征 CSV (|ρ|≥0.25 + BH-FDR q<0.05 + 覆盖≥70%)
     valid = corr_df.dropna(subset=['spearman_r']).copy()
     n_full = len(df)
     valid['abs_rho'] = valid['spearman_r'].abs()
     keep = valid[(valid['abs_rho'] >= 0.25)
-                 & (valid['spearman_p'] < 0.05)
+                 & (valid['spearman_q'] < 0.05)
                  & (valid['n_samples'] >= 0.7 * n_full)].copy()
     keep = keep.sort_values('abs_rho', ascending=False)
     rec_path = os.path.join(output_dir, 'recommended_features.csv')
     keep.to_csv(rec_path, index=False, encoding='utf-8-sig')
-    print(f"推荐特征 CSV: {rec_path}  ({len(keep)} 个)")
+    print(f"候选特征 CSV: {rec_path}  ({len(keep)} 个)")
 
     plot_heatmap(df, active_features, output_dir, target)
     plot_scatter_matrix(df, corr_df, output_dir, target)
