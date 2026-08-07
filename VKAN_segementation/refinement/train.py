@@ -70,6 +70,68 @@ def _checkpoint_payload(model, optimizer, args, epoch: int, best_dice: float, hi
     }
 
 
+def _epochs_without_improvement(history: list[dict]) -> int:
+    """Return the current validation-Dice plateau length for resumed training."""
+    best_dice = float("-inf")
+    epochs_without_improvement = 0
+    for entry in history:
+        val_dice = float(entry["val"]["dice"])
+        if val_dice > best_dice:
+            best_dice = val_dice
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+    return epochs_without_improvement
+
+
+def _plot_training_history(history: list[dict], plot_path: Path) -> Path | None:
+    if not history:
+        return None
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = [entry["epoch"] for entry in history]
+    train_loss = [entry["train"]["loss"] for entry in history]
+    val_loss = [entry["val"]["loss"] for entry in history]
+    train_dice = [entry["train"]["dice"] for entry in history]
+    val_dice = [entry["val"]["dice"] for entry in history]
+
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, (loss_ax, dice_ax) = plt.subplots(1, 2, figsize=(11, 4.5), constrained_layout=True)
+    loss_ax.plot(epochs, train_loss, label="Train")
+    loss_ax.plot(epochs, val_loss, label="Validation")
+    loss_ax.set_title("Loss")
+    loss_ax.set_xlabel("Epoch")
+    loss_ax.set_ylabel("Loss")
+    loss_ax.grid(alpha=0.3)
+    loss_ax.legend()
+
+    dice_ax.plot(epochs, train_dice, label="Train")
+    dice_ax.plot(epochs, val_dice, label="Validation")
+    dice_ax.set_title("Dice")
+    dice_ax.set_xlabel("Epoch")
+    dice_ax.set_ylabel("Dice")
+    dice_ax.set_ylim(0.0, 1.0)
+    dice_ax.grid(alpha=0.3)
+    dice_ax.legend()
+
+    fig.savefig(plot_path, dpi=160)
+    plt.close(fig)
+    return plot_path
+
+
+def _save_training_history(history: list[dict], out_dir: Path, plot_path: Path) -> Path | None:
+    history_path = out_dir / "history.json"
+    history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    plotted_path = _plot_training_history(history, plot_path)
+    if plotted_path is not None:
+        print(f"[train] training curve saved to {plotted_path}", flush=True)
+    return plotted_path
+
+
 def _dataset_case_names(ds) -> list[str]:
     if hasattr(ds, "indices") and hasattr(ds, "dataset"):
         return [ds.dataset.cases[int(i)].name for i in ds.indices]
@@ -90,9 +152,9 @@ def _preview_names(names: list[str], limit: int = 8) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train VKAN refinement model from cropped NIfTI masks.")
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
-    parser.add_argument("--out_dir", default="VKAN_segementation/runs/nnVnet4")
+    parser.add_argument("--out_dir", default="VKAN_segementation/runs/Vkan")
     parser.add_argument("--dataset", choices=("nii", "stl"), default="nii")
-    parser.add_argument("--model", choices=MODEL_NAMES, default="nnVnet", help="Refinement model architecture.")
+    parser.add_argument("--model", choices=MODEL_NAMES, default="vkan", help="Refinement model architecture.")
     parser.add_argument("--pretrain_name", default="pretrain.nii.gz")
     parser.add_argument("--pretrain_stl_name", default="pretrain.stl")
     parser.add_argument("--label_name", default="mask.nii.gz", help="Label NIfTI name, or auto for mask_label/mask_smooth.")
@@ -106,7 +168,18 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--base_channels", type=int, default=24)
     parser.add_argument("--val_ratio", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=30)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=0,
+        help="Stop after this many epochs without validation Dice improvement; 0 disables early stopping.",
+    )
+    parser.add_argument(
+        "--plot_path",
+        default=None,
+        help="Training curve PNG path; defaults to refinement/training_curve_<out_dir>.png.",
+    )
     parser.add_argument("--include_review", action="store_true", help="Include cases marked pretrain_quality=review.")
     parser.add_argument(
         "--resume",
@@ -120,6 +193,13 @@ def main() -> None:
     set_seed(args.seed)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.patience < 0:
+        parser.error("--patience must be greater than or equal to 0")
+    plot_path = (
+        Path(args.plot_path)
+        if args.plot_path is not None
+        else Path(__file__).resolve().parent / f"training_curve_{out_dir.name}.png"
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(
@@ -170,6 +250,7 @@ def main() -> None:
 
     best_dice = -1.0
     history = []
+    epochs_without_improvement = 0
     start_epoch = 1
     resume_path = None
     checkpoint = None
@@ -200,8 +281,13 @@ def main() -> None:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         best_dice = float(checkpoint.get("best_dice", best_dice))
         history = list(checkpoint.get("history", []))
+        epochs_without_improvement = _epochs_without_improvement(history)
         start_epoch = int(checkpoint.get("epoch", 0)) + 1
-        print(f"[train] resumed from {resume_path}; start_epoch={start_epoch}", flush=True)
+        print(
+            f"[train] resumed from {resume_path}; start_epoch={start_epoch}; "
+            f"epochs_without_improvement={epochs_without_improvement}",
+            flush=True,
+        )
     (out_dir / "cases.json").write_text(
         json.dumps(
             {
@@ -229,8 +315,11 @@ def main() -> None:
             checkpoint = _checkpoint_payload(model, optimizer, args, epoch, best_dice, history)
             if val_log["dice"] > best_dice:
                 best_dice = val_log["dice"]
+                epochs_without_improvement = 0
                 checkpoint = _checkpoint_payload(model, optimizer, args, epoch, best_dice, history)
                 torch.save(checkpoint, out_dir / "best.pt")
+            else:
+                epochs_without_improvement += 1
             torch.save(checkpoint, out_dir / "last.pt")
             if epoch == 1 or epoch % 5 == 0:
                 print(
@@ -238,9 +327,16 @@ def main() -> None:
                     f"val_loss={val_log['loss']:.4f} val_dice={val_log['dice']:.4f}",
                     flush=True,
                 )
+            if args.patience > 0 and epochs_without_improvement >= args.patience:
+                print(
+                    f"[train] early stopping at epoch={epoch:03d}; validation Dice did not improve "
+                    f"for {epochs_without_improvement} epoch(s) (patience={args.patience})",
+                    flush=True,
+                )
+                break
     except KeyboardInterrupt:
         if history:
-            (out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+            _save_training_history(history, out_dir, plot_path)
             print(
                 f"[train] interrupted; saved completed-epoch history to {out_dir / 'history.json'} "
                 f"and checkpoint to {out_dir / 'last.pt'}",
@@ -250,7 +346,7 @@ def main() -> None:
             print("[train] interrupted before the first epoch completed; no new checkpoint was saved", flush=True)
         raise SystemExit(130)
 
-    (out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+    _save_training_history(history, out_dir, plot_path)
     print(f"[train] best dice={best_dice:.4f}; checkpoint={out_dir / 'best.pt'}; last={out_dir / 'last.pt'}", flush=True)
 
 

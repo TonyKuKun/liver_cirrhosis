@@ -13,6 +13,7 @@ import math
 import os
 import re
 from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ import numpy as np
 
 
 DEFAULT_DATA_ROOT = Path(r"F:\PCG data\dataset\test4all_sample")
+DEFAULT_OUT_DIR = Path(__file__).resolve().parent / "result"
 DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 FEATURE_COLUMNS = [
     "R_total",
@@ -33,7 +35,10 @@ COLLATERAL_SEGMENTS = ("lgv", "pgv")
 R_TOTAL_SEGMENTS = ("smv", "sv", "lgv", "mpv", "lpv", "rpv", "tips")
 INTRAHEPATIC_SEGMENTS = ("lpv", "rpv")
 MURRAY_PARENT_SEGMENTS = ("mpv", "sv", "smv", "lpv", "rpv")
-LOCAL_LOSS_LAMBDA = 1.0
+LOCAL_LOSS_LAMBDA = 0.0
+LOCAL_LOSS_MAX_LAMBDA = 0.0
+RESISTANCE_PEAK_ALPHA = 0.0
+STENOSIS_RELATIVE_PEAK_THRESHOLD = 0.8
 COLLATERAL_LOSS_LAMBDA = 1.0
 ANGLE_LOSS_K = 1.0
 
@@ -269,16 +274,16 @@ def _with_summary_profile_fallback(
 
 
 def pointwise_segment(sources: dict[str, Any], segment: str) -> dict[str, Any]:
-    profiles = sources.get("pointwise_profiles") or {}
-    out = _pointwise_from_mapping(profiles, segment)
-    if out:
-        return _with_summary_profile_fallback(sources, segment, out)
+    # unified_features contains the endpoint-trimmed, arc-length-resampled
+    # profile. Keep the older standalone profile only as a compatibility fallback.
     unified = sources.get("unified") or {}
     pointwise = unified.get("pointwise") or {}
-    direct = pointwise.get(segment)
-    if isinstance(direct, dict):
-        return _with_summary_profile_fallback(sources, segment, direct)
     out = _pointwise_from_mapping(pointwise, segment)
+    if out:
+        return _with_summary_profile_fallback(sources, segment, out)
+
+    profiles = sources.get("pointwise_profiles") or {}
+    out = _pointwise_from_mapping(profiles, segment)
     return _with_summary_profile_fallback(sources, segment, out)
 
 
@@ -297,30 +302,77 @@ def section_mask_by_arc(arc: np.ndarray, length: int, lo: float, hi: float) -> n
 
 
 def area_values(seg_data: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
-    area = area_profile(seg_data)
-    arc = finite_array(seg_data.get("arc_length_mm"))
-    n = area.size
-    if arc.size != n:
-        arc = np.asarray([], dtype=np.float64)
+    area, arc, _curvature = profile_arrays(seg_data)
     return area, arc
 
 
-def profile_arrays(seg_data: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _effective_length_fallback(
+    seg_data: dict[str, Any],
+    area: np.ndarray,
+    arc: np.ndarray,
+) -> float:
+    point_filter = seg_data.get("_point_filter")
+    if isinstance(point_filter, dict):
+        effective = safe_float(point_filter.get("effective_length_mm"))
+        if np.isfinite(effective) and effective > 0:
+            return float(effective)
+
+    total = safe_float(seg_data.get("total_length_mm"))
+    valid = np.isfinite(area) & (area > 0)
+    if np.any(valid) and arc.size == area.size and np.isfinite(arc).all():
+        indices = np.flatnonzero(valid)
+        if indices[-1] > indices[0]:
+            return float(abs(arc[indices[-1]] - arc[indices[0]]))
+    if np.isfinite(total) and total > 0 and np.any(valid) and area.size > 1:
+        indices = np.flatnonzero(valid)
+        if indices[-1] > indices[0]:
+            return float(total * (indices[-1] - indices[0]) / (area.size - 1))
+    if np.isfinite(total) and total > 0:
+        return float(total)
+    return float(max(area.size - 1, 1))
+
+
+def _profile_area_arc(
+    seg_data: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """Return the positive-area core and its effective arc-length coordinate."""
     area = area_profile(seg_data)
     n = area.size
     if n == 0:
         empty = np.asarray([], dtype=np.float64)
+        return empty, empty, 0, -1
+
+    valid = np.isfinite(area) & (area > 0)
+    if np.any(valid):
+        first = int(np.flatnonzero(valid)[0])
+        last = int(np.flatnonzero(valid)[-1])
+    else:
+        first, last = 0, n - 1
+
+    raw_arc = finite_array(seg_data.get("arc_length_mm"))
+    if raw_arc.size == n and np.isfinite(raw_arc).all() and raw_arc[-1] > raw_arc[0]:
+        arc = raw_arc[first : last + 1] - raw_arc[first]
+    else:
+        effective_length = _effective_length_fallback(seg_data, area, raw_arc)
+        arc = np.linspace(0.0, effective_length, last - first + 1)
+
+    return area[first : last + 1], arc, first, last
+
+
+def profile_arrays(seg_data: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    area, arc, first, last = _profile_area_arc(seg_data)
+    if area.size == 0:
+        empty = np.asarray([], dtype=np.float64)
         return empty, empty, empty
 
-    arc = finite_array(seg_data.get("arc_length_mm"))
-    if arc.size != n or not np.isfinite(arc).all():
-        total = safe_float(seg_data.get("total_length_mm"))
-        end = total if np.isfinite(total) and total > 0 else max(n - 1, 1)
-        arc = np.linspace(0.0, float(end), n)
-
-    curvature = finite_array(seg_data.get("curvature"))
-    if curvature.size != n:
-        curvature = np.full(n, np.nan, dtype=np.float64)
+    raw_curvature = finite_array(seg_data.get("curvature"))
+    raw_n = _profile_length(seg_data)
+    if raw_curvature.size == raw_n:
+        curvature = raw_curvature[first : last + 1]
+    elif raw_curvature.size == area.size:
+        curvature = raw_curvature
+    else:
+        curvature = np.full(area.shape, np.nan, dtype=np.float64)
 
     return area, arc, curvature
 
@@ -332,7 +384,10 @@ def radii_from_area(area: np.ndarray) -> np.ndarray:
     return radii
 
 
-def segment_resistance_visc(seg_data: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+def segment_resistance_visc(
+    seg_data: dict[str, Any],
+    stenosis_relative_threshold: float = STENOSIS_RELATIVE_PEAK_THRESHOLD,
+) -> tuple[float, dict[str, Any]]:
     area, arc, _curvature = profile_arrays(seg_data)
     if area.size < 2:
         return np.nan, {"status": "missing_area_profile"}
@@ -343,23 +398,55 @@ def segment_resistance_visc(seg_data: dict[str, Any]) -> tuple[float, dict[str, 
     if not np.any(valid):
         return np.nan, {"status": "no_valid_microsegments"}
 
-    contributions = d_arc[valid] / np.clip(radius[:-1][valid], 1e-9, None) ** 4
+    valid_lengths = d_arc[valid]
+    valid_radii = np.clip(radius[:-1][valid], 1e-9, None)
+    inverse_radius_fourth = 1.0 / valid_radii**4
+    contributions = valid_lengths * inverse_radius_fourth
     value = float(np.sum(contributions))
+
+    relative_threshold = float(np.clip(stenosis_relative_threshold, 1e-9, 1.0))
+    point_inverse_radius_fourth = np.full(radius.shape, np.nan, dtype=np.float64)
+    valid_points = np.isfinite(radius) & (radius > 0) & np.isfinite(arc)
+    point_inverse_radius_fourth[valid_points] = 1.0 / np.clip(radius[valid_points], 1e-9, None) ** 4
+    peak_index = int(np.nanargmax(point_inverse_radius_fourth))
+    peak_value = float(point_inverse_radius_fourth[peak_index])
+    stenotic_mask = np.isfinite(point_inverse_radius_fourth) & (
+        point_inverse_radius_fourth >= relative_threshold * peak_value
+    )
+    left = peak_index
+    right = peak_index
+    while left > 0 and stenotic_mask[left - 1]:
+        left -= 1
+    while right + 1 < stenotic_mask.size and stenotic_mask[right + 1]:
+        right += 1
+
+    left_boundary = float(arc[0]) if left == 0 else float(0.5 * (arc[left - 1] + arc[left]))
+    right_boundary = float(arc[-1]) if right == arc.size - 1 else float(0.5 * (arc[right] + arc[right + 1]))
+    stenotic_length = float(abs(right_boundary - left_boundary))
+    peak_length_term = float(peak_value * stenotic_length)
+
     return value, {
         "status": "ok",
         "n_points": int(area.size),
         "n_microsegments": int(np.sum(valid)),
+        "effective_length_mm": float(arc[-1] - arc[0]) if arc.size >= 2 else 0.0,
+        "R_visc_max": peak_value,
+        "stenosis_relative_peak_threshold": relative_threshold,
+        "stenotic_point_count": int(right - left + 1),
+        "L_stenotic_mm": stenotic_length,
+        "R_visc_max_times_L_stenotic": peak_length_term,
         "formula": "sum(Delta_L_i / r_i^4), r_i=sqrt(A_i/pi)",
     }
 
 
-def local_loss_factor(seg_data: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+def local_loss_factor(seg_data: dict[str, Any]) -> tuple[float, float, dict[str, Any]]:
     area, _arc, curvature = profile_arrays(seg_data)
     if area.size == 0:
-        return np.nan, {"status": "missing_area_profile"}
+        return np.nan, np.nan, {"status": "missing_area_profile"}
 
     radius = radii_from_area(area)
     total = 0.0
+    maximum = 0.0
     counts = {
         "expansion": 0,
         "contraction": 0,
@@ -383,43 +470,67 @@ def local_loss_factor(seg_data: dict[str, Any]) -> tuple[float, dict[str, Any]]:
             if candidate > 0.1:
                 bend_zeta = candidate
 
+        point_loss = 0.0
         if np.isfinite(exp_zeta) and np.isfinite(bend_zeta):
-            total += float(exp_zeta + bend_zeta + exp_zeta * bend_zeta)
+            point_loss = float(exp_zeta + bend_zeta + exp_zeta * bend_zeta)
             counts["combined_expansion_bend"] += 1
-            continue
-        if np.isfinite(exp_zeta):
-            total += float(exp_zeta)
-            counts["expansion"] += 1
-        if np.isfinite(con_zeta):
-            total += float(con_zeta)
-            counts["contraction"] += 1
-        if np.isfinite(bend_zeta):
-            total += float(bend_zeta)
-            counts["bend"] += 1
+        else:
+            if np.isfinite(exp_zeta):
+                point_loss += float(exp_zeta)
+                counts["expansion"] += 1
+            if np.isfinite(con_zeta):
+                point_loss += float(con_zeta)
+                counts["contraction"] += 1
+            if np.isfinite(bend_zeta):
+                point_loss += float(bend_zeta)
+                counts["bend"] += 1
+        total += point_loss
+        maximum = max(maximum, point_loss)
 
-    return float(total), {
+    return float(total), float(maximum), {
         "status": "ok",
         "counts": counts,
+        "Phi_local_sum": float(total),
+        "Phi_local_max": float(maximum),
         "formula": "sum zeta_exp/zeta_con/zeta_bend, with expansion+bend combined as exp+bend+exp*bend",
     }
 
 
-def compute_effective_resistance(seg_data: dict[str, Any], lambda_loss: float = LOCAL_LOSS_LAMBDA) -> tuple[float, dict[str, Any]]:
-    r_visc, visc_report = segment_resistance_visc(seg_data)
-    phi_local, loss_report = local_loss_factor(seg_data)
+def compute_effective_resistance(
+    seg_data: dict[str, Any],
+    lambda_loss_sum: float = LOCAL_LOSS_LAMBDA,
+    lambda_loss_max: float = LOCAL_LOSS_MAX_LAMBDA,
+    resistance_peak_alpha: float = RESISTANCE_PEAK_ALPHA,
+    stenosis_relative_threshold: float = STENOSIS_RELATIVE_PEAK_THRESHOLD,
+) -> tuple[float, dict[str, Any]]:
+    r_visc, visc_report = segment_resistance_visc(seg_data, stenosis_relative_threshold)
+    phi_local_sum, phi_local_max, loss_report = local_loss_factor(seg_data)
     if not np.isfinite(r_visc):
         return np.nan, {"status": "missing_viscous_resistance", "R_visc": visc_report, "Phi_local": loss_report}
-    if not np.isfinite(phi_local):
-        phi_local = 0.0
-    value = float(r_visc * (1.0 + lambda_loss * phi_local))
+    if not np.isfinite(phi_local_sum):
+        phi_local_sum = 0.0
+    if not np.isfinite(phi_local_max):
+        phi_local_max = 0.0
+    peak_length_term = safe_float(visc_report.get("R_visc_max_times_L_stenotic"), 0.0)
+    resistance_base = float(r_visc + resistance_peak_alpha * peak_length_term)
+    loss_multiplier = float(1.0 + lambda_loss_sum * phi_local_sum + lambda_loss_max * phi_local_max)
+    value = float(resistance_base * loss_multiplier)
     return value, {
         "status": "ok",
         "R_visc": r_visc,
-        "Phi_local": phi_local,
-        "lambda": lambda_loss,
+        "R_visc_peak_length_term": peak_length_term,
+        "resistance_peak_alpha": resistance_peak_alpha,
+        "R_resistance_base": resistance_base,
+        "Phi_local": phi_local_sum,
+        "Phi_local_sum": phi_local_sum,
+        "Phi_local_max": phi_local_max,
+        "lambda": lambda_loss_sum,
+        "lambda_local_sum": lambda_loss_sum,
+        "lambda_local_max": lambda_loss_max,
+        "local_loss_multiplier": loss_multiplier,
         "R_visc_report": visc_report,
         "Phi_local_report": loss_report,
-        "formula": "R_effective = R_visc * (1 + lambda * Phi_local)",
+        "formula": "R_effective=(R_visc_sum+alpha*R_visc_max*L_stenotic)*(1+lambda1*Phi_local_sum+lambda2*Phi_local_max)",
     }
 
 
@@ -747,6 +858,13 @@ def attachment_to_parent(
 
 
 def compute_r_total(sources: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    local_loss_lambda = safe_float(sources.get("local_loss_lambda"), LOCAL_LOSS_LAMBDA)
+    local_loss_max_lambda = safe_float(sources.get("local_loss_max_lambda"), LOCAL_LOSS_MAX_LAMBDA)
+    resistance_peak_alpha = safe_float(sources.get("resistance_peak_alpha"), RESISTANCE_PEAK_ALPHA)
+    stenosis_relative_threshold = safe_float(
+        sources.get("stenosis_relative_threshold"),
+        STENOSIS_RELATIVE_PEAK_THRESHOLD,
+    )
     segment_values: dict[str, float] = {}
     segment_reports: dict[str, Any] = {}
     for segment in R_TOTAL_SEGMENTS:
@@ -754,7 +872,13 @@ def compute_r_total(sources: dict[str, Any]) -> tuple[float, dict[str, Any]]:
             segment_reports[segment] = {"status": "segment_absent"}
             segment_values[segment] = np.nan
             continue
-        value, report = compute_effective_resistance(pointwise_segment(sources, segment), LOCAL_LOSS_LAMBDA)
+        value, report = compute_effective_resistance(
+            pointwise_segment(sources, segment),
+            lambda_loss_sum=local_loss_lambda,
+            lambda_loss_max=local_loss_max_lambda,
+            resistance_peak_alpha=resistance_peak_alpha,
+            stenosis_relative_threshold=stenosis_relative_threshold,
+        )
         if not np.isfinite(value) or value <= 0:
             fallback = precomputed_resistance_integral(sources, segment)
             if np.isfinite(fallback) and fallback > 0:
@@ -797,6 +921,10 @@ def compute_r_total(sources: dict[str, Any]) -> tuple[float, dict[str, Any]]:
         "R_prehepatic": r_prehepatic,
         "upper_parallel_segments": upper_parallel_segments,
         "R_upper_parallel_LPV_RPV_TIPS": r_hepatic,
+        "local_loss_lambda": local_loss_lambda,
+        "local_loss_max_lambda": local_loss_max_lambda,
+        "resistance_peak_alpha": resistance_peak_alpha,
+        "stenosis_relative_threshold": stenosis_relative_threshold,
         "formula": "R_total=(SMV||SV||optional_LGV)+Main+(available_LPV||available_RPV||available_TIPS)",
     }
 
@@ -894,6 +1022,11 @@ def compute_d_murray(sources: dict[str, Any]) -> tuple[float, dict[str, Any]]:
 
 
 def compute_r_collateral(sources: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    collateral_loss_lambda = safe_float(sources.get("collateral_loss_lambda"), COLLATERAL_LOSS_LAMBDA)
+    stenosis_relative_threshold = safe_float(
+        sources.get("stenosis_relative_threshold"),
+        STENOSIS_RELATIVE_PEAK_THRESHOLD,
+    )
     branch_values: dict[str, float] = {}
     branch_reports: dict[str, Any] = {}
 
@@ -903,7 +1036,8 @@ def compute_r_collateral(sources: dict[str, Any]) -> tuple[float, dict[str, Any]
             continue
 
         seg_data = pointwise_segment(sources, collateral)
-        r_visc, visc_report = segment_resistance_visc(seg_data)
+        r_visc, visc_report = segment_resistance_visc(seg_data, stenosis_relative_threshold)
+        phi_local_sum, phi_local_max, local_loss_report = local_loss_factor(seg_data)
         attach = best_parent_attachment(sources, collateral)
         theta = np.nan
         if attach.get("status") == "ok":
@@ -921,7 +1055,7 @@ def compute_r_collateral(sources: dict[str, Any]) -> tuple[float, dict[str, Any]
         zeta_entrance = sum(value for value in (zeta_angle, zeta_curvature) if np.isfinite(value))
 
         if np.isfinite(r_visc) and r_visc > 0:
-            r_eff = float(r_visc * (1.0 + COLLATERAL_LOSS_LAMBDA * zeta_entrance))
+            r_eff = float(r_visc * (1.0 + collateral_loss_lambda * zeta_entrance))
             branch_values[collateral] = r_eff
         else:
             r_eff = np.nan
@@ -929,7 +1063,14 @@ def compute_r_collateral(sources: dict[str, Any]) -> tuple[float, dict[str, Any]
         branch_reports[collateral] = {
             "status": "ok" if np.isfinite(r_eff) else "missing_collateral_resistance",
             "R_visc_coll": r_visc,
+            "R_visc_peak_length_term": safe_float(
+                visc_report.get("R_visc_max_times_L_stenotic"),
+                0.0,
+            ),
             "R_visc_report": visc_report,
+            "Phi_local_sum": phi_local_sum,
+            "Phi_local_max": phi_local_max,
+            "Phi_local_report": local_loss_report,
             "attachment": attach,
             "theta_degrees": theta,
             "zeta_angle": zeta_angle,
@@ -937,7 +1078,7 @@ def compute_r_collateral(sources: dict[str, Any]) -> tuple[float, dict[str, Any]
             "r_coll_start": r_start,
             "zeta_curvature": zeta_curvature,
             "zeta_entrance": zeta_entrance,
-            "lambda_coll": COLLATERAL_LOSS_LAMBDA,
+            "lambda_coll": collateral_loss_lambda,
             "R_eff_coll": r_eff,
             "formula": "R_eff_coll=R_visc_coll*(1+lambda_coll*(k_angle*(1-cos(theta))+K_start*r_start))",
         }
@@ -947,6 +1088,8 @@ def compute_r_collateral(sources: dict[str, Any]) -> tuple[float, dict[str, Any]
         "status": "ok" if np.isfinite(value) else "no_valid_collateral",
         "branch_R_eff": branch_values,
         "branch_reports": branch_reports,
+        "collateral_loss_lambda": collateral_loss_lambda,
+        "stenosis_relative_threshold": stenosis_relative_threshold,
         "formula": "1/R_collateral = sum_c 1/R_eff_coll^(c)",
     }
 
@@ -1184,7 +1327,14 @@ def load_label(patient_dir: Path) -> float:
     return safe_float((patient_dir / "label" / "PVP.txt").read_text(encoding="utf-8").strip())
 
 
-def extract_patient(patient_dir: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+def extract_patient(
+    patient_dir: Path,
+    local_loss_lambda: float = LOCAL_LOSS_LAMBDA,
+    local_loss_max_lambda: float = LOCAL_LOSS_MAX_LAMBDA,
+    resistance_peak_alpha: float = RESISTANCE_PEAK_ALPHA,
+    stenosis_relative_threshold: float = STENOSIS_RELATIVE_PEAK_THRESHOLD,
+    collateral_loss_lambda: float = COLLATERAL_LOSS_LAMBDA,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     report: dict[str, Any] = {"sample": patient_dir.name, "status": "pending", "features": {}}
     if "@" in patient_dir.name or "!" in patient_dir.name:
         report["status"] = "skipped_bad_name"
@@ -1236,6 +1386,11 @@ def extract_patient(patient_dir: Path) -> tuple[dict[str, Any] | None, dict[str,
         "portal_vein_features": portal_vein_features,
         "nodes": load_centerline_nodes(patient_dir),
         "patient_dir": patient_dir,
+        "local_loss_lambda": local_loss_lambda,
+        "local_loss_max_lambda": local_loss_max_lambda,
+        "resistance_peak_alpha": resistance_peak_alpha,
+        "stenosis_relative_threshold": stenosis_relative_threshold,
+        "collateral_loss_lambda": collateral_loss_lambda,
     }
     report["unified_features_path"] = str(unified_path)
     has_name_tips_marker = "#" in patient_dir.name
@@ -1307,7 +1462,16 @@ def write_features_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow(out)
 
 
-def build_summary(rows: list[dict[str, Any]], reports: list[dict[str, Any]], data_root: Path) -> dict[str, Any]:
+def build_summary(
+    rows: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+    data_root: Path,
+    local_loss_lambda: float,
+    local_loss_max_lambda: float,
+    resistance_peak_alpha: float,
+    stenosis_relative_threshold: float,
+    collateral_loss_lambda: float,
+) -> dict[str, Any]:
     finite_counts = {
         key: int(sum(np.isfinite(safe_float(row.get(key))) for row in rows))
         for key in FEATURE_COLUMNS
@@ -1318,6 +1482,11 @@ def build_summary(rows: list[dict[str, Any]], reports: list[dict[str, Any]], dat
         statuses[status] = statuses.get(status, 0) + 1
     return {
         "data_root": str(data_root),
+        "local_loss_lambda": local_loss_lambda,
+        "local_loss_max_lambda": local_loss_max_lambda,
+        "resistance_peak_alpha": resistance_peak_alpha,
+        "stenosis_relative_threshold": stenosis_relative_threshold,
+        "collateral_loss_lambda": collateral_loss_lambda,
         "n_rows_written": len(rows),
         "feature_finite_counts": finite_counts,
         "status_counts": statuses,
@@ -1328,9 +1497,39 @@ def build_summary(rows: list[dict[str, Any]], reports: list[dict[str, Any]], dat
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
-    parser.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--features-name", default="features.csv")
     parser.add_argument("--report-name", default="feature_extraction_report.json")
+    parser.add_argument(
+        "--local-loss-lambda",
+        type=float,
+        default=LOCAL_LOSS_LAMBDA,
+        help="Multiplier lambda1 for cumulative local-loss terms in R_total (default: 0.0)",
+    )
+    parser.add_argument(
+        "--local-loss-max-lambda",
+        type=float,
+        default=LOCAL_LOSS_MAX_LAMBDA,
+        help="Multiplier lambda2 for the maximum pointwise local-loss term in R_total (default: 0.0)",
+    )
+    parser.add_argument(
+        "--resistance-peak-alpha",
+        type=float,
+        default=RESISTANCE_PEAK_ALPHA,
+        help="Multiplier alpha for R_visc_max * L_stenotic in R_total (default: 0.0)",
+    )
+    parser.add_argument(
+        "--stenosis-relative-threshold",
+        type=float,
+        default=STENOSIS_RELATIVE_PEAK_THRESHOLD,
+        help="Relative 1/r^4 peak threshold defining the contiguous stenotic region (default: 0.8)",
+    )
+    parser.add_argument(
+        "--collateral-loss-lambda",
+        type=float,
+        default=COLLATERAL_LOSS_LAMBDA,
+        help="Multiplier lambda_coll for collateral entrance loss (default: 1.0)",
+    )
     parser.add_argument(
         "--workers",
         type=int,
@@ -1347,15 +1546,33 @@ def main() -> None:
         raise FileNotFoundError(f"Data root not found: {data_root}")
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
+    if args.local_loss_lambda < 0:
+        raise ValueError("--local-loss-lambda must be non-negative")
+    if args.local_loss_max_lambda < 0:
+        raise ValueError("--local-loss-max-lambda must be non-negative")
+    if args.resistance_peak_alpha < 0:
+        raise ValueError("--resistance-peak-alpha must be non-negative")
+    if not 0 < args.stenosis_relative_threshold <= 1:
+        raise ValueError("--stenosis-relative-threshold must be in (0, 1]")
+    if args.collateral_loss_lambda < 0:
+        raise ValueError("--collateral-loss-lambda must be non-negative")
 
     rows: list[dict[str, Any]] = []
     reports: list[dict[str, Any]] = []
     patient_dirs = sorted(p for p in data_root.iterdir() if p.is_dir())
+    worker = partial(
+        extract_patient,
+        local_loss_lambda=args.local_loss_lambda,
+        local_loss_max_lambda=args.local_loss_max_lambda,
+        resistance_peak_alpha=args.resistance_peak_alpha,
+        stenosis_relative_threshold=args.stenosis_relative_threshold,
+        collateral_loss_lambda=args.collateral_loss_lambda,
+    )
     if args.workers == 1:
-        results = map(extract_patient, patient_dirs)
+        results = map(worker, patient_dirs)
     else:
         executor = ProcessPoolExecutor(max_workers=args.workers)
-        results = executor.map(extract_patient, patient_dirs)
+        results = executor.map(worker, patient_dirs)
 
     try:
         for row, report in results:
@@ -1368,7 +1585,16 @@ def main() -> None:
 
     out_dir = args.out_dir
     write_features_csv(out_dir / args.features_name, rows)
-    summary = build_summary(rows, reports, data_root)
+    summary = build_summary(
+        rows,
+        reports,
+        data_root,
+        args.local_loss_lambda,
+        args.local_loss_max_lambda,
+        args.resistance_peak_alpha,
+        args.stenosis_relative_threshold,
+        args.collateral_loss_lambda,
+    )
     (out_dir / args.report_name).write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",

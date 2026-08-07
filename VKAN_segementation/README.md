@@ -71,6 +71,12 @@ Predict:
 py VKAN_segementation\refinement\predict.py --data_root D:\your_patient_root --checkpoint VKAN_segementation\runs\nnVnet3\best.pt
 ```
 
+To predict only the held-out validation/test split used by training, pass the same seed used for training:
+
+```powershell
+py VKAN_segementation\refinement\predict.py --data_root D:\your_patient_root --checkpoint VKAN_segementation\runs\nnVnet3\best.pt --seed 42
+```
+
 Smooth and quality-check:
 
 ```powershell

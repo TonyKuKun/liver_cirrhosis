@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +24,82 @@ except (ImportError, ValueError):
         from VKAN_segementation.refinement.dataset import _foreground_bbox, _load_nii, _resize_volume
     except ImportError:
         from refinement.dataset import _foreground_bbox, _load_nii, _resize_volume
+
+
+def _case_name(case) -> str:
+    """Return a stable patient name for either a Path or a dataset case."""
+    return str(case.name) if hasattr(case, "name") else Path(case).name
+
+
+def _load_training_case_names(checkpoint_path: Path) -> list[str]:
+    """Load the exact training case order, excluding $-marked patients."""
+    manifest_path = checkpoint_path.with_name("cases.json")
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Training case manifest is required to reproduce the seeded split: {manifest_path}"
+        )
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not read training case manifest: {manifest_path}") from exc
+
+    names = payload.get("cases")
+    if not isinstance(names, list):
+        raise RuntimeError(f"Training case manifest has no 'cases' list: {manifest_path}")
+    if any(not isinstance(name, str) for name in names):
+        raise RuntimeError(f"Training case manifest contains a non-string case name: {manifest_path}")
+
+    return [name for name in names if "$" not in name]
+
+
+def _select_test_cases(cases: list, seed: int, val_ratio: float) -> list:
+    """Select the held-out split using the exact split rule used by train.py."""
+    import torch
+    from torch.utils.data import random_split
+
+    if not 0.0 <= val_ratio <= 1.0:
+        raise ValueError(f"val_ratio must be between 0 and 1, got {val_ratio}")
+    if len(cases) <= 1:
+        return []
+
+    test_len = max(1, int(round(len(cases) * val_ratio)))
+    train_len = len(cases) - test_len
+
+    _, test_subset = random_split(
+        cases,
+        [train_len, test_len],
+        generator=torch.Generator().manual_seed(int(seed)),
+    )
+    return [cases[int(index)] for index in test_subset.indices]
+
+
+def _select_checkpoint_test_cases(
+    cases: list,
+    checkpoint_path: Path,
+    seed: int,
+    val_ratio: float,
+) -> tuple[list, int]:
+    """Split the training manifest first, then resolve selected names to inputs."""
+    available_by_name = {
+        _case_name(case): case
+        for case in cases
+        if "$" not in _case_name(case)
+    }
+    training_names = _load_training_case_names(checkpoint_path)
+    selected_names = _select_test_cases(training_names, seed, val_ratio)
+
+    missing = [name for name in selected_names if name not in available_by_name]
+    if missing:
+        preview = ", ".join(missing[:8])
+        if len(missing) > 8:
+            preview += f", ... (+{len(missing) - 8})"
+        raise RuntimeError(
+            "Held-out cases from the training split are missing the required prediction input: "
+            f"{preview}"
+        )
+
+    return [available_by_name[name] for name in selected_names], len(training_names)
 
 
 def predict_case(case, checkpoint: dict, threshold: float = 0.5, out_path: Path | None = None) -> Path:
@@ -110,30 +187,54 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Generate prediction from pretrain NIfTI or STL.")
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
-    parser.add_argument("--checkpoint", default=r'E:\pycharm_code\liver_cirrhosis\VKAN_segementation\refinement\VKAN_segementation\runs\nnVnet4\best.pt')
+    parser.add_argument("--checkpoint", default=r'E:\pycharm_code\liver_cirrhosis\VKAN_segementation\VKAN_segementation\runs\nnVnet4\best.pt')
     parser.add_argument("--patient", default=None)
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=30,
+        help="Predict only the held-out validation/test split generated with this training seed.",
+    )
     args = parser.parse_args()
 
-    checkpoint = torch.load(Path(args.checkpoint), map_location="cpu", weights_only=False)
+    checkpoint_path = Path(args.checkpoint)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     ckpt_args = checkpoint.get("args", {})
     if ckpt_args.get("dataset", "stl") == "nii":
         root = Path(args.data_root)
         patient_dirs = [root] if (root / ckpt_args.get("pretrain_name", "pretrain.nii.gz")).exists() else sorted(p for p in root.iterdir() if p.is_dir())
-        cases = [p for p in patient_dirs if not any(marker in p.name for marker in INVALID_MARKERS) and (p / ckpt_args.get("pretrain_name", "pretrain.nii.gz")).exists()]
-        if args.patient:
-            cases = [p for p in cases if p.name == args.patient]
-        if not cases:
-            raise RuntimeError("No matching cases with pretrain NIfTI found.")
+        cases = [p for p in patient_dirs if (p / ckpt_args.get("pretrain_name", "pretrain.nii.gz")).exists()]
+        if args.seed is None:
+            cases = [p for p in cases if not any(marker in p.name for marker in INVALID_MARKERS)]
+        case_kind = "pretrain NIfTI"
+    else:
+        cases = [case for case in discover_patients(args.data_root) if case.pretrain_stl.exists()]
+        case_kind = "pretrain STL"
+
+    if args.seed is not None:
+        val_ratio = float(ckpt_args.get("val_ratio", 0.2))
+        cases, split_source_count = _select_checkpoint_test_cases(
+            cases,
+            checkpoint_path,
+            args.seed,
+            val_ratio,
+        )
+        print(
+            f"[predict] selected held-out split: cases={len(cases)} "
+            f"from_training_cases={split_source_count} seed={args.seed} val_ratio={val_ratio}"
+        )
+
+    if args.patient:
+        cases = [case for case in cases if _case_name(case) == args.patient]
+    if not cases:
+        raise RuntimeError(f"No matching cases with {case_kind} found.")
+
+    if ckpt_args.get("dataset", "stl") == "nii":
         for case_dir in cases:
             out = predict_case_nii(case_dir, checkpoint, threshold=args.threshold)
             print(f"[predict] {case_dir.name}: wrote {out} and {case_dir / 'predict.stl'}")
     else:
-        cases = [case for case in discover_patients(args.data_root) if case.pretrain_stl.exists()]
-        if args.patient:
-            cases = [case for case in cases if case.name == args.patient]
-        if not cases:
-            raise RuntimeError("No matching cases with pretrain.stl found.")
         for case in cases:
             out = predict_case(case, checkpoint, threshold=args.threshold)
             print(f"[predict] {case.name}: wrote {out}")
