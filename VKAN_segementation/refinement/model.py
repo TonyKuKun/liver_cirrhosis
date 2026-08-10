@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy import ndimage as ndi
 
 MODEL_NAMES = ("vkan", "nnvnet")
 
@@ -93,10 +95,36 @@ class DiceBCELoss(nn.Module):
         return self.bce_weight * bce + self.dice_weight * dice
 
 
-def dice_score(logits: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> float:
-    pred = (torch.sigmoid(logits) >= threshold).float()
-    inter = (pred * target).sum().item()
-    denom = pred.sum().item() + target.sum().item()
+def _largest_connected_component(mask: np.ndarray) -> np.ndarray:
+    """Return the largest 26-connected component of a binary 3D mask."""
+    if not mask.any():
+        return mask
+
+    labels, component_count = ndi.label(mask, structure=np.ones((3, 3, 3), dtype=np.uint8))
+    counts = np.bincount(labels.ravel(), minlength=component_count + 1)
+    counts[0] = 0
+    return labels == int(np.argmax(counts))
+
+
+def dice_score(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    threshold: float = 0.5,
+    largest_component: bool = False,
+) -> float:
+    """Dice for a prediction batch, optionally filtering each case to one component."""
+    pred = torch.sigmoid(logits) >= threshold
+    if largest_component:
+        pred_array = pred.detach().cpu().numpy()
+        filtered = np.zeros_like(pred_array, dtype=bool)
+        for batch_index in range(pred_array.shape[0]):
+            for channel_index in range(pred_array.shape[1]):
+                filtered[batch_index, channel_index] = _largest_connected_component(pred_array[batch_index, channel_index])
+        filtered_pred = torch.from_numpy(filtered).to(device=target.device, dtype=target.dtype)
+    else:
+        filtered_pred = pred.to(dtype=target.dtype)
+    inter = (filtered_pred * target).sum().item()
+    denom = filtered_pred.sum().item() + target.sum().item()
     return float((2.0 * inter + 1.0) / (denom + 1.0))
 
 

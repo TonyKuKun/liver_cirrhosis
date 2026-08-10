@@ -145,6 +145,10 @@ def _process_one_patient(stl_path, post_tips, params, steps):
                 n_points=params['n_profile_points'],
                 pitch=params['pitch'],
                 curvature_window=params['curvature_window'],
+                curvature_smoothing_sigma_mm=params.get(
+                    'curvature_smoothing_sigma_mm', 3.0),
+                curvature_fit_window_mm=params.get(
+                    'curvature_fit_window_mm', 8.0),
                 section_step=params['sample_step'],
                 area_jump_ratio_threshold=params[
                     'area_jump_ratio_threshold'],
@@ -174,6 +178,10 @@ def _process_one_patient(stl_path, post_tips, params, steps):
                 stl_path,
                 n_fit_points=params['n_fit_points'],
                 curvature_window=params['curvature_window'],
+                curvature_smoothing_sigma_mm=params.get(
+                    'curvature_smoothing_sigma_mm', 3.0),
+                curvature_fit_window_mm=params.get(
+                    'curvature_fit_window_mm', 8.0),
                 sample_step=params['sample_step'],
                 pitch=params['pitch'])
             print(f"  [Step 5] 统计/统一特征: {time.time()-t0:.2f}s")
@@ -450,7 +458,9 @@ DEFAULT_PARAMS = {
     # 特征 / 剖面
     'n_fit_points': 10,
     'n_profile_points': 200,
-    'curvature_window': 7,
+    'curvature_window': 7,             # 局部曲率拟合最少点数 (兼容旧参数名)
+    'curvature_smoothing_sigma_mm': 3.0,
+    'curvature_fit_window_mm': 8.0,
     'sample_step': 3,
     'centerline_voronoi_exclusion_mm': 5.0,
                                      # 前后 5mm 局部中心线不限制截面; 更远的

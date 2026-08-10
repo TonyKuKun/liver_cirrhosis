@@ -65,7 +65,7 @@ except ImportError:
             get_z_range_from_bone = None  # type: ignore
 
 
-PRETRAIN_ALGORITHM_VERSION = "2026-05-24-v16-solid-tips-lumen"
+PRETRAIN_ALGORITHM_VERSION = "2026-08-09-v19-final-largest-component"
 PRETRAIN_META_NAME = "pretrain_meta.json"
 PRETRAIN_NII_NAME = "pretrain.nii.gz"
 MAX_STL_BYTES = 20_000 * 1024
@@ -74,7 +74,7 @@ TARGET_VOXELS_TIPS = 330_000
 REGION_GROW_BRIDGE_MM = 8.0
 REGION_GROW_MAX_SEED_SNAP_MM = 30.0
 PORTAL_REFERENCE_CLEANUP_RADIUS_MM = 25.0
-PORTAL_REFERENCE_CLEANUP_RADIUS_TIPS_MM = 25.0
+PORTAL_REFERENCE_CLEANUP_RADIUS_TIPS_MM = 60.0
 PORTAL_REFERENCE_CLEANUP_SEED_DILATE = 2
 PORTAL_REFERENCE_MIN_P50_HU = 100.0
 LIVER_SPLEEN_FALLBACK_MIN_HU = 150.0
@@ -896,6 +896,28 @@ def _morphological_cleanup(mask: np.ndarray) -> np.ndarray:
         del hl
     del holes
     return mask
+
+
+def _keep_largest_connected_component(mask: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Keep only the largest 26-connected foreground component."""
+    mask = np.asarray(mask, dtype=bool)
+    info = {"input_voxels": int(mask.sum())}
+    if ndi is None or not mask.any():
+        info.update({"components": 0, "output_voxels": int(mask.sum()), "removed_voxels": 0})
+        return mask, info
+
+    labels, components = ndi.label(mask, structure=np.ones((3, 3, 3), dtype=np.uint8))
+    counts = np.bincount(labels.ravel(), minlength=components + 1)
+    counts[0] = 0
+    largest_label = int(np.argmax(counts))
+    result = labels == largest_label
+    info.update({
+        "components": int(components),
+        "largest_label": largest_label,
+        "output_voxels": int(result.sum()),
+        "removed_voxels": int(mask.sum() - result.sum()),
+    })
+    return result, info
 
 
 def _region_grow_from_seed(
@@ -1759,6 +1781,10 @@ def pretrain_patient(case, force: bool = False) -> PretrainResult:
               f"(tips={tips_final_info.get('tips_voxels', 0)})")
     del portal_mask
 
+    mask, final_component_info = _keep_largest_connected_component(mask)
+    print(f"    after largest component: {int(mask.sum())} voxels "
+          f"(removed {final_component_info.get('removed_voxels', 0)})")
+
     # ==============================================================
     # Step 8: 输出
     # ==============================================================
@@ -1784,6 +1810,7 @@ def pretrain_patient(case, force: bool = False) -> PretrainResult:
         "hu_sampling": hu_info,
         "organ_subtraction": excl_info,
         "tips": tips_info,
+        "final_component_filter": final_component_info,
         "region_grow": grow_info,
         "portal_reference_quality": portal_quality_info,
         "portal_reference_cleanup": portal_cleanup_info,
@@ -1823,7 +1850,7 @@ def main():
     )
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
     parser.add_argument("--patient", default=None)
-    parser.add_argument("--force", default=False)
+    parser.add_argument("--force", default=True)
     parser.add_argument("--skip_existing_pretrain", action="store_true")
     parser.add_argument(
         "--only_dollar_patients",

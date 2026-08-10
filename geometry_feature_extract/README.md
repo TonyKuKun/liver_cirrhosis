@@ -228,6 +228,12 @@ TIPS/侧支的辅助形态评价和下游几何特征计算。
 | `curvature` | 中心线在该点的曲率(1/mm) |
 | `inscribed_radius` | 内切圆半径 |
 
+曲率不再使用三个离散点的外接圆。中心线先按弧长均匀参数化并进行
+`sigma=3 mm` 的高斯平滑，再在每个位置使用总长 `8 mm` 的物理窗口，
+对 `x(s), y(s), z(s)` 做局部三次多项式拟合，通过一、二阶导数计算
+`|r'(s) x r''(s)| / |r'(s)|^3`。首尾位置将同一窗口向血管内部平移，
+使用单边拟合，因此端点不再人为填 0。
+
 **截面计算核心**（高曲率无自交）：
 1. 用 **4 mm 物理尺度高斯平滑**的中心线切线确定唯一截平面
 2. 构造正交基 (u, v)，用垂直平面截断 STL 网格 (`trimesh.intersections.mesh_plane`)
@@ -727,7 +733,9 @@ result = compute_sv_smv_angle(
 | `merge_bp_distance_mm` | 5.0 | 分支点合并距离(mm) |
 | `n_fit_points` | 10 | 曲率拟合点数 |
 | `n_profile_points` | 200 | 剖面采样点数 |
-| `curvature_window` | 7 | 曲率滑动窗口大小 |
+| `curvature_window` | 7 | 曲率局部拟合最少点数（兼容旧参数名） |
+| `curvature_smoothing_sigma_mm` | 3.0 | 曲率计算前的中心线高斯平滑尺度(mm) |
+| `curvature_fit_window_mm` | 8.0 | 曲率局部三次拟合窗口总长度(mm) |
 | `sample_step` | 3 | 采样步长 |
 
 ---
@@ -764,7 +772,8 @@ $$\tau = 1 - \frac{\text{弦长}}{\text{弧长}}$$
 - 接近1 = 高度弯曲
 
 ### 曲率（Curvature）
-基于离散导数的二阶差分：对每个点计算的弯曲强度（1/mm）
+中心线经过物理尺度平滑后，在 8 mm 局部窗口内用三次多项式拟合，按
+$\kappa=\|r'\times r''\|/\|r'\|^3$ 计算弯曲强度（1/mm）。端点采用单边拟合。
 
 ### 圆度（Circularity）
 $$C = \frac{4\pi A}{P^2}$$

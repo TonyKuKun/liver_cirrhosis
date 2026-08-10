@@ -35,6 +35,12 @@ from features_layout import (
     feature_path,
     resolve_feature_path,
 )
+from curvature import (
+    DEFAULT_CURVATURE_FIT_WINDOW_MM,
+    DEFAULT_CURVATURE_MIN_FIT_POINTS,
+    DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM,
+    estimate_centerline_curvature,
+)
 
 
 # ============================================================
@@ -104,34 +110,31 @@ def _tortuosity_arc_over_chord(coords):
     return arclen / chord if chord > 1e-8 else 1.0
 
 
-def _curvature_sliding_window(coords, window=7):
-    """滑窗法离散曲率 (1/mm)"""
-    N = len(coords)
-    curvatures = np.zeros(N)
-    if N < 3:
-        return curvatures
-    half = window // 2
-    for i in range(N):
-        lo, hi = max(0, i - half), min(N - 1, i + half)
-        a = coords[i] - coords[lo]
-        b = coords[hi] - coords[i]
-        la, lb = np.linalg.norm(a), np.linalg.norm(b)
-        lc = np.linalg.norm(coords[hi] - coords[lo])
-        if la < 1e-10 or lb < 1e-10 or lc < 1e-10:
-            continue
-        area2 = np.linalg.norm(np.cross(a, b))
-        curvatures[i] = 2.0 * area2 / (la * lb * lc)
-    return curvatures
+def _curvature_sliding_window(
+        coords, window=DEFAULT_CURVATURE_MIN_FIT_POINTS,
+        smoothing_sigma_mm=DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM,
+        fit_window_mm=DEFAULT_CURVATURE_FIT_WINDOW_MM):
+    """Physical-scale local cubic curvature (1/mm)."""
+    return estimate_centerline_curvature(
+        coords,
+        smoothing_sigma_mm=smoothing_sigma_mm,
+        fit_window_mm=fit_window_mm,
+        min_fit_points=window)
 
 
-def _interior_curvature_stats(coords, window=7):
-    """返回 (mean_curv, max_curv) 对内部点的统计。"""
+def _interior_curvature_stats(
+        coords, window=DEFAULT_CURVATURE_MIN_FIT_POINTS,
+        smoothing_sigma_mm=DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM,
+        fit_window_mm=DEFAULT_CURVATURE_FIT_WINDOW_MM):
+    """Return mean/max from the same endpoint-aware pointwise estimator."""
     if len(coords) < 3:
         return 0.0, 0.0
-    curvatures = _curvature_sliding_window(coords, window)
-    half = window // 2
-    interior = curvatures[half:-half] if len(curvatures) > window else curvatures
-    interior = interior[interior > 0]
+    curvatures = _curvature_sliding_window(
+        coords,
+        window,
+        smoothing_sigma_mm=smoothing_sigma_mm,
+        fit_window_mm=fit_window_mm)
+    interior = curvatures[np.isfinite(curvatures) & (curvatures >= 0)]
     if len(interior) == 0:
         return 0.0, 0.0
     return float(np.mean(interior)), float(np.max(interior))
@@ -175,8 +178,15 @@ def _seg_tortuosity_features(seg_info):
     return 1.0 / (1.0 - t)
 
 
-def _seg_curvature_features(coords, window=7):
-    return _interior_curvature_stats(coords, window)
+def _seg_curvature_features(
+        coords, window=DEFAULT_CURVATURE_MIN_FIT_POINTS,
+        smoothing_sigma_mm=DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM,
+        fit_window_mm=DEFAULT_CURVATURE_FIT_WINDOW_MM):
+    return _interior_curvature_stats(
+        coords,
+        window,
+        smoothing_sigma_mm=smoothing_sigma_mm,
+        fit_window_mm=fit_window_mm)
 
 
 # ============================================================
@@ -391,6 +401,10 @@ def _compute_sv_smv_angle_from_segments(seg_dict, nodes,
 
 def _features_for_one_segment(seg_name, seg_info, nodes, mesh,
                                curvature_window, sample_step,
+                               curvature_smoothing_sigma_mm=(
+                                   DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM),
+                               curvature_fit_window_mm=(
+                                   DEFAULT_CURVATURE_FIT_WINDOW_MM),
                                pointwise_data=None):
     """
     对单段算所有几何特征, 返回 flat dict, 键带前缀 seg_name_。
@@ -425,7 +439,11 @@ def _features_for_one_segment(seg_name, seg_info, nodes, mesh,
     tort = _seg_tortuosity_features(seg_info)
 
     # 曲率: 现算 (基于 path 上的离散点)
-    mean_curv, max_curv = _seg_curvature_features(coords, curvature_window)
+    mean_curv, max_curv = _seg_curvature_features(
+        coords,
+        curvature_window,
+        smoothing_sigma_mm=curvature_smoothing_sigma_mm,
+        fit_window_mm=curvature_fit_window_mm)
 
     # 截面特征: 优先用 pointwise JSON (含 NaN 掩码), 否则现场算
     sec = None
@@ -509,10 +527,15 @@ def _global_features(nodes, adj, all_seg_features, seg_dict=None):
 
 def extract_all_features(stl_path, n_fit_points=10,
                           angle_fit_length_mm=10.0,
-                          curvature_window=7, sample_step=3,
+                          curvature_window=DEFAULT_CURVATURE_MIN_FIT_POINTS,
+                          sample_step=3,
                           pitch=0.5,
                           write_unified=True,
-                          write_legacy=False):
+                          write_legacy=False,
+                          curvature_smoothing_sigma_mm=(
+                              DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM),
+                          curvature_fit_window_mm=(
+                              DEFAULT_CURVATURE_FIT_WINDOW_MM)):
     """
     从中心线树 + 分段 JSON + 剖面 JSON 计算所有统计特征 + 系统特征,
     写入:
@@ -527,7 +550,9 @@ def extract_all_features(stl_path, n_fit_points=10,
         stl_path:          STL 文件路径
         n_fit_points:      SV-SMV 夹角的等距采样点数
         angle_fit_length_mm: SV-SMV 两支共同的夹角拟合弧长 (mm)
-        curvature_window:  曲率滑窗大小
+        curvature_window:  曲率局部拟合最少点数 (兼容旧参数名)
+        curvature_smoothing_sigma_mm: 曲率计算前的高斯平滑尺度 (mm)
+        curvature_fit_window_mm: 曲率局部三次拟合窗口总长度 (mm)
         sample_step:       截面采样步长(每隔几个中心线点做一次截面, 仅回退用)
         pitch:             保留参数兼容旧接口(目前不用)
         write_unified:     是否输出 unified_features.json (默认 True)
@@ -628,6 +653,8 @@ def extract_all_features(stl_path, n_fit_points=10,
         feats = _features_for_one_segment(
             seg_name, seg_info, nodes, mesh,
             curvature_window, sample_step,
+            curvature_smoothing_sigma_mm=curvature_smoothing_sigma_mm,
+            curvature_fit_window_mm=curvature_fit_window_mm,
             pointwise_data=pointwise_data)
         all_features.update(feats)
 

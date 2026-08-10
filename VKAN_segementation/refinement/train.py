@@ -31,7 +31,7 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def run_epoch(model, loader, criterion, device, optimizer=None) -> dict[str, float]:
+def run_epoch(model, loader, criterion, device, optimizer=None, dice_largest_component: bool = False) -> dict[str, float]:
     train = optimizer is not None
     model.train(train)
     total_loss = 0.0
@@ -51,7 +51,7 @@ def run_epoch(model, loader, criterion, device, optimizer=None) -> dict[str, flo
             optimizer.step()
         b = x.shape[0]
         total_loss += float(loss.item()) * b
-        total_dice += dice_score(logits.detach(), y) * b
+        total_dice += dice_score(logits.detach(), y, largest_component=dice_largest_component) * b
         n += b
     return {"loss": total_loss / max(n, 1), "dice": total_dice / max(n, 1)}
 
@@ -152,9 +152,9 @@ def _preview_names(names: list[str], limit: int = 8) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train VKAN refinement model from cropped NIfTI masks.")
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
-    parser.add_argument("--out_dir", default="VKAN_segementation/runs/Vkan")
+    parser.add_argument("--out_dir", default="VKAN_segementation/runs/nnVnet")
     parser.add_argument("--dataset", choices=("nii", "stl"), default="nii")
-    parser.add_argument("--model", choices=MODEL_NAMES, default="vkan", help="Refinement model architecture.")
+    parser.add_argument("--model", choices=MODEL_NAMES, default="nnVnet", help="Refinement model architecture.")
     parser.add_argument("--pretrain_name", default="pretrain.nii.gz")
     parser.add_argument("--pretrain_stl_name", default="pretrain.stl")
     parser.add_argument("--label_name", default="mask.nii.gz", help="Label NIfTI name, or auto for mask_label/mask_smooth.")
@@ -168,7 +168,12 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--base_channels", type=int, default=24)
     parser.add_argument("--val_ratio", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=30)
+    parser.add_argument(
+        "--dice_largest_component",
+        action="store_true",
+        help="Keep only the largest predicted 26-connected component before reporting Dice.",
+    )
     parser.add_argument(
         "--patience",
         type=int,
@@ -309,8 +314,14 @@ def main() -> None:
     try:
         for epoch in range(start_epoch, args.epochs + 1):
             print(f"[train] epoch={epoch:03d} start", flush=True)
-            train_log = run_epoch(model, train_loader, criterion, device, optimizer)
-            val_log = run_epoch(model, val_loader, criterion, device) if val_loader is not None else train_log
+            train_log = run_epoch(
+                model, train_loader, criterion, device, optimizer,
+                dice_largest_component=args.dice_largest_component,
+            )
+            val_log = (
+                run_epoch(model, val_loader, criterion, device, dice_largest_component=args.dice_largest_component)
+                if val_loader is not None else train_log
+            )
             history.append({"epoch": epoch, "train": train_log, "val": val_log})
             checkpoint = _checkpoint_payload(model, optimizer, args, epoch, best_dice, history)
             if val_log["dice"] > best_dice:

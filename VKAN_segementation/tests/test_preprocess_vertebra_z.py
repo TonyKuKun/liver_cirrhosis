@@ -14,6 +14,7 @@ from pretrain.preprocess import (
     _fill_local_tips_lumen,
     _get_exclusion_mask_fast,
     _get_tips_exclusion_mask_fast,
+    _keep_largest_connected_component,
     _limit_to_portal_reference_neighborhood,
     _save_pretrain_nifti,
     _standardize_z_from_bone,
@@ -249,6 +250,18 @@ class PreprocessVertebraZTests(unittest.TestCase):
         self.assertGreater(info["filled_voxels"], 0)
         self.assertFalse(filled[1, 2, 2])
         self.assertFalse((filled & other_hole).any())
+
+    def test_keep_largest_connected_component(self) -> None:
+        mask = np.zeros((8, 8, 8), dtype=bool)
+        mask[1:4, 1:4, 1:4] = True
+        mask[6, 6, 6] = True
+
+        filtered, info = _keep_largest_connected_component(mask)
+
+        self.assertEqual(int(filtered.sum()), 27)
+        self.assertEqual(info["components"], 2)
+        self.assertEqual(info["removed_voxels"], 1)
+        self.assertFalse(filtered[6, 6, 6])
 
 
 if __name__ == "__main__":

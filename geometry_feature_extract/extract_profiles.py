@@ -30,6 +30,12 @@ from features_layout import (
     resolve_feature_path,
 )
 from smooth_centerline import smooth_internal_anatomical_junctions
+from curvature import (
+    DEFAULT_CURVATURE_FIT_WINDOW_MM,
+    DEFAULT_CURVATURE_MIN_FIT_POINTS,
+    DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM,
+    estimate_centerline_curvature,
+)
 
 
 # ============================================================
@@ -774,24 +780,20 @@ def _torsion_sliding_window(coords, arc_length, smooth_sigma=2.0,
     return torsion
 
 
-def _curvature_sliding_window(coords, window=7):
-    """滑窗法离散曲率 (1/mm)"""
-    N = len(coords)
-    curvatures = np.zeros(N)
-    if N < 3:
-        return curvatures
-    half = window // 2
-    for i in range(N):
-        lo, hi = max(0, i - half), min(N - 1, i + half)
-        a = coords[i] - coords[lo]
-        b = coords[hi] - coords[i]
-        la, lb = np.linalg.norm(a), np.linalg.norm(b)
-        lc = np.linalg.norm(coords[hi] - coords[lo])
-        if la < 1e-10 or lb < 1e-10 or lc < 1e-10:
-            continue
-        area2 = np.linalg.norm(np.cross(a, b))
-        curvatures[i] = 2.0 * area2 / (la * lb * lc)
-    return curvatures
+def _curvature_sliding_window(
+        coords, window=DEFAULT_CURVATURE_MIN_FIT_POINTS,
+        smoothing_sigma_mm=DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM,
+        fit_window_mm=DEFAULT_CURVATURE_FIT_WINDOW_MM):
+    """Physical-scale local cubic curvature (1/mm).
+
+    ``window`` is retained as the legacy argument name, but now controls only
+    the minimum number of fit points. The primary window is expressed in mm.
+    """
+    return estimate_centerline_curvature(
+        coords,
+        smoothing_sigma_mm=smoothing_sigma_mm,
+        fit_window_mm=fit_window_mm,
+        min_fit_points=window)
 
 
 # ============================================================
@@ -830,7 +832,12 @@ def _effective_section_step(n_centerline_points, requested_step,
 
 def _extract_branch_raw_profile(branch_path, nodes, mesh,
                                 dt=None, origin=None, pitch=None,
-                                curvature_window=7, section_step=1,
+                                curvature_window=DEFAULT_CURVATURE_MIN_FIT_POINTS,
+                                section_step=1,
+                                curvature_smoothing_sigma_mm=(
+                                    DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM),
+                                curvature_fit_window_mm=(
+                                    DEFAULT_CURVATURE_FIT_WINDOW_MM),
                                 branch_coords=None,
                                 max_section_samples=None,
                                 normal_search_policy=None,
@@ -859,7 +866,11 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
     normal_tangent_coords = _smooth_coords_for_normal_tangents(
         coords, arc_length, search_policy['normal_tangent_smoothing_mm'])
     tangents = _compute_tangents(normal_tangent_coords)
-    curvature = _curvature_sliding_window(coords, curvature_window)
+    curvature = _curvature_sliding_window(
+        coords,
+        curvature_window,
+        smoothing_sigma_mm=curvature_smoothing_sigma_mm,
+        fit_window_mm=curvature_fit_window_mm)
     normal_references = tangents.copy()
 
     # 内切半径仅作为逐点几何特征，不再参与截面删除。
@@ -1038,6 +1049,12 @@ def _extract_branch_raw_profile(branch_path, nodes, mesh,
         '_centerline_arc_chord_tortuosity': float(arc_chord),
         '_centerline_mean_curvature': float(np.mean(finite_curv)) if len(finite_curv) else 0.0,
         '_centerline_max_curvature': float(np.max(finite_curv)) if len(finite_curv) else 0.0,
+        '_curvature_method': (
+            'gaussian_smoothed_local_cubic_with_one_sided_endpoints'),
+        '_curvature_smoothing_sigma_mm': float(
+            curvature_smoothing_sigma_mm),
+        '_curvature_fit_window_mm': float(curvature_fit_window_mm),
+        '_curvature_min_fit_points': int(curvature_window),
     }
 
 
@@ -1145,6 +1162,16 @@ def _resample_profile(raw_profile, n_points=200):
             raw_profile.get('_centerline_mean_curvature', 0.0)),
         'centerline_max_curvature': float(
             raw_profile.get('_centerline_max_curvature', 0.0)),
+        'curvature_method': raw_profile.get(
+            '_curvature_method',
+            'gaussian_smoothed_local_cubic_with_one_sided_endpoints'),
+        'curvature_smoothing_sigma_mm': float(raw_profile.get(
+            '_curvature_smoothing_sigma_mm',
+            DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM)),
+        'curvature_fit_window_mm': float(raw_profile.get(
+            '_curvature_fit_window_mm', DEFAULT_CURVATURE_FIT_WINDOW_MM)),
+        'curvature_min_fit_points': int(raw_profile.get(
+            '_curvature_min_fit_points', DEFAULT_CURVATURE_MIN_FIT_POINTS)),
     }
 
     centerline_coords = np.asarray(raw_profile.get('centerline_coords', []), dtype=float)
@@ -2111,7 +2138,12 @@ def _segment_area_jump_ratio_threshold(
 
 
 def extract_profiles(stl_path, n_points=200, pitch=0.5,
-                     curvature_window=7, section_step=3,
+                     curvature_window=DEFAULT_CURVATURE_MIN_FIT_POINTS,
+                     section_step=3,
+                     curvature_smoothing_sigma_mm=(
+                         DEFAULT_CURVATURE_SMOOTHING_SIGMA_MM),
+                     curvature_fit_window_mm=(
+                         DEFAULT_CURVATURE_FIT_WINDOW_MM),
                      area_jump_ratio_threshold=1.6,
                      mpv_area_jump_ratio_threshold=1.5,
                      smv_area_jump_ratio_threshold=1.4,
@@ -2136,7 +2168,10 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
         stl_path:          vessel.stl 路径
         n_points:          重采样点数 (默认 200)
         pitch:             体素化分辨率 mm
-        curvature_window:  曲率计算窗口
+        curvature_window:  曲率局部拟合的最少点数 (兼容旧参数名)。实际
+                           窗口为 8 mm, 预平滑尺度为 3 mm。
+        curvature_smoothing_sigma_mm: 曲率计算前的高斯平滑尺度 (mm)
+        curvature_fit_window_mm: 曲率局部三次拟合窗口总长度 (mm)
         section_step:      原始截面采样步长 (每隔 N 个中心线点算一次截面)
 
         只有共享端点或侧枝自身端点可按面积比例置 0。主干内部侧枝
@@ -2238,6 +2273,8 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
                 seg_path_ids, nodes, mesh,
                 curvature_window=curvature_window,
                 section_step=1,
+                curvature_smoothing_sigma_mm=curvature_smoothing_sigma_mm,
+                curvature_fit_window_mm=curvature_fit_window_mm,
                 branch_coords=branch_coords,
                 max_section_samples=n_points,
                 normal_search_policy=normal_search_policy,
@@ -2387,6 +2424,12 @@ def extract_profiles(stl_path, n_points=200, pitch=0.5,
         'side_branch_assignment_method': 'centerline_network_voronoi',
         'centerline_voronoi_exclusion_mm': float(
             centerline_voronoi_exclusion_mm),
+        'curvature_method': (
+            'gaussian_smoothed_local_cubic_with_one_sided_endpoints'),
+        'curvature_smoothing_sigma_mm': float(
+            curvature_smoothing_sigma_mm),
+        'curvature_fit_window_mm': float(curvature_fit_window_mm),
+        'curvature_min_fit_points': int(curvature_window),
         'section_filter_policy': 'endpoint_zero_only',
         'n_total_section_failures': int(n_total_section_failures),
         'n_total_endpoint_junction_zeroed': int(n_total_endpoint_zeroed),

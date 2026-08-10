@@ -1050,9 +1050,23 @@ async function initSegmentationViewer(patient) {
   const token = ++state.viewerToken;
   const rawLayers = segmentationLayers(patient).filter((layer) => layer.exists);
   const initialLayers = rawLayers.filter((layer) => layer.visible);
-  const loadingLayers = new Set();
+  const loadingLayers = new Set(initialLayers.map((layer) => layer.id));
+  const layerLoadPromises = new Map();
+  const desiredVisibility = new Map(rawLayers.map((layer) => [layer.id, layer.visible]));
+  const loadLayer = (layer) => {
+    const pending = layerLoadPromises.get(layer.id);
+    if (pending) return pending;
+    const promise = loadSegmentationLayer(layer, patient, token);
+    layerLoadPromises.set(layer.id, promise);
+    const clear = () => {
+      if (layerLoadPromises.get(layer.id) === promise) layerLoadPromises.delete(layer.id);
+    };
+    promise.then(clear, clear);
+    return promise;
+  };
   const model = {
     layers: [],
+    plotInitialized: false,
     center: [0, 0, 0],
     radius: 1,
     rx: -0.28,
@@ -1066,10 +1080,12 @@ async function initSegmentationViewer(patient) {
 
   state.segmentationViewer = {
     setVisible(id, visible) {
-      const layer = model.layers.find((item) => item.id === id);
-      if (layer) {
+      desiredVisibility.set(id, visible);
+      const traceIndex = model.layers.findIndex((item) => item.id === id);
+      if (traceIndex >= 0) {
+        const layer = model.layers[traceIndex];
         layer.visible = visible;
-        renderSegmentationPlot(plot, model);
+        if (model.plotInitialized) Plotly.restyle(plot, { visible }, [traceIndex]);
         return;
       }
       const layerDef = rawLayers.find((item) => item.id === id);
@@ -1077,20 +1093,33 @@ async function initSegmentationViewer(patient) {
         loadingLayers.add(id);
         empty.hidden = false;
         empty.textContent = "正在加载所选 STL 图层...";
-        loadSegmentationLayer(layerDef, patient, token).then((loadedLayer) => {
-          if (!loadedLayer || token !== state.viewerToken) return;
-          model.layers.push(layerWithStoredOpacity({ ...loadedLayer, visible: true }));
+        loadLayer(layerDef).then((loadedLayer) => {
+          if (token !== state.viewerToken) return;
+          if (!loadedLayer) {
+            empty.textContent = "所选 STL 图层未能加载。";
+            return;
+          }
+          const layer = layerWithStoredOpacity({
+            ...loadedLayer,
+            visible: desiredVisibility.get(id) !== false,
+          });
+          model.layers.push(layer);
           fitSegmentationModel(model);
           empty.hidden = model.layers.length > 0;
-          renderSegmentationPlot(plot, model);
+          if (model.plotInitialized) Plotly.addTraces(plot, segmentationLayerTrace(layer));
+        }).catch((error) => {
+          if (token !== state.viewerToken) return;
+          empty.hidden = false;
+          empty.textContent = `STL 图层加载失败：${error.message}`;
         }).finally(() => loadingLayers.delete(id));
       }
     },
     setOpacity(id, value) {
-      const layer = model.layers.find((item) => item.id === id);
-      if (layer && Number.isFinite(value)) {
+      const traceIndex = model.layers.findIndex((item) => item.id === id);
+      if (traceIndex >= 0 && Number.isFinite(value)) {
+        const layer = model.layers[traceIndex];
         layer.opacity = value;
-        renderSegmentationPlot(plot, model);
+        if (model.plotInitialized) Plotly.restyle(plot, { opacity: value }, [traceIndex]);
       }
     },
   };
@@ -1099,6 +1128,7 @@ async function initSegmentationViewer(patient) {
     empty.textContent = "未找到 pretrain / predict / 器官 STL，请确认病人目录。";
     empty.hidden = false;
     renderSegmentationPlot(plot, model);
+    model.plotInitialized = true;
     return;
   }
 
@@ -1106,47 +1136,49 @@ async function initSegmentationViewer(patient) {
   empty.textContent = "正在加载 STL 模型...";
   try {
     const loaded = (await Promise.all(
-      initialLayers.map((layer) => loadSegmentationLayer(layer, patient, token)),
-    )).filter(Boolean).map(layerWithStoredOpacity);
+      initialLayers.map(loadLayer),
+    )).filter(Boolean).map((layer) => layerWithStoredOpacity({
+      ...layer,
+      visible: desiredVisibility.get(layer.id) !== false,
+    }));
     if (token !== state.viewerToken) return;
-    model.layers = loaded;
+    const addedLayers = model.layers.filter((layer) => !loaded.some((item) => item.id === layer.id));
+    model.layers = [...loaded, ...addedLayers];
     fitSegmentationModel(model);
-    empty.hidden = loaded.length > 0;
-    if (!loaded.length) empty.textContent = "STL 文件存在，但未能解析出三角面。";
+    empty.hidden = model.layers.length > 0;
+    if (!model.layers.length) empty.textContent = "STL 文件存在，但未能解析出三角面。";
     renderSegmentationPlot(plot, model);
+    model.plotInitialized = true;
+    preloadSegmentationLayers(rawLayers, model);
   } catch (error) {
     if (token !== state.viewerToken) return;
     empty.textContent = `STL 加载失败：${error.message}`;
     empty.hidden = false;
+  } finally {
+    initialLayers.forEach((layer) => loadingLayers.delete(layer.id));
+  }
+}
+
+function preloadSegmentationLayers(rawLayers, model) {
+  const loadedIds = new Set(model.layers.map((layer) => layer.id));
+  const urls = rawLayers
+    .filter((layer) => !loadedIds.has(layer.id))
+    .map((layer) => segmentationPreviewUrl(layer.file));
+  const preload = () => {
+    urls.forEach((url) => {
+      fetch(url).then((response) => response.ok ? response.arrayBuffer() : null).catch(() => {});
+    });
+  };
+  if (window.requestIdleCallback) {
+    window.requestIdleCallback(preload, { timeout: 1500 });
+  } else {
+    window.setTimeout(preload, 250);
   }
 }
 
 function renderSegmentationPlot(plot, model) {
   if (!window.Plotly || !plot) return;
-  const traces = model.layers.filter((layer) => layer.visible).map((layer) => {
-    const vertices = [];
-    const faces = [];
-    layer.triangles.forEach((tri) => {
-      const offset = vertices.length;
-      vertices.push(...tri);
-      faces.push([offset, offset + 1, offset + 2]);
-    });
-    return {
-      type: "mesh3d",
-      name: layer.label,
-      x: vertices.map((p) => p[0]),
-      y: vertices.map((p) => p[1]),
-      z: vertices.map((p) => p[2]),
-      i: faces.map((f) => f[0]),
-      j: faces.map((f) => f[1]),
-      k: faces.map((f) => f[2]),
-      color: layer.color,
-      opacity: layer.opacity,
-      flatshading: false,
-      hoverinfo: "skip",
-      lighting: { ambient: 0.62, diffuse: 0.82, specular: 0.08, roughness: 0.72 },
-    };
-  });
+  const traces = model.layers.map(segmentationLayerTrace);
   const axis = { showgrid: true, gridcolor: "#d9e1ea", zeroline: false, showbackground: true, backgroundcolor: "#f8fafc" };
   Plotly.react(plot, traces, {
     margin: { l: 0, r: 0, t: 0, b: 0 },
@@ -1164,6 +1196,43 @@ function renderSegmentationPlot(plot, model) {
   }, { displaylogo: false, responsive: true, scrollZoom: true });
 }
 
+function segmentationLayerTrace(layer) {
+  if (!layer.plotGeometry) {
+    const faceCount = layer.triangles.length;
+    const vertexCount = faceCount * 3;
+    const x = new Array(vertexCount);
+    const y = new Array(vertexCount);
+    const z = new Array(vertexCount);
+    const i = new Array(faceCount);
+    const j = new Array(faceCount);
+    const k = new Array(faceCount);
+    layer.triangles.forEach((triangle, faceIndex) => {
+      const vertexIndex = faceIndex * 3;
+      for (let offset = 0; offset < 3; offset += 1) {
+        const point = triangle[offset];
+        x[vertexIndex + offset] = point[0];
+        y[vertexIndex + offset] = point[1];
+        z[vertexIndex + offset] = point[2];
+      }
+      i[faceIndex] = vertexIndex;
+      j[faceIndex] = vertexIndex + 1;
+      k[faceIndex] = vertexIndex + 2;
+    });
+    layer.plotGeometry = { x, y, z, i, j, k };
+  }
+  return {
+    type: "mesh3d",
+    name: layer.label,
+    ...layer.plotGeometry,
+    color: layer.color,
+    opacity: layer.opacity,
+    visible: layer.visible,
+    flatshading: false,
+    hoverinfo: "skip",
+    lighting: { ambient: 0.62, diffuse: 0.82, specular: 0.08, roughness: 0.72 },
+  };
+}
+
 function segmentationMeshCacheKey(patient, layer) {
   const file = patient.status?.files?.[layer.file] || {};
   return `${patient.id}:${layer.file}:${file.size || 0}:${file.modified || 0}`;
@@ -1172,7 +1241,7 @@ function segmentationMeshCacheKey(patient, layer) {
 function cacheSegmentationMesh(key, triangles) {
   state.segmentationMeshCache.delete(key);
   state.segmentationMeshCache.set(key, triangles);
-  while (state.segmentationMeshCache.size > 2) {
+  while (state.segmentationMeshCache.size > 16) {
     state.segmentationMeshCache.delete(state.segmentationMeshCache.keys().next().value);
   }
 }
@@ -1185,13 +1254,15 @@ async function loadSegmentationLayer(layer, patient, token) {
     cacheSegmentationMesh(cacheKey, cached);
     return { ...layer, triangles: cached };
   }
-  const response = await fetch(patientFileUrl(layer.file));
+  const response = await fetch(segmentationPreviewUrl(layer.file));
   if (!response.ok || token !== state.viewerToken) return null;
-  // Plotly renders the mesh on the GPU; keep the complete surface so it does
-  // not turn into a sparse cloud of unrelated triangles.
-  const triangles = parseStl(await response.arrayBuffer(), 1000000);
+  const triangles = parseStl(await response.arrayBuffer(), 100000);
   if (triangles.length) cacheSegmentationMesh(cacheKey, triangles);
   return triangles.length ? { ...layer, triangles } : null;
+}
+
+function segmentationPreviewUrl(file) {
+  return `${patientFileUrl(file)}&preview_faces=25000`;
 }
 
 function layerWithStoredOpacity(layer) {
@@ -1257,12 +1328,23 @@ function scheduleSegmentationDraw(canvas, ctx, model) {
 function fitSegmentationModel(model) {
   const bounds = [[Infinity, Infinity, Infinity], [-Infinity, -Infinity, -Infinity]];
   model.layers.forEach((layer) => {
-    layer.triangles.forEach((tri) => tri.forEach((p) => {
-      for (let i = 0; i < 3; i += 1) {
-        bounds[0][i] = Math.min(bounds[0][i], p[i]);
-        bounds[1][i] = Math.max(bounds[1][i], p[i]);
-      }
-    }));
+    if (!layer.bounds) {
+      const layerBounds = [[Infinity, Infinity, Infinity], [-Infinity, -Infinity, -Infinity]];
+      layer.triangles.forEach((tri) => tri.forEach((p) => {
+        for (let i = 0; i < 3; i += 1) {
+          layerBounds[0][i] = Math.min(layerBounds[0][i], p[i]);
+          layerBounds[1][i] = Math.max(layerBounds[1][i], p[i]);
+        }
+      }));
+      layer.bounds = layerBounds;
+    }
+    for (let axis = 0; axis < 3; axis += 1) {
+      const min = layer.bounds[0][axis];
+      const max = layer.bounds[1][axis];
+      if (!Number.isFinite(min) || !Number.isFinite(max)) continue;
+      bounds[0][axis] = Math.min(bounds[0][axis], min);
+      bounds[1][axis] = Math.max(bounds[1][axis], max);
+    }
   });
   if (!Number.isFinite(bounds[0][0])) return;
   model.center = [0, 1, 2].map((i) => (bounds[0][i] + bounds[1][i]) / 2);

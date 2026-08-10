@@ -112,6 +112,9 @@ GEOMETRY_STL_CACHE_LOCK = threading.Lock()
 GEOMETRY_VIEW_CACHE_NAME = ".portaflow_geometry_view.json.gz"
 GEOMETRY_VIEW_CACHE_VERSION = 9
 GEOMETRY_VIEW_CACHE_LOCK = threading.Lock()
+SEGMENTATION_PREVIEW_CACHE: dict[tuple, tuple[bytes, int, int]] = {}
+SEGMENTATION_PREVIEW_CACHE_LOCK = threading.Lock()
+SEGMENTATION_PREVIEW_CACHE_LIMIT = 32
 
 
 def _now() -> float:
@@ -401,6 +404,91 @@ def _file_info(path: Path) -> dict:
         "modified": path.stat().st_mtime if path.exists() else None,
         "is_dir": path.is_dir() if path.exists() else False,
     }
+
+
+def _cluster_preview_mesh(vertices, faces, max_faces: int):
+    import numpy as np
+
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int64)
+    if len(faces) <= max_faces or not len(vertices):
+        return vertices, faces
+
+    mins = vertices.min(axis=0)
+    extent = float(np.max(vertices.max(axis=0) - mins))
+    if not np.isfinite(extent) or extent <= 0:
+        return vertices, faces
+
+    def clustered(cell_size: float):
+        cells = np.floor((vertices - mins) / cell_size).astype(np.int64)
+        _, inverse = np.unique(cells, axis=0, return_inverse=True)
+        counts = np.bincount(inverse)
+        compact_vertices = np.zeros((len(counts), 3), dtype=np.float64)
+        np.add.at(compact_vertices, inverse, vertices)
+        compact_vertices /= counts[:, None]
+
+        compact_faces = inverse[faces]
+        valid = (
+            (compact_faces[:, 0] != compact_faces[:, 1])
+            & (compact_faces[:, 1] != compact_faces[:, 2])
+            & (compact_faces[:, 0] != compact_faces[:, 2])
+        )
+        compact_faces = compact_faces[valid]
+        if not len(compact_faces):
+            return compact_vertices, compact_faces
+        canonical = np.sort(compact_faces, axis=1)
+        _, unique_indices = np.unique(canonical, axis=0, return_index=True)
+        return compact_vertices, compact_faces[np.sort(unique_indices)]
+
+    low = 0.0
+    high = extent / 4.0
+    best = None
+    for _ in range(7):
+        cell_size = (low + high) / 2.0
+        candidate = clustered(cell_size)
+        if len(candidate[1]) > max_faces:
+            low = cell_size
+        else:
+            best = candidate
+            high = cell_size
+    if best is None:
+        best = clustered(high)
+
+    compact_vertices, compact_faces = best
+    used = np.unique(compact_faces.reshape(-1))
+    remap = np.full(len(compact_vertices), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used), dtype=np.int64)
+    return compact_vertices[used], remap[compact_faces]
+
+
+def _segmentation_preview_stl(path: Path, max_faces: int) -> tuple[bytes, int, int]:
+    stat = path.stat()
+    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, max_faces)
+    with SEGMENTATION_PREVIEW_CACHE_LOCK:
+        cached = SEGMENTATION_PREVIEW_CACHE.pop(key, None)
+        if cached is not None:
+            SEGMENTATION_PREVIEW_CACHE[key] = cached
+            return cached
+
+    import numpy as np
+    import trimesh
+
+    mesh = trimesh.load(str(path), force="mesh", process=True)
+    if not hasattr(mesh, "vertices") or not hasattr(mesh, "faces"):
+        raise ValueError(f"Could not load STL preview: {path.name}")
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    original_faces = int(len(faces))
+    vertices, faces = _cluster_preview_mesh(vertices, faces, max_faces)
+    preview = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    data = bytes(preview.export(file_type="stl"))
+    result = (data, original_faces, int(len(faces)))
+
+    with SEGMENTATION_PREVIEW_CACHE_LOCK:
+        SEGMENTATION_PREVIEW_CACHE[key] = result
+        while len(SEGMENTATION_PREVIEW_CACHE) > SEGMENTATION_PREVIEW_CACHE_LIMIT:
+            SEGMENTATION_PREVIEW_CACHE.pop(next(iter(SEGMENTATION_PREVIEW_CACHE)))
+    return result
 
 
 def _inside(root: Path, path: Path) -> bool:
@@ -1506,6 +1594,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "Not found"}, status=404)
             return
         ctype = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        preview_faces = (qs.get("preview_faces") or [""])[0]
+        if file_path.suffix.lower() == ".stl" and preview_faces:
+            try:
+                max_faces = max(5000, min(100000, int(preview_faces)))
+            except ValueError:
+                raise ValueError("preview_faces must be an integer")
+            data, original_faces, rendered_faces = _segmentation_preview_stl(file_path, max_faces)
+            self._bytes(data, ctype, headers={
+                "Cache-Control": "private, max-age=3600",
+                "X-Original-Faces": str(original_faces),
+                "X-Rendered-Faces": str(rendered_faces),
+            })
+            return
         self._bytes(file_path.read_bytes(), ctype)
 
 
