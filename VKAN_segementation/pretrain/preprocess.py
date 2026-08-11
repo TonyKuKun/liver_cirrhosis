@@ -65,7 +65,7 @@ except ImportError:
             get_z_range_from_bone = None  # type: ignore
 
 
-PRETRAIN_ALGORITHM_VERSION = "2026-08-09-v19-final-largest-component"
+PRETRAIN_ALGORITHM_VERSION = "2026-08-11-v24-supported-opening-restore8"
 PRETRAIN_META_NAME = "pretrain_meta.json"
 PRETRAIN_NII_NAME = "pretrain.nii.gz"
 MAX_STL_BYTES = 20_000 * 1024
@@ -86,6 +86,7 @@ TIPS_LUMEN_FILL_RADIUS_MM = 5.0
 TIPS_LUMEN_FILL_BIN_MM = 2.0
 HU_MARGIN = 5.0  # 门静脉 HU 采样后上下各扩展的边距
 HU_LOW_FLOOR = 75.0
+OPENING_RESTORE_MIN_CORE_NEIGHBORS = 8
 DEFAULT_HU_HIGH_CAP = 600.0
 TIPS_HU_HIGH_CAP = 3071.0
 
@@ -877,10 +878,21 @@ def _get_tips_exclusion_mask_fast(
 
 
 def _morphological_cleanup(mask: np.ndarray) -> np.ndarray:
-    """形态学清理：opening 去噪 + closing 补小洞。"""
+    """Remove opening noise while restoring well-supported boundary voxels."""
     if ndi is None:
         return mask
-    mask = ndi.binary_opening(mask, iterations=1)
+
+    original = np.asarray(mask, dtype=bool)
+    opened = ndi.binary_opening(original, iterations=1)
+    core_support = ndi.convolve(
+        opened.astype(np.uint8),
+        np.ones((3, 3, 3), dtype=np.uint8),
+        mode="constant",
+        cval=0,
+    )
+    mask = opened | (
+        original & (core_support >= OPENING_RESTORE_MIN_CORE_NEIGHBORS)
+    )
     mask = ndi.binary_closing(mask, iterations=1)
     # 只填小洞
     filled = ndi.binary_fill_holes(mask)
@@ -1809,6 +1821,10 @@ def pretrain_patient(case, force: bool = False) -> PretrainResult:
         "z_standardization": z_info,
         "hu_sampling": hu_info,
         "organ_subtraction": excl_info,
+        "morphology_cleanup": {
+            "method": "opening_supported_boundary_restore",
+            "min_core_neighbors": OPENING_RESTORE_MIN_CORE_NEIGHBORS,
+        },
         "tips": tips_info,
         "final_component_filter": final_component_info,
         "region_grow": grow_info,

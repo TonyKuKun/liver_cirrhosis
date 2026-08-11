@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -156,12 +157,16 @@ class VesselNiiDataset(Dataset):
         crop_source: str = "union",
         require_pretrain_stl: bool = False,
         include_invalid: bool = False,
+        cache_dir: str | Path | None = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.grid_size = int(grid_size)
         self.label_threshold = float(label_threshold)
         self.roi_margin = int(roi_margin)
         self.crop_source = crop_source
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cases = discover_nii_cases(
             self.data_root,
             pretrain_name=pretrain_name,
@@ -176,8 +181,29 @@ class VesselNiiDataset(Dataset):
     def __len__(self) -> int:
         return len(self.cases)
 
-    def __getitem__(self, idx: int) -> dict:
-        case = self.cases[idx]
+    def _cache_path(self, case: NiiCase) -> Path:
+        """Use a digest so patient names cannot create unsafe or colliding filenames."""
+        identity = f"{case.path.resolve()}\0{case.name}".encode("utf-8")
+        return self.cache_dir / f"{hashlib.sha256(identity).hexdigest()[:20]}.pt"  # type: ignore[operator]
+
+    @staticmethod
+    def _file_signature(path: Path) -> dict[str, int | str]:
+        stat = path.stat()
+        return {"path": str(path.resolve()), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+    def _cache_signature(self, case: NiiCase) -> dict[str, object]:
+        return {
+            "version": 1,
+            "case": case.name,
+            "pretrain": self._file_signature(case.pretrain_nii),
+            "label": self._file_signature(case.label_nii),
+            "grid_size": self.grid_size,
+            "label_threshold": self.label_threshold,
+            "roi_margin": self.roi_margin,
+            "crop_source": self.crop_source,
+        }
+
+    def _build_item(self, case: NiiCase) -> dict:
         pre, affine = _load_nii(case.pretrain_nii)
         label, label_affine = _load_nii(case.label_nii)
         label_space_matches = bool(tuple(label.shape) == tuple(pre.shape) and np.allclose(affine, label_affine))
@@ -205,6 +231,62 @@ class VesselNiiDataset(Dataset):
             "label_resampled_to_pretrain": torch.tensor(not label_space_matches),
             "is_post_tips": torch.tensor(float(case.is_post_tips), dtype=torch.float32),
         }
+
+    def _save_cached_item(self, case: NiiCase, item: dict) -> None:
+        if self.cache_dir is None:
+            return
+        cache_path = self._cache_path(case)
+        temp_path = cache_path.with_name(f"{cache_path.name}.tmp")
+        torch.save({"signature": self._cache_signature(case), "item": item}, temp_path)
+        temp_path.replace(cache_path)
+
+    def cache_case(self, idx: int, force: bool = False) -> bool:
+        """Materialize one case and return whether a cache file was written."""
+        if self.cache_dir is None:
+            return False
+        case = self.cases[idx]
+        cache_path = self._cache_path(case)
+        signature = self._cache_signature(case)
+        if not force and cache_path.exists():
+            try:
+                cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+                if (
+                    isinstance(cached, dict)
+                    and cached.get("signature") == signature
+                    and isinstance(cached.get("item"), dict)
+                ):
+                    return False
+            except (OSError, RuntimeError, EOFError, ValueError, KeyError, AttributeError, TypeError):
+                pass
+        self._save_cached_item(case, self._build_item(case))
+        return True
+
+    def build_cache(self, force: bool = False) -> int:
+        """Materialize all cases before training starts; return number of files written."""
+        if self.cache_dir is None:
+            return 0
+        return sum(self.cache_case(index, force=force) for index in range(len(self)))
+
+    def __getitem__(self, idx: int) -> dict:
+        case = self.cases[idx]
+        if self.cache_dir is not None:
+            cache_path = self._cache_path(case)
+            signature = self._cache_signature(case)
+            if cache_path.exists():
+                try:
+                    cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+                    if (
+                        isinstance(cached, dict)
+                        and cached.get("signature") == signature
+                        and isinstance(cached.get("item"), dict)
+                    ):
+                        return cached["item"]
+                except (OSError, RuntimeError, EOFError, ValueError, KeyError, AttributeError, TypeError):
+                    pass
+            item = self._build_item(case)
+            self._save_cached_item(case, item)
+            return item
+        return self._build_item(case)
 
 
 class VesselSTLDataset(Dataset):

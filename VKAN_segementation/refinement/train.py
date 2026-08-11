@@ -163,6 +163,12 @@ def main() -> None:
     parser.add_argument("--crop_source", choices=("union", "pretrain", "label"), default="pretrain")
     parser.add_argument("--include_invalid", action="store_true", help="Compatibility option; refinement datasets only skip $-marked folders.")
     parser.add_argument("--grid_size", type=int, default=96)
+    parser.add_argument(
+        "--cache_dir",
+        default=str(Path(__file__).resolve().parent / "cache"),
+        help="Directory for preprocessed NIfTI tensors (created by data_preprocess.py).",
+    )
+    parser.add_argument("--no_cache", action="store_true", help="Disable the NIfTI preprocessing cache.")
     parser.add_argument("--epochs", type=int, default=400)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -213,6 +219,7 @@ def main() -> None:
         flush=True,
     )
     if args.dataset == "nii":
+        cache_dir = None if args.no_cache else Path(args.cache_dir)
         ds = VesselNiiDataset(
             args.data_root,
             grid_size=args.grid_size,
@@ -223,8 +230,14 @@ def main() -> None:
             roi_margin=args.roi_margin,
             crop_source=args.crop_source,
             include_invalid=args.include_invalid,
+            cache_dir=cache_dir,
         )
+        if cache_dir is not None:
+            print(f"[train] preparing NIfTI cache in {cache_dir}", flush=True)
+            written = ds.build_cache()
+            print(f"[train] cache ready: {len(ds)} cases ({written} files written)", flush=True)
     else:
+        cache_dir = None
         ds = VesselSTLDataset(args.data_root, grid_size=args.grid_size, require_pretrain=True, include_review=args.include_review)
     print(f"[train] usable patients={len(ds)}", flush=True)
     print(f"[train] patients preview: {_preview_names([case.name for case in ds.cases])}", flush=True)
@@ -305,6 +318,7 @@ def main() -> None:
                 "grid_size": args.grid_size,
                 "roi_margin": args.roi_margin,
                 "crop_source": args.crop_source,
+                "cache_dir": None if cache_dir is None else str(cache_dir),
             },
             indent=2,
         ),
@@ -332,12 +346,11 @@ def main() -> None:
             else:
                 epochs_without_improvement += 1
             torch.save(checkpoint, out_dir / "last.pt")
-            if epoch == 1 or epoch % 5 == 0:
-                print(
-                    f"[train] epoch={epoch:03d} loss={train_log['loss']:.4f} dice={train_log['dice']:.4f} "
-                    f"val_loss={val_log['loss']:.4f} val_dice={val_log['dice']:.4f}",
-                    flush=True,
-                )
+            print(
+                f"[train] epoch={epoch:03d} loss={train_log['loss']:.4f} dice={train_log['dice']:.4f} "
+                f"val_loss={val_log['loss']:.4f} val_dice={val_log['dice']:.4f}",
+                flush=True,
+            )
             if args.patience > 0 and epochs_without_improvement >= args.patience:
                 print(
                     f"[train] early stopping at epoch={epoch:03d}; validation Dice did not improve "

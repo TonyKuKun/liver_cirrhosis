@@ -94,5 +94,6 @@
   "pretrain_stl_name": "pretrain.stl",
   "grid_size": 96,
   "roi_margin": 24,
-  "crop_source": "pretrain"
+  "crop_source": "pretrain",
+  "cache_dir": "E:\\pycharm_code\\liver_cirrhosis\\VKAN_segementation\\refinement\\cache"
 }

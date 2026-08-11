@@ -44,6 +44,16 @@ Train:
 py VKAN_segementation\refinement\train.py --data_root D:\your_patient_root --out_dir VKAN_segementation\runs\nnVnet3 --dataset nii --model nnVnet --grid_size 96 --epochs 400 --batch_size 1
 ```
 
+For faster repeated training runs, materialize the NIfTI crop/resize step once:
+
+```powershell
+py VKAN_segementation\refinement\data_preprocess.py --data_root D:\your_patient_root
+```
+
+This writes validated tensor files to `refinement\cache`; `train.py` uses that directory by default
+and rebuilds entries automatically when an input file or preprocessing option changes. Use `--force`
+with `data_preprocess.py` to regenerate all entries, or `--no_cache` with training to disable caching.
+
 Training writes `best.pt` when validation dice improves and overwrites `last.pt`
 after every epoch. If training is interrupted, continue from `last.pt` with:
 

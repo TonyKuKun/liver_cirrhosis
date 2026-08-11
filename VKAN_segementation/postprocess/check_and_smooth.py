@@ -112,6 +112,38 @@ def _call_mesh_cleanup(mesh) -> None:
             method()
 
 
+def keep_largest_connected_component(input_path: Path, output_path: Path) -> tuple[Path, dict]:
+    """Keep the largest mesh component and export it as an STL file."""
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mesh = _load_mesh(input_path, process=False)
+    _call_mesh_cleanup(mesh)
+    if len(mesh.vertices) == 0 or len(mesh.faces) == 0 or mesh.is_empty:
+        raise RuntimeError("input mesh is empty after cleanup")
+
+    components = mesh.split(only_watertight=False)
+    if not components:
+        raise RuntimeError("input mesh has no connected components")
+
+    # Surface area is the geometric definition of the largest region. Faces make
+    # the selection deterministic if components have the same area.
+    largest_component = max(components, key=lambda component: (float(component.area), len(component.faces)))
+    _call_mesh_cleanup(largest_component)
+    if len(largest_component.vertices) == 0 or len(largest_component.faces) == 0 or largest_component.is_empty:
+        raise RuntimeError("largest connected component is empty after cleanup")
+
+    largest_component.fix_normals()
+    largest_component.export(str(output_path), file_type="stl")
+    return output_path, {
+        "method": "largest_connected_component_by_surface_area",
+        "input_components": int(len(components)),
+        "kept_faces": int(len(largest_component.faces)),
+        "kept_surface_area": float(largest_component.area),
+    }
+
+
 def smooth_stl(input_path: Path, output_path: Path, iterations: int = 80, strength: float = 0.55) -> tuple[Path, dict]:
     import trimesh
     from trimesh.smoothing import filter_humphrey, filter_laplacian, filter_taubin
@@ -265,6 +297,9 @@ def check_and_smooth_case(case, iterations: int = 80, force: bool = False, stren
     if out.exists() and not force:
         return out
 
+    original_summary = _mesh_summary(case.predict_stl)
+    original_quality = _quality_check(original_summary)
+    _predict_path, component_stats = keep_largest_connected_component(case.predict_stl, case.predict_stl)
     input_summary = _mesh_summary(case.predict_stl)
     input_quality = _quality_check(input_summary)
     smoothing_stats = None
@@ -284,13 +319,16 @@ def check_and_smooth_case(case, iterations: int = 80, force: bool = False, stren
 
     report = {
         "mesh": smooth_summary,
-        "input_mesh": input_summary,
+        "input_mesh": original_summary,
+        "largest_component_mesh": input_summary,
         "smooth_mesh": smooth_summary,
-        "input_quality_check": input_quality,
+        "input_quality_check": original_quality,
+        "largest_component_quality_check": input_quality,
         "quality_check": smooth_quality,
+        "largest_connected_component": component_stats,
         "smooth_iterations": (smoothing_stats or {}).get("effective_iterations", _effective_iterations(iterations)),
         "smoothing": smoothing_stats or {"method": "copy-fallback", "requested_iterations": int(iterations), "error": error},
-        "outputs": {"smooth_stl": str(out)},
+        "outputs": {"predict_stl": str(case.predict_stl), "smooth_stl": str(out)},
     }
 
     json_path, legacy_json_path, png_path = _report_paths(case.path)

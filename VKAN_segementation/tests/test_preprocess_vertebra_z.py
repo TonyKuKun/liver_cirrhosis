@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+from scipy import ndimage as ndi
 
 try:
     import nibabel as nib
@@ -16,6 +17,7 @@ from pretrain.preprocess import (
     _get_tips_exclusion_mask_fast,
     _keep_largest_connected_component,
     _limit_to_portal_reference_neighborhood,
+    _morphological_cleanup,
     _save_pretrain_nifti,
     _standardize_z_from_bone,
 )
@@ -262,6 +264,18 @@ class PreprocessVertebraZTests(unittest.TestCase):
         self.assertEqual(info["components"], 2)
         self.assertEqual(info["removed_voxels"], 1)
         self.assertFalse(filtered[6, 6, 6])
+
+    def test_supported_opening_restores_boundary_without_restoring_isolated_noise(self) -> None:
+        mask = np.zeros((11, 11, 11), dtype=bool)
+        mask[3:8, 3:8, 3:8] = True
+        mask[1, 1, 1] = True
+
+        baseline = ndi.binary_opening(mask, iterations=1)
+        baseline = ndi.binary_closing(baseline, iterations=1)
+        filtered = _morphological_cleanup(mask)
+
+        self.assertGreater(int(filtered.sum()), int(baseline.sum()))
+        self.assertFalse(filtered[1, 1, 1])
 
 
 if __name__ == "__main__":

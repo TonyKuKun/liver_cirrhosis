@@ -187,7 +187,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Generate prediction from pretrain NIfTI or STL.")
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
-    parser.add_argument("--checkpoint", default=r'E:\pycharm_code\liver_cirrhosis\VKAN_segementation\VKAN_segementation\runs\nnVnet4\best.pt')
+    parser.add_argument("--checkpoint", default=r'E:\pycharm_code\liver_cirrhosis\VKAN_segementation\refinement\VKAN_segementation\runs\nnVnet\best.pt')
     parser.add_argument("--patient", default=None)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument(
