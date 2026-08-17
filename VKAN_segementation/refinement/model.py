@@ -95,6 +95,85 @@ class DiceBCELoss(nn.Module):
         return self.bce_weight * bce + self.dice_weight * dice
 
 
+def _soft_erode_3d(volume: torch.Tensor) -> torch.Tensor:
+    depth = -F.max_pool3d(-volume, kernel_size=(3, 1, 1), stride=1, padding=(1, 0, 0))
+    height = -F.max_pool3d(-volume, kernel_size=(1, 3, 1), stride=1, padding=(0, 1, 0))
+    width = -F.max_pool3d(-volume, kernel_size=(1, 1, 3), stride=1, padding=(0, 0, 1))
+    return torch.minimum(torch.minimum(depth, height), width)
+
+
+def _soft_open_3d(volume: torch.Tensor) -> torch.Tensor:
+    eroded = _soft_erode_3d(volume)
+    return F.max_pool3d(eroded, kernel_size=3, stride=1, padding=1)
+
+
+def _soft_skeletonize_3d(volume: torch.Tensor, iterations: int) -> torch.Tensor:
+    opened = _soft_open_3d(volume)
+    skeleton = F.relu(volume - opened)
+    for _ in range(iterations):
+        volume = _soft_erode_3d(volume)
+        opened = _soft_open_3d(volume)
+        delta = F.relu(volume - opened)
+        skeleton = skeleton + F.relu(delta - skeleton * delta)
+    return skeleton
+
+
+class SoftCLDiceLoss(nn.Module):
+    """Differentiable 3D centerline Dice loss for tubular structures."""
+
+    def __init__(self, iterations: int = 5, smooth: float = 1e-6) -> None:
+        super().__init__()
+        if iterations < 0:
+            raise ValueError("iterations must be greater than or equal to 0")
+        self.iterations = int(iterations)
+        self.smooth = float(smooth)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        probability = torch.sigmoid(logits)
+        predicted_skeleton = _soft_skeletonize_3d(probability, self.iterations)
+        target_skeleton = _soft_skeletonize_3d(target, self.iterations)
+        dims = tuple(range(1, probability.ndim))
+
+        topology_precision = (
+            (predicted_skeleton * target).sum(dim=dims) + self.smooth
+        ) / (predicted_skeleton.sum(dim=dims) + self.smooth)
+        topology_sensitivity = (
+            (target_skeleton * probability).sum(dim=dims) + self.smooth
+        ) / (target_skeleton.sum(dim=dims) + self.smooth)
+        cldice = (2.0 * topology_precision * topology_sensitivity + self.smooth) / (
+            topology_precision + topology_sensitivity + self.smooth
+        )
+        return 1.0 - cldice.mean()
+
+
+class DiceBCECLDiceLoss(nn.Module):
+    """Blend the existing region loss with a topology-aware clDice term."""
+
+    def __init__(
+        self,
+        cldice_weight: float = 0.2,
+        skeleton_iterations: int = 5,
+        dice_weight: float = 0.6,
+        bce_weight: float = 0.4,
+    ) -> None:
+        super().__init__()
+        self.base_loss = DiceBCELoss(dice_weight=dice_weight, bce_weight=bce_weight)
+        self.cldice_loss = SoftCLDiceLoss(iterations=skeleton_iterations)
+        self.set_cldice_weight(cldice_weight)
+
+    def set_cldice_weight(self, weight: float) -> None:
+        if not 0.0 <= weight <= 1.0:
+            raise ValueError("cldice_weight must be between 0 and 1")
+        self.cldice_weight = float(weight)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        base = self.base_loss(logits, target)
+        if self.cldice_weight == 0.0:
+            return base
+        topology = self.cldice_loss(logits, target)
+        return (1.0 - self.cldice_weight) * base + self.cldice_weight * topology
+
+
 def _largest_connected_component(mask: np.ndarray) -> np.ndarray:
     """Return the largest 26-connected component of a binary 3D mask."""
     if not mask.any():

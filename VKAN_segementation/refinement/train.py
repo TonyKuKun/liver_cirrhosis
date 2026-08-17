@@ -12,16 +12,19 @@ from statsmodels.sandbox.stats.multicomp import TukeyHSDResults
 from torch.utils.data import DataLoader, random_split
 
 try:
+    from .augmentation import FILL_VARIANTS_PER_CASE, FixedFillAugmentedDataset
     from .dataset import VesselNiiDataset, VesselSTLDataset, collate_fn
-    from .model import MODEL_NAMES, DiceBCELoss, create_refinement_model, dice_score
+    from .model import MODEL_NAMES, DiceBCECLDiceLoss, create_refinement_model, dice_score
 except ImportError:
     try:
+        from VKAN_segementation.refinement.augmentation import FILL_VARIANTS_PER_CASE, FixedFillAugmentedDataset
         from VKAN_segementation.refinement.dataset import VesselNiiDataset, VesselSTLDataset, collate_fn
-        from VKAN_segementation.refinement.model import MODEL_NAMES, DiceBCELoss, create_refinement_model, dice_score
+        from VKAN_segementation.refinement.model import MODEL_NAMES, DiceBCECLDiceLoss, create_refinement_model, dice_score
     except ImportError:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from refinement.augmentation import FILL_VARIANTS_PER_CASE, FixedFillAugmentedDataset
         from refinement.dataset import VesselNiiDataset, VesselSTLDataset, collate_fn
-        from refinement.model import MODEL_NAMES, DiceBCELoss, create_refinement_model, dice_score
+        from refinement.model import MODEL_NAMES, DiceBCECLDiceLoss, create_refinement_model, dice_score
 
 
 def set_seed(seed: int) -> None:
@@ -31,7 +34,14 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def run_epoch(model, loader, criterion, device, optimizer=None, dice_largest_component: bool = False) -> dict[str, float]:
+def run_epoch(
+    model,
+    loader,
+    criterion,
+    device,
+    optimizer=None,
+    dice_largest_component: bool = False,
+) -> dict[str, float]:
     train = optimizer is not None
     model.train(train)
     total_loss = 0.0
@@ -82,6 +92,15 @@ def _epochs_without_improvement(history: list[dict]) -> int:
         else:
             epochs_without_improvement += 1
     return epochs_without_improvement
+
+
+def _cldice_weight_for_epoch(epoch: int, max_weight: float, warmup_epochs: int, ramp_epochs: int) -> float:
+    if epoch <= warmup_epochs:
+        return 0.0
+    if ramp_epochs == 0:
+        return float(max_weight)
+    progress = min(1.0, (epoch - warmup_epochs) / ramp_epochs)
+    return float(max_weight) * progress
 
 
 def _plot_training_history(history: list[dict], plot_path: Path) -> Path | None:
@@ -149,10 +168,27 @@ def _preview_names(names: list[str], limit: int = 8) -> str:
     return preview
 
 
+def _add_input_augmentation_arguments(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--input_error_augmentation",
+        dest="input_error_augmentation",
+        action="store_true",
+        help="Expand each training case into the original plus five fixed SMV centerline truncations.",
+    )
+    group.add_argument(
+        "--no_input_error_augmentation",
+        dest="input_error_augmentation",
+        action="store_false",
+        help="Use only the original training cases.",
+    )
+    parser.set_defaults(input_error_augmentation=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train VKAN refinement model from cropped NIfTI masks.")
     parser.add_argument("--data_root", default=r"F:\PCG data\dataset\test4all_sample")
-    parser.add_argument("--out_dir", default="VKAN_segementation/runs/nnVnet")
+    parser.add_argument("--out_dir", default="VKAN_segementation/runs/nnVnet_loss0.2")
     parser.add_argument("--dataset", choices=("nii", "stl"), default="nii")
     parser.add_argument("--model", choices=MODEL_NAMES, default="nnVnet", help="Refinement model architecture.")
     parser.add_argument("--pretrain_name", default="pretrain.nii.gz")
@@ -162,7 +198,7 @@ def main() -> None:
     parser.add_argument("--roi_margin", type=int, default=24)
     parser.add_argument("--crop_source", choices=("union", "pretrain", "label"), default="pretrain")
     parser.add_argument("--include_invalid", action="store_true", help="Compatibility option; refinement datasets only skip $-marked folders.")
-    parser.add_argument("--grid_size", type=int, default=96)
+    parser.add_argument("--grid_size", type=int, default=128)
     parser.add_argument(
         "--cache_dir",
         default=str(Path(__file__).resolve().parent / "cache"),
@@ -170,9 +206,34 @@ def main() -> None:
     )
     parser.add_argument("--no_cache", action="store_true", help="Disable the NIfTI preprocessing cache.")
     parser.add_argument("--epochs", type=int, default=400)
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--base_channels", type=int, default=24)
+    _add_input_augmentation_arguments(parser)
+    parser.add_argument(
+        "--cldice_weight",
+        type=float,
+        default=0.2,
+        help="Final soft-clDice weight in the Dice+BCE/clDice blend; 0 disables clDice.",
+    )
+    parser.add_argument(
+        "--cldice_warmup_epochs",
+        type=int,
+        default=10,
+        help="Train with Dice+BCE only for this many initial epochs.",
+    )
+    parser.add_argument(
+        "--cldice_ramp_epochs",
+        type=int,
+        default=30,
+        help="Linearly increase clDice to its final weight over this many epochs.",
+    )
+    parser.add_argument(
+        "--cldice_iterations",
+        type=int,
+        default=5,
+        help="Number of differentiable 3D skeletonization iterations.",
+    )
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=30)
     parser.add_argument(
@@ -183,7 +244,7 @@ def main() -> None:
     parser.add_argument(
         "--patience",
         type=int,
-        default=0,
+        default=20,
         help="Stop after this many epochs without validation Dice improvement; 0 disables early stopping.",
     )
     parser.add_argument(
@@ -206,6 +267,16 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.patience < 0:
         parser.error("--patience must be greater than or equal to 0")
+    if not 0.0 <= args.cldice_weight <= 1.0:
+        parser.error("--cldice_weight must be between 0 and 1")
+    if args.cldice_warmup_epochs < 0:
+        parser.error("--cldice_warmup_epochs must be greater than or equal to 0")
+    if args.cldice_ramp_epochs < 0:
+        parser.error("--cldice_ramp_epochs must be greater than or equal to 0")
+    if args.cldice_iterations < 0:
+        parser.error("--cldice_iterations must be greater than or equal to 0")
+    if args.input_error_augmentation and args.dataset != "nii":
+        parser.error("--input_error_augmentation requires --dataset nii")
     plot_path = (
         Path(args.plot_path)
         if args.plot_path is not None
@@ -258,11 +329,28 @@ def main() -> None:
     print(f"[train] train preview: {_preview_names(train_names)}", flush=True)
     if val_ds is not None:
         print(f"[train] val preview: {_preview_names(val_names)}", flush=True)
+    if args.input_error_augmentation:
+        base_train_len = len(train_ds)
+        feature_count = sum(
+            (Path(args.data_root) / name / "features" / "unified_features.json").exists()
+            for name in train_names
+        )
+        train_ds = FixedFillAugmentedDataset(train_ds, data_root=args.data_root)
+        print(
+            f"[train] fixed SMV fill augmentation: {base_train_len} cases x "
+            f"{FILL_VARIANTS_PER_CASE} variants = {len(train_ds)} training samples; "
+            f"centerline_features={feature_count}/{base_train_len}",
+            flush=True,
+        )
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
     val_loader = None if val_ds is None else DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate_fn, num_workers=0)
     print(
         f"[train] dataloaders ready train_batches={len(train_loader)} "
         f"val_batches={0 if val_loader is None else len(val_loader)} batch_size={args.batch_size}",
+        flush=True,
+    )
+    print(
+        f"[train] input_error_augmentation={args.input_error_augmentation}",
         flush=True,
     )
 
@@ -291,7 +379,10 @@ def main() -> None:
         args.model = checkpoint.get("model_name", ckpt_args.get("model", args.model))
 
     model = create_refinement_model(args.model, base_channels=args.base_channels).to(device)
-    criterion = DiceBCELoss()
+    criterion = DiceBCECLDiceLoss(
+        cldice_weight=0.0,
+        skeleton_iterations=args.cldice_iterations,
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -327,7 +418,14 @@ def main() -> None:
 
     try:
         for epoch in range(start_epoch, args.epochs + 1):
-            print(f"[train] epoch={epoch:03d} start", flush=True)
+            cldice_weight = _cldice_weight_for_epoch(
+                epoch,
+                max_weight=args.cldice_weight,
+                warmup_epochs=args.cldice_warmup_epochs,
+                ramp_epochs=args.cldice_ramp_epochs,
+            )
+            criterion.set_cldice_weight(cldice_weight)
+            print(f"[train] epoch={epoch:03d} start cldice_weight={cldice_weight:.4f}", flush=True)
             train_log = run_epoch(
                 model, train_loader, criterion, device, optimizer,
                 dice_largest_component=args.dice_largest_component,
@@ -336,6 +434,8 @@ def main() -> None:
                 run_epoch(model, val_loader, criterion, device, dice_largest_component=args.dice_largest_component)
                 if val_loader is not None else train_log
             )
+            train_log["cldice_weight"] = cldice_weight
+            val_log["cldice_weight"] = cldice_weight
             history.append({"epoch": epoch, "train": train_log, "val": val_log})
             checkpoint = _checkpoint_payload(model, optimizer, args, epoch, best_dice, history)
             if val_log["dice"] > best_dice:
